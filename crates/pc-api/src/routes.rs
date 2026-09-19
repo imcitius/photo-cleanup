@@ -1,0 +1,361 @@
+use axum::extract::{Path as AxPath, Query, State};
+use axum::http::{header, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
+use axum::Json;
+use pc_db::{BundleState, FamilyRow};
+use pc_family::Role;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use crate::AppState;
+
+type Api<T> = Result<Json<T>, Fail>;
+
+/// An error that reaches the browser as JSON rather than an empty 500.
+pub struct Fail(anyhow::Error);
+
+impl<E: Into<anyhow::Error>> From<E> for Fail {
+    fn from(e: E) -> Self {
+        Self(e.into())
+    }
+}
+
+impl IntoResponse for Fail {
+    fn into_response(self) -> Response {
+        tracing::error!("{:#}", self.0);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": self.0.to_string() })),
+        )
+            .into_response()
+    }
+}
+
+// ---- static assets ------------------------------------------------------
+
+pub async fn index() -> Html<&'static str> {
+    Html(include_str!("../web/index.html"))
+}
+
+pub async fn asset(AxPath(file): AxPath<String>) -> Response {
+    let body: &'static [u8] = match file.as_str() {
+        "app.css" => include_bytes!("../web/app.css"),
+        "app.js" => include_bytes!("../web/app.js"),
+        _ => return (StatusCode::NOT_FOUND, "нет такого файла").into_response(),
+    };
+    let mime = mime_guess::from_path(&file).first_or_octet_stream();
+    ([(header::CONTENT_TYPE, mime.as_ref())], body).into_response()
+}
+
+// ---- dashboard ----------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct RoleTotal {
+    role: &'static str,
+    label: &'static str,
+    count: i64,
+    bytes: i64,
+    removable: bool,
+}
+
+#[derive(Serialize)]
+pub struct Status {
+    files: i64,
+    images: i64,
+    skipped: i64,
+    families: i64,
+    families_multi: i64,
+    roles: Vec<RoleTotal>,
+    derived_removable_bytes: i64,
+    derived_blocked: i64,
+    quarantined_bytes: i64,
+    mislabelled: i64,
+}
+
+pub async fn status(State(st): State<Arc<AppState>>) -> Api<Status> {
+    let db = st.db.lock().unwrap();
+    let idx = db.index_stats()?;
+
+    let roles = db
+        .role_counts()?
+        .into_iter()
+        .map(|(role, count, bytes)| {
+            let r = Role::parse(&role).unwrap_or(Role::Unknown);
+            RoleTotal {
+                role: r.as_str(),
+                label: r.label(),
+                count,
+                bytes,
+                removable: r.removable_by_default(),
+            }
+        })
+        .collect();
+
+    let bundles = db.list_bundles(&pc_db::model::BundleFilter {
+        state: Some(BundleState::Present),
+        ..Default::default()
+    })?;
+    let derived_removable_bytes = bundles
+        .iter()
+        .filter(|b| b.removable())
+        .map(|b| b.size)
+        .sum();
+    let derived_blocked = bundles.iter().filter(|b| !b.removable()).count() as i64;
+    let quarantined_bytes = db.journal_quarantined(None)?.iter().map(|e| e.size).sum();
+
+    Ok(Json(Status {
+        files: idx.total,
+        images: idx.images,
+        skipped: idx.skipped,
+        families: db.family_count(false)?,
+        families_multi: db.family_count(true)?,
+        roles,
+        derived_removable_bytes,
+        derived_blocked,
+        quarantined_bytes,
+        mislabelled: db.mislabelled_count()?,
+    }))
+}
+
+// ---- families -----------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct FamiliesQuery {
+    #[serde(default = "default_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+    /// Include families of a single file.
+    #[serde(default)]
+    all: bool,
+}
+
+fn default_limit() -> i64 {
+    30
+}
+
+#[derive(Serialize)]
+pub struct MemberOut {
+    file_id: i64,
+    name: String,
+    dir: String,
+    role: &'static str,
+    role_label: &'static str,
+    removable: bool,
+    size: i64,
+    width: i64,
+    height: i64,
+    container: String,
+    quality: f64,
+    breakdown: String,
+    evidence: Option<serde_json::Value>,
+    thumb: Option<String>,
+    is_keeper: bool,
+}
+
+#[derive(Serialize)]
+pub struct FamilyOut {
+    id: i64,
+    taken_at: Option<i64>,
+    camera: Option<String>,
+    total_size: i64,
+    removable_bytes: i64,
+    members: Vec<MemberOut>,
+}
+
+fn role_rank(r: Role) -> u8 {
+    match r {
+        Role::Original => 0,
+        Role::CameraJpeg => 1,
+        Role::Converted => 2,
+        Role::Export => 3,
+        Role::Resize => 4,
+        Role::Copy => 5,
+        Role::Unknown => 6,
+    }
+}
+
+fn to_out(f: FamilyRow) -> FamilyOut {
+    let total_size = f.total_size();
+    let mut members: Vec<MemberOut> = f
+        .members
+        .into_iter()
+        .map(|m| {
+            let role = Role::parse(&m.role).unwrap_or(Role::Unknown);
+            MemberOut {
+                file_id: m.file_id,
+                dir: m
+                    .path
+                    .rsplit_once('/')
+                    .map_or(String::new(), |(a, _)| a.into()),
+                name: m.name,
+                role: role.as_str(),
+                role_label: role.label(),
+                removable: role.removable_by_default(),
+                size: m.size,
+                width: m.width,
+                height: m.height,
+                container: m.container,
+                quality: m.quality,
+                breakdown: m.breakdown,
+                evidence: m.evidence.and_then(|e| serde_json::from_str(&e).ok()),
+                thumb: m.thumb_key,
+                is_keeper: m.is_keeper,
+            }
+        })
+        .collect();
+    // Derivation order, so the tree reads top-down from the photograph.
+    members.sort_by_key(|m| {
+        (
+            role_rank(Role::parse(m.role).unwrap_or(Role::Unknown)),
+            std::cmp::Reverse(m.size),
+        )
+    });
+    FamilyOut {
+        id: f.id,
+        taken_at: f.taken_at,
+        camera: f.camera,
+        total_size,
+        removable_bytes: members.iter().filter(|m| m.removable).map(|m| m.size).sum(),
+        members,
+    }
+}
+
+#[derive(Serialize)]
+pub struct FamiliesPage {
+    total: i64,
+    families: Vec<FamilyOut>,
+}
+
+pub async fn families(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<FamiliesQuery>,
+) -> Api<FamiliesPage> {
+    let db = st.db.lock().unwrap();
+    let rows = db.families(!q.all, q.limit.clamp(1, 200), q.offset.max(0))?;
+    Ok(Json(FamiliesPage {
+        total: db.family_count(!q.all)?,
+        families: rows.into_iter().map(to_out).collect(),
+    }))
+}
+
+pub async fn family(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) -> Response {
+    let db = st.db.lock().unwrap();
+    match db.family(id) {
+        Ok(Some(f)) => Json(to_out(f)).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "нет такого семейства").into_response(),
+        Err(e) => Fail(e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct KeeperBody {
+    file_id: i64,
+}
+
+/// Change which member the family presents as its best version.
+pub async fn set_keeper(
+    State(st): State<Arc<AppState>>,
+    AxPath(id): AxPath<i64>,
+    Json(body): Json<KeeperBody>,
+) -> Response {
+    let db = st.db.lock().unwrap();
+    match db.set_family_keeper(id, body.file_id) {
+        Ok(true) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(false) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "файл не входит в это семейство" })),
+        )
+            .into_response(),
+        Err(e) => Fail(e).into_response(),
+    }
+}
+
+// ---- derived data -------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct BundleOut {
+    id: i64,
+    path: String,
+    kind: &'static str,
+    kind_label: &'static str,
+    file_count: i64,
+    size: i64,
+    removable: bool,
+    regenerable: bool,
+    blocked: Option<String>,
+    hint: Option<String>,
+    state: &'static str,
+}
+
+pub async fn derived(State(st): State<Arc<AppState>>) -> Api<Vec<BundleOut>> {
+    let db = st.db.lock().unwrap();
+    let rows = db.list_bundles(&pc_db::model::BundleFilter::default())?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|b| BundleOut {
+                id: b.id,
+                path: b.path,
+                kind: b.kind.as_str(),
+                kind_label: b.kind.label(),
+                file_count: b.file_count,
+                size: b.size,
+                removable: b.regenerable
+                    && b.blocked_code.is_none()
+                    && b.state == BundleState::Present,
+                regenerable: b.regenerable,
+                blocked: b.blocked_detail,
+                hint: b.rebuild_cost_hint,
+                state: match b.state {
+                    BundleState::Present => "present",
+                    BundleState::Quarantined => "quarantined",
+                    BundleState::Purged => "purged",
+                },
+            })
+            .collect(),
+    ))
+}
+
+// ---- pixels -------------------------------------------------------------
+
+pub async fn thumb(State(st): State<Arc<AppState>>, AxPath(key): AxPath<String>) -> Response {
+    // The key addresses content, so it is safe to cache hard; but reject
+    // anything that is not a plain hex key before touching the filesystem.
+    if key.len() != 32 || !key.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return (StatusCode::BAD_REQUEST, "некорректный ключ").into_response();
+    }
+    match st.thumbs.get(&key) {
+        Some(bytes) => (
+            [
+                (header::CONTENT_TYPE, "image/jpeg"),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "нет тамбнейла").into_response(),
+    }
+}
+
+/// The original frame, for looking closely.
+///
+/// Only paths the index already knows are served: the id is looked up in the
+/// database and the stored path used, so nothing the caller sends can reach
+/// a file the tool has not itself catalogued.
+pub async fn original(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) -> Response {
+    let path = {
+        let db = st.db.lock().unwrap();
+        match db.file(id) {
+            Ok(Some(f)) => f.path,
+            Ok(None) => return (StatusCode::NOT_FOUND, "нет такого файла").into_response(),
+            Err(e) => return Fail(e).into_response(),
+        }
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let mime = mime_guess::from_path(&path).first_or_octet_stream();
+            ([(header::CONTENT_TYPE, mime.as_ref())], bytes).into_response()
+        }
+        Err(e) => (StatusCode::NOT_FOUND, format!("не прочитать: {e}")).into_response(),
+    }
+}

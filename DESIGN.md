@@ -348,23 +348,28 @@ CREATE TABLE journal(
 ## 7. Границы модулей
 
 ```
-pc-core        типы, конфиг, ошибки, трассировка
-pc-walk        обход, шардинг по дискам, фильтры, стоп-листы
-pc-decode      magic-sniff, EXIF/XMP, embedded previews, scaled decode
-               FFI: libjpeg-turbo (mozjpeg-sys), libraw/rawler
-pc-hash        blake3, pixel-hash, pHash/dHash, crop-hashes
-pc-embed       ONNX Runtime (ort), MobileCLIP-S0, текстовые промпты, выбор EP
-pc-match       блочный GEMM, SIMD popcount, SSIM, ORB+RANSAC
-pc-provenance  XMP/DNG/shutter-id связи, роли, семейства, union-find
-pc-lightroom   чтение .lrcat, слияние каталогов, определение бэкапов
-pc-quality     скоринг keeper, резкость, экспозиция, детекция лиц, NIMA
-pc-series      группировка серий, ранжирование кадров
-pc-plan        политика → план, счётчики, dry-run
-pc-apply       перенос, верификация, журнал, undo
-pc-db          SQLite, миграции, чекпоинты
-pc-api         axum: HTTP + SSE
-pc-web         фронт, встроен через rust-embed
+pc-core        типы, определение диска и точки монтирования, кэш тамбнейлов
+pc-walk        обход, шардинг по дискам, фильтры, стоп-листы, бандлы
+pc-image       magic-sniff, EXIF/XMP, разбор TIFF/IFD, превью, тамбнейлы
+pc-hash        blake3, pixel-hash, pHash/dHash, crop-hashes, SSIM
+pc-family      точные связи, перцептивные кандидаты, роли, скоринг keeper
+pc-lightroom   чтение .lrcat только на чтение, проверка наличия мастеров
+pc-apply       карантин, откат, purge, журнал
+pc-db          SQLite, миграции, запросы
+pc-api         axum + встроенный фронтенд
 pc-cli         команды
+
+Ещё не написаны: pc-embed (ONNX, эмбеддинги и категоризатор),
+pc-series (серии и выбор лучшего кадра), pc-plan (политика и план).
+
+Отклонения от исходного плана, принятые при реализации:
+
+* **libraw и mozjpeg-sys не нужны.** Разбор IFD на чистом Rust достаёт
+  встроенное превью из любого TIFF-контейнера, а `scale_denom` не окупается
+  при корпусе такого размера.
+* **pc-provenance, pc-match и pc-quality объединены в pc-family** — они
+  работают над одними данными и делят union-find.
+* **pc-decode переименован в pc-image.**
 ```
 
 CLI:

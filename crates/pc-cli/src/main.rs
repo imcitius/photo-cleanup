@@ -40,6 +40,8 @@ enum Command {
     /// Семейства: один кадр — несколько представлений
     #[command(subcommand)]
     Families(FamiliesCmd),
+    /// Запустить веб-интерфейс
+    Serve(ServeArgs),
     /// Сводка по базе
     Status,
     /// Найденные каталоги Lightroom
@@ -51,6 +53,15 @@ struct ScanArgs {
     /// Корень обхода. Указывать /mnt/diskN/..., не /mnt/user/...
     #[arg(long = "root", required = true)]
     roots: Vec<PathBuf>,
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    /// Адрес. 0.0.0.0 чтобы открыть с других машин в сети.
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    bind: String,
+    #[arg(long)]
+    thumbs: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -238,6 +249,17 @@ fn main() -> Result<()> {
             }
             pc_cli::families::print_summary(&db)?;
             Ok(())
+        }
+        Command::Serve(a) => {
+            let thumbs = thumbs_dir(&cli.db, a.thumbs);
+            let addr: std::net::SocketAddr = a
+                .bind
+                .parse()
+                .with_context(|| format!("не разобрать адрес «{}»", a.bind))?;
+            // The database is reopened inside the server, so release ours.
+            drop(db);
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(pc_api::serve(&cli.db, &thumbs, addr))
         }
         Command::Status => cmd_status(&db),
         Command::Catalogs => cmd_catalogs(&db),

@@ -17,6 +17,7 @@ pc-apply     = { path = "crates/pc-apply" }
 pc-image     = { path = "crates/pc-image" }
 pc-hash      = { path = "crates/pc-hash" }
 pc-family    = { path = "crates/pc-family" }
+pc-api       = { path = "crates/pc-api" }
 
 anyhow = "1"
 thiserror = "2"
@@ -34,6 +35,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 kamadak-exif = "0.6"
 quick-xml = "0.38"
 memmap2 = "0.9"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs"] }
+mime_guess = "2"
 
 [profile.release]
 opt-level = 3

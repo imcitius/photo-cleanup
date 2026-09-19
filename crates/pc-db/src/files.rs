@@ -564,3 +564,26 @@ impl Db {
         Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
     }
 }
+
+impl Db {
+    /// Point a family at a different member as its best version.
+    /// Returns false when the file is not part of that family.
+    pub fn set_family_keeper(&self, family_id: i64, file_id: i64) -> Result<bool> {
+        let belongs: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM family_members WHERE family_id = ?1 AND file_id = ?2",
+                params![family_id, file_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if belongs.is_none() {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "UPDATE families SET keeper_file = ?1 WHERE id = ?2",
+            params![file_id, family_id],
+        )?;
+        Ok(true)
+    }
+}

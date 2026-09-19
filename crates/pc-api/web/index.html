@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>photo-cleanup</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <h1>photo-cleanup</h1>
+  <nav id="tabs">
+    <button data-tab="overview" class="active">Обзор</button>
+    <button data-tab="families">Семейства</button>
+    <button data-tab="derived">Производные данные</button>
+  </nav>
+  <span id="hint">J / K — навигация · Space — сменить лучший · Enter — крупно</span>
+</header>
+
+<main>
+  <section id="overview" class="tab active"></section>
+
+  <section id="families" class="tab">
+    <div class="toolbar">
+      <label><input type="checkbox" id="showSingles"> показывать одиночные кадры</label>
+      <span class="spacer"></span>
+      <button id="prev">←</button>
+      <span id="page"></span>
+      <button id="next">→</button>
+    </div>
+    <div id="familyList"></div>
+  </section>
+
+  <section id="derived" class="tab"></section>
+</main>
+
+<div id="lightbox" hidden>
+  <img id="lightboxImg" alt="">
+  <div id="lightboxCaption"></div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
