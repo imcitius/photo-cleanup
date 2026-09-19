@@ -9,6 +9,7 @@ license.workspace = true
 pc-core.workspace = true
 pc-db.workspace = true
 pc-family.workspace = true
+pc-apply.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 mime_guess.workspace = true

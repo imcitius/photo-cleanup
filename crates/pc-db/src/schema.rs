@@ -187,6 +187,15 @@ const MIGRATIONS: &[&str] = &[
 
     CREATE INDEX lr_files_path ON lr_files(path);
     "#,
+    // 005 — a file that has been moved out of the archive.
+    //
+    // Without this the planner keeps proposing files it already moved: the
+    // rows still say they are on disk, so the same work is offered again and
+    // the totals never go down.
+    r#"
+    ALTER TABLE files ADD COLUMN state TEXT NOT NULL DEFAULT 'present';
+    CREATE INDEX files_state ON files(state);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

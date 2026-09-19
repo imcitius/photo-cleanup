@@ -135,6 +135,9 @@ pub fn quarantine_file(
             }
             let note = (moved_with > 0).then(|| format!("спутников перенесено: {moved_with}"));
             db.journal_finish(jid, JournalStatus::Done, note.as_deref())?;
+            // The row must stop claiming the file is still in the archive,
+            // or the planner will offer the same work again forever.
+            db.set_file_state(c.file_id, "quarantined")?;
             Ok((FileOutcome::Moved, String::new()))
         }
         Err(e) => {

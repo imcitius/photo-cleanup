@@ -323,10 +323,53 @@ fn the_keeper_disappearing_stops_the_move() {
         .clone();
     fs::remove_file(&victim.keeper_path).unwrap();
 
-    let report = pc_apply::apply(&w.db, run, std::slice::from_ref(&victim), Some(&w.quarantine)).unwrap();
+    let report = pc_apply::apply(
+        &w.db,
+        run,
+        std::slice::from_ref(&victim),
+        Some(&w.quarantine),
+    )
+    .unwrap();
     assert_eq!(report.totals.files, 0);
     assert!(
         Path::new(&victim.path).exists(),
         "снимок удалён без запасного"
+    );
+}
+
+#[test]
+fn the_plan_empties_out_once_it_has_been_applied() {
+    // Without this the totals never go down: the rows still claim the files
+    // are in the archive, so the same work is offered again after every run.
+    let w = build_world();
+    let first = plan_with(&w, &Policy::default());
+    assert!(!first.candidates.is_empty());
+
+    let run = w.db.latest_run().unwrap().unwrap();
+    pc_apply::apply(&w.db, run, &first.candidates, Some(&w.quarantine)).unwrap();
+
+    let second = plan_with(&w, &Policy::default());
+    assert!(
+        second.candidates.is_empty(),
+        "после переноса план всё ещё предлагает {} файлов",
+        second.candidates.len()
+    );
+}
+
+#[test]
+fn an_undone_move_puts_the_file_back_into_the_plan() {
+    let w = build_world();
+    let p = plan_with(&w, &Policy::default());
+    let run = w.db.latest_run().unwrap().unwrap();
+    pc_apply::apply(&w.db, run, &p.candidates, Some(&w.quarantine)).unwrap();
+
+    for e in w.db.journal_quarantined(None).unwrap() {
+        pc_apply::undo(&w.db, e.id).unwrap();
+    }
+    let again = plan_with(&w, &Policy::default());
+    assert_eq!(
+        again.candidates.len(),
+        p.candidates.len(),
+        "вернувшиеся файлы не попали обратно в план"
     );
 }

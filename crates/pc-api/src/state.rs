@@ -11,14 +11,18 @@ pub struct AppState {
     pub db: Mutex<Db>,
     pub thumbs: ThumbStore,
     pub db_path: PathBuf,
+    /// Where moved files are parked. `None` means the default: the root of
+    /// each file's own filesystem, which keeps the move a rename.
+    pub quarantine: Option<PathBuf>,
 }
 
 impl AppState {
-    pub fn new(db_path: &Path, thumbs: &Path) -> Result<Self> {
+    pub fn new(db_path: &Path, thumbs: &Path, quarantine: Option<PathBuf>) -> Result<Self> {
         Ok(Self {
             db: Mutex::new(Db::open(db_path)?),
             thumbs: ThumbStore::new(thumbs),
             db_path: db_path.to_path_buf(),
+            quarantine,
         })
     }
 }

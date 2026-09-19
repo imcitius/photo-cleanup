@@ -343,7 +343,7 @@ impl Db {
                     m.xmp_document_id, m.xmp_original_id, m.xmp_derived_from,
                     m.dng_original_raw
                FROM files f LEFT JOIN meta m ON m.file_id = f.id
-              WHERE f.phash IS NOT NULL
+              WHERE f.phash IS NOT NULL AND f.state = 'present'
               ORDER BY f.id",
         )?;
         let rows = st
@@ -566,6 +566,15 @@ impl Db {
 }
 
 impl Db {
+    /// Mark a file as moved out of the archive, or back into it.
+    pub fn set_file_state(&self, file_id: i64, state: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE files SET state = ?1 WHERE id = ?2",
+            params![state, file_id],
+        )?;
+        Ok(())
+    }
+
     /// Point a family at a different member as its best version.
     /// Returns false when the file is not part of that family.
     pub fn set_family_keeper(&self, family_id: i64, file_id: i64) -> Result<bool> {
@@ -633,6 +642,7 @@ impl Db {
                FROM family_members fm
                JOIN files f    ON f.id = fm.file_id
                JOIN families fa ON fa.id = fm.family_id
+              WHERE f.state = 'present'
               ORDER BY fm.family_id",
         )?;
         let rows = st

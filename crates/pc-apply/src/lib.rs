@@ -23,6 +23,7 @@ pub enum Outcome {
 
 #[derive(Debug, Default)]
 pub struct Totals {
+    /// Things moved: a bundle of previews, or a photograph.
     pub bundles: u64,
     pub files: u64,
     pub bytes: u64,
@@ -33,7 +34,7 @@ impl Totals {
     pub fn summary(&self) -> String {
         format!(
             "{}, {}, {}",
-            pc_core::count_ru(self.bundles as i64, "бандл", "бандла", "бандлов"),
+            pc_core::count_ru(self.bundles as i64, "объект", "объекта", "объектов"),
             pc_core::count_ru(self.files as i64, "файл", "файла", "файлов"),
             fmt_bytes(self.bytes)
         )
@@ -281,10 +282,10 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
         }
     }
     db.journal_mark_undone(journal_id)?;
-    if entry.op == "quarantine" {
-        if let Some(bid) = entry.target_id {
-            db.set_bundle_state(bid, BundleState::Present)?;
-        }
+    match (entry.op.as_str(), entry.target_id) {
+        ("quarantine", Some(bid)) => db.set_bundle_state(bid, BundleState::Present)?,
+        ("quarantine-file", Some(fid)) => db.set_file_state(fid, "present")?,
+        _ => {}
     }
     Ok(())
 }
@@ -311,10 +312,10 @@ pub fn purge(db: &Db, older_than_secs: i64) -> Result<Totals> {
                 db.journal_mark_purged(e.id)?;
                 // Only a bundle has a state to move; a photograph's row is
                 // identified by the journal entry alone.
-                if e.op == "quarantine" {
-                    if let Some(bid) = e.target_id {
-                        db.set_bundle_state(bid, BundleState::Purged)?;
-                    }
+                match (e.op.as_str(), e.target_id) {
+                    ("quarantine", Some(bid)) => db.set_bundle_state(bid, BundleState::Purged)?,
+                    ("quarantine-file", Some(fid)) => db.set_file_state(fid, "purged")?,
+                    _ => {}
                 }
                 t.bundles += 1;
                 t.files += e.file_count as u64;

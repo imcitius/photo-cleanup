@@ -359,3 +359,247 @@ pub async fn original(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) 
         Err(e) => (StatusCode::NOT_FOUND, format!("не прочитать: {e}")).into_response(),
     }
 }
+
+// ---- policy, plan and the move ------------------------------------------
+
+#[derive(Deserialize)]
+pub struct PlanQuery {
+    /// Comma separated role names. Empty means the default: copies only.
+    #[serde(default)]
+    roles: String,
+    /// Lift the protection on frames a Lightroom catalog curates.
+    #[serde(default)]
+    allow_lightroom: bool,
+    #[serde(default = "default_resize")]
+    resize_below: i64,
+}
+
+fn default_resize() -> i64 {
+    2_000_000
+}
+
+impl PlanQuery {
+    fn to_policy(&self) -> Result<pc_family::Policy, String> {
+        let mut p = pc_family::Policy {
+            resize_below_pixels: self.resize_below.max(0),
+            respect_lightroom: !self.allow_lightroom,
+            ..Default::default()
+        };
+        let names: Vec<&str> = self
+            .roles
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !names.is_empty() {
+            let mut set = std::collections::BTreeSet::new();
+            for n in names {
+                let role = Role::parse(n).ok_or_else(|| format!("неизвестная роль «{n}»"))?;
+                // Refusing this in the API as well as the CLI: the original
+                // is the photograph, and no combination of toggles in a
+                // browser should be able to schedule it for removal.
+                if role == Role::Original {
+                    return Err("роль original удалять нельзя: это сам снимок".into());
+                }
+                set.insert(role);
+            }
+            p.remove_roles = set;
+        }
+        Ok(p)
+    }
+}
+
+#[derive(Serialize)]
+pub struct PlanItem {
+    file_id: i64,
+    path: String,
+    name: String,
+    size: i64,
+    role: &'static str,
+    role_label: &'static str,
+    reason: String,
+    keeper_id: i64,
+    keeper_path: String,
+    thumb: Option<String>,
+    keeper_thumb: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PlanOut {
+    total_files: usize,
+    total_bytes: i64,
+    items: Vec<PlanItem>,
+    refusals: Vec<RefusalOut>,
+    roles: Vec<&'static str>,
+    respect_lightroom: bool,
+}
+
+#[derive(Serialize)]
+pub struct RefusalOut {
+    path: String,
+    why: String,
+}
+
+fn build_plan(st: &AppState, q: &PlanQuery) -> Result<PlanOut, Box<Response>> {
+    let policy = q.to_policy().map_err(|e| {
+        Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response(),
+        )
+    })?;
+
+    let db = st.db.lock().unwrap();
+    let plan = pc_family::plan::compute(&db, &policy).map_err(|e| Fail(e).into_response())?;
+
+    // Thumbnails for both sides, so the user can see what goes and what
+    // stays rather than reading two paths and hoping.
+    let thumb_of = |id: i64| db.file(id).ok().flatten().and_then(|f| f.thumb_key);
+
+    let items = plan
+        .candidates
+        .iter()
+        .take(500)
+        .map(|c| PlanItem {
+            file_id: c.file_id,
+            name: c
+                .path
+                .rsplit_once('/')
+                .map_or(c.path.clone(), |(_, b)| b.to_string()),
+            path: c.path.clone(),
+            size: c.size,
+            role: c.role.as_str(),
+            role_label: c.role.label(),
+            reason: c.reason.clone(),
+            keeper_id: c.keeper_id,
+            keeper_path: c.keeper_path.clone(),
+            thumb: thumb_of(c.file_id),
+            keeper_thumb: thumb_of(c.keeper_id),
+        })
+        .collect();
+
+    Ok(PlanOut {
+        total_files: plan.candidates.len(),
+        total_bytes: plan.bytes(),
+        items,
+        refusals: plan
+            .refusals
+            .iter()
+            .take(200)
+            .map(|r| RefusalOut {
+                path: r.path.clone(),
+                why: r.why.clone(),
+            })
+            .collect(),
+        roles: policy.remove_roles.iter().map(|r| r.as_str()).collect(),
+        respect_lightroom: policy.respect_lightroom,
+    })
+}
+
+pub async fn plan(State(st): State<Arc<AppState>>, Query(q): Query<PlanQuery>) -> Response {
+    match build_plan(&st, &q) {
+        Ok(p) => Json(p).into_response(),
+        Err(r) => *r,
+    }
+}
+
+#[derive(Serialize)]
+pub struct ApplyOut {
+    moved: u64,
+    bytes: u64,
+    refused: Vec<RefusalOut>,
+}
+
+/// Move what the plan proposes. Reversible, and the caller has confirmed.
+pub async fn apply_plan(State(st): State<Arc<AppState>>, Query(q): Query<PlanQuery>) -> Response {
+    let policy = match q.to_policy() {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
+    let db = st.db.lock().unwrap();
+    let plan = match pc_family::plan::compute(&db, &policy) {
+        Ok(p) => p,
+        Err(e) => return Fail(e).into_response(),
+    };
+    let run_id = match db.latest_run() {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "нет ни одного прогона" })),
+            )
+                .into_response()
+        }
+        Err(e) => return Fail(e).into_response(),
+    };
+
+    match pc_apply::apply(&db, run_id, &plan.candidates, st.quarantine.as_deref()) {
+        Ok(r) => Json(ApplyOut {
+            moved: r.totals.files,
+            bytes: r.totals.bytes,
+            refused: r
+                .refused
+                .into_iter()
+                .map(|(path, why)| RefusalOut { path, why })
+                .collect(),
+        })
+        .into_response(),
+        Err(e) => Fail(e).into_response(),
+    }
+}
+
+#[derive(Serialize)]
+pub struct QuarantineItem {
+    journal_id: i64,
+    src: String,
+    name: String,
+    size: i64,
+    file_count: i64,
+    applied_at: i64,
+    kind: String,
+}
+
+pub async fn quarantine(State(st): State<Arc<AppState>>) -> Api<Vec<QuarantineItem>> {
+    let db = st.db.lock().unwrap();
+    Ok(Json(
+        db.journal_quarantined(None)?
+            .into_iter()
+            .map(|e| QuarantineItem {
+                journal_id: e.id,
+                name: e
+                    .src
+                    .rsplit_once('/')
+                    .map_or(e.src.clone(), |(_, b)| b.to_string()),
+                kind: if e.op == "quarantine-file" {
+                    "снимок".into()
+                } else {
+                    "производные данные".into()
+                },
+                src: e.src,
+                size: e.size,
+                file_count: e.file_count,
+                applied_at: e.applied_at,
+            })
+            .collect(),
+    ))
+}
+
+pub async fn undo(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) -> Response {
+    let db = st.db.lock().unwrap();
+    match pc_apply::undo(&db, id) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}

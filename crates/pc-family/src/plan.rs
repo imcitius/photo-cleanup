@@ -154,10 +154,7 @@ pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
                             "уменьшенная версия {}×{}, полный кадр остаётся в {name}",
                             m.width, m.height
                         ),
-                        other => format!(
-                            "{} — в семействе остаётся {name}",
-                            other.label()
-                        ),
+                        other => format!("{} — в семействе остаётся {name}", other.label()),
                     }
                 },
             });

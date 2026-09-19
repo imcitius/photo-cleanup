@@ -65,8 +65,16 @@ photo-cleanup --db pc.db families build
 ```
 
 ```bash
+photo-cleanup --db pc.db plan                    # что будет перенесено
+photo-cleanup --db pc.db apply --yes             # перенести в карантин
+```
+
+```bash
 photo-cleanup --db pc.db serve --bind 0.0.0.0:8080
 ```
+
+В вебе те же шаги: обзор, дерево семейств с превью, панель политики со
+сравнением «что уйдёт / что останется» и список карантина с откатом.
 
 Командами то же самое:
 

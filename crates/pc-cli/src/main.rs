@@ -92,6 +92,9 @@ struct ServeArgs {
     bind: String,
     #[arg(long)]
     thumbs: Option<PathBuf>,
+    /// Куда складывать перенесённое, если корень диска недоступен на запись
+    #[arg(long)]
+    quarantine: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -289,7 +292,7 @@ fn main() -> Result<()> {
             // The database is reopened inside the server, so release ours.
             drop(db);
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(pc_api::serve(&cli.db, &thumbs, addr))
+            rt.block_on(pc_api::serve(&cli.db, &thumbs, a.quarantine, addr))
         }
         Command::Plan(a) => cmd_plan(&db, &a, None, false),
         Command::Apply(a) => {

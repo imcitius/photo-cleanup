@@ -12,6 +12,7 @@
   <nav id="tabs">
     <button data-tab="overview" class="active">Обзор</button>
     <button data-tab="families">Семейства</button>
+    <button data-tab="plan">План и перенос</button>
     <button data-tab="derived">Производные данные</button>
   </nav>
   <span id="hint">J / K — навигация · Space — сменить лучший · Enter — крупно</span>
@@ -29,6 +30,35 @@
       <button id="next">→</button>
     </div>
     <div id="familyList"></div>
+  </section>
+
+  <section id="plan" class="tab">
+    <div class="policy">
+      <div class="policy-roles">
+        <strong>Удалять роли:</strong>
+        <label><input type="checkbox" class="role-toggle" value="copy" checked> COPY <span class="muted">точная копия</span></label>
+        <label><input type="checkbox" class="role-toggle" value="resize"> RESIZE <span class="muted">уменьшенная</span></label>
+        <label><input type="checkbox" class="role-toggle" value="export"> EXPORT</label>
+        <label><input type="checkbox" class="role-toggle" value="converted"> CONVERTED</label>
+        <label><input type="checkbox" class="role-toggle" value="camera-jpg"> CAMERA JPG</label>
+        <label><input type="checkbox" class="role-toggle" value="unknown"> ?</label>
+      </div>
+      <div class="policy-roles">
+        <label title="Снимает защиту с кадров, которые вы каталогизировали">
+          <input type="checkbox" id="allowLr"> разрешить трогать файлы из каталогов Lightroom
+        </label>
+      </div>
+      <div id="planTotals" class="totals"></div>
+      <div class="policy-actions">
+        <button id="applyBtn" class="danger" disabled>Перенести в карантин</button>
+        <span class="muted">перенос обратим: файлы остаются на диске до отдельной команды purge</span>
+      </div>
+    </div>
+    <div id="planList"></div>
+    <h2 id="refusalsHead" hidden>Защищено от переноса</h2>
+    <div id="refusals"></div>
+    <h2>В карантине</h2>
+    <div id="quarantine"></div>
   </section>
 
   <section id="derived" class="tab"></section>

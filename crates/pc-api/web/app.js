@@ -25,6 +25,16 @@ function plural(n, one, few, many) {
   return `${n} ${many}`;
 }
 
+/// Full paths are unreadable at a glance and push every row three lines
+/// tall; the tail is what distinguishes one copy from another. The whole
+/// path stays available as a tooltip.
+function shortDir(path) {
+  const parts = path.split('/').filter(Boolean);
+  parts.pop();
+  if (parts.length <= 3) return '/' + parts.join('/');
+  return '…/' + parts.slice(-3).join('/');
+}
+
 function when(ts) {
   if (!ts) return 'дата неизвестна';
   const d = new Date(ts * 1000);
@@ -122,7 +132,9 @@ function memberNode(fam, m, isFirst) {
   const role = el('div', 'role ' + m.role, m.role_label);
 
   const mid = el('div');
-  mid.append(el('div', 'name', m.name), el('div', 'dir', m.dir));
+  const mdir = el('div', 'dir', shortDir(m.dir + '/x'));
+  mdir.title = m.dir;
+  mid.append(el('div', 'name', m.name), mdir);
   if (m.evidence && m.evidence.detail) {
     mid.append(el('div', 'why', 'связь: ' + m.evidence.detail));
   }
@@ -275,6 +287,168 @@ async function renderDerived() {
   root.replaceChildren(frag);
 }
 
+
+// ---- policy and plan ----------------------------------------------------
+
+function policyQuery() {
+  const roles = [...document.querySelectorAll('.role-toggle')]
+    .filter((c) => c.checked).map((c) => c.value);
+  return new URLSearchParams({
+    roles: roles.join(','),
+    allow_lightroom: $('#allowLr').checked,
+  });
+}
+
+function pairNode(it) {
+  const node = el('div', 'pair');
+
+  const going = el('div', 'side going');
+  const gimg = el('img');
+  gimg.loading = 'lazy';
+  gimg.src = it.thumb ? `/api/thumb/${it.thumb}` : '';
+  gimg.addEventListener('click', () => openFull(it.file_id, it.path));
+  const gtxt = el('div');
+  const gdir = el('div', 'dir', shortDir(it.path));
+  gdir.title = it.path;
+  gtxt.append(
+    el('div', 'name', it.name),
+    gdir,
+    el('div', 'tag', `${it.role_label} · ${bytes(it.size)} · ${it.reason}`),
+  );
+  going.append(gimg, gtxt);
+
+  const staying = el('div', 'side staying');
+  const simg = el('img');
+  simg.loading = 'lazy';
+  simg.src = it.keeper_thumb ? `/api/thumb/${it.keeper_thumb}` : '';
+  simg.addEventListener('click', () => openFull(it.keeper_id, it.keeper_path));
+  const stxt = el('div');
+  const sdir = el('div', 'dir', shortDir(it.keeper_path));
+  sdir.title = it.keeper_path;
+  stxt.append(
+    el('div', 'name', it.keeper_path.split('/').pop()),
+    sdir,
+    el('div', 'tag', 'остаётся'),
+  );
+  staying.append(simg, stxt);
+
+  node.append(going, el('div', 'arrow', '→'), staying);
+  return node;
+}
+
+async function loadPlan() {
+  const totals = $('#planTotals');
+  totals.textContent = 'Считаю…';
+  let p;
+  try {
+    p = await api('/api/plan?' + policyQuery());
+  } catch (e) {
+    totals.textContent = 'Ошибка: ' + e.message;
+    $('#applyBtn').disabled = true;
+    return;
+  }
+
+  totals.replaceChildren(
+    el('span', null, p.total_files
+      ? `${plural(p.total_files, 'файл', 'файла', 'файлов')} · ${bytes(p.total_bytes)}`
+      : 'Под политику ничего не подпадает'),
+    el('span', 'sub', p.respect_lightroom
+      ? 'файлы из каталогов Lightroom защищены'
+      : '⚠ защита каталогов Lightroom снята'),
+  );
+  $('#applyBtn').disabled = p.total_files === 0;
+
+  const list = $('#planList');
+  const frag = document.createDocumentFragment();
+  for (const it of p.items) frag.append(pairNode(it));
+  if (p.items.length < p.total_files) {
+    frag.append(el('p', 'empty', `показаны первые ${p.items.length} из ${p.total_files}`));
+  }
+  list.replaceChildren(frag);
+
+  $('#refusalsHead').hidden = p.refusals.length === 0;
+  const rf = document.createDocumentFragment();
+  for (const r of p.refusals) {
+    const n = el('div', 'refusal');
+    n.append(el('span', null, r.path.split('/').slice(-3).join('/') + ' — '),
+             el('span', 'why', r.why));
+    rf.append(n);
+  }
+  $('#refusals').replaceChildren(rf);
+
+  await loadQuarantine();
+}
+
+async function applyPlan() {
+  const p = await api('/api/plan?' + policyQuery());
+  const ok = confirm(
+    `Перенести в карантин ${plural(p.total_files, 'файл', 'файла', 'файлов')} ` +
+    `(${bytes(p.total_bytes)})?\n\n` +
+    'Каждый файл будет перечитан и сверен с тем, ради чего он удаляется.\n' +
+    'Перенос обратим: файлы останутся на диске до отдельной команды purge.'
+  );
+  if (!ok) return;
+
+  $('#applyBtn').disabled = true;
+  $('#planTotals').textContent = 'Проверяю каждый файл и переношу…';
+  try {
+    const r = await api('/api/plan/apply?' + policyQuery(), { method: 'POST' });
+    let msg = `Перенесено ${plural(r.moved, 'файл', 'файла', 'файлов')}, ${bytes(r.bytes)}.`;
+    if (r.refused.length) {
+      msg += `\nОтказано: ${r.refused.length}.\n` +
+        r.refused.slice(0, 5).map((x) => `${x.path.split('/').pop()} — ${x.why}`).join('\n');
+    }
+    alert(msg);
+  } catch (e) {
+    alert('Ошибка: ' + e.message);
+  }
+  await loadPlan();
+}
+
+async function loadQuarantine() {
+  let rows;
+  try {
+    rows = await api('/api/quarantine');
+  } catch {
+    return;
+  }
+  const box = $('#quarantine');
+  if (!rows.length) {
+    box.replaceChildren(el('p', 'empty', 'Карантин пуст.'));
+    return;
+  }
+  const total = rows.reduce((a, r) => a + r.size, 0);
+  const frag = document.createDocumentFragment();
+  frag.append(el('p', 'muted',
+    `${plural(rows.length, 'объект', 'объекта', 'объектов')} · ${bytes(total)} — ` +
+    'место освободится после `photo-cleanup derived purge`'));
+  for (const r of rows) {
+    const n = el('div', 'qrow');
+    const btn = el('button', 'small', 'вернуть');
+    btn.addEventListener('click', async () => {
+      try {
+        await api(`/api/quarantine/${r.journal_id}/undo`, { method: 'POST' });
+        await loadQuarantine();
+      } catch (e) {
+        alert('Не удалось вернуть: ' + e.message);
+      }
+    });
+    n.append(
+      el('span', 'grow', r.src.split('/').slice(-3).join('/')),
+      el('span', 'muted', `${r.kind} · ${bytes(r.size)}`),
+      btn,
+    );
+    frag.append(n);
+  }
+  box.replaceChildren(frag);
+}
+
+function openFull(fileId, path) {
+  $('#lightboxImg').src = `/api/file/${fileId}`;
+  $('#lightboxCaption').textContent = path;
+  $('#lightbox').hidden = false;
+}
+
 // ---- lightbox -----------------------------------------------------------
 
 function openLightbox(m) {
@@ -297,6 +471,7 @@ function showTab(name) {
   if (name === 'families') loadFamilies().catch((e) => {
     $('#familyList').replaceChildren(el('p', 'empty', 'Ошибка: ' + e.message));
   });
+  if (name === 'plan') loadPlan();
   if (name === 'derived') renderDerived();
 }
 
@@ -313,6 +488,11 @@ document.addEventListener('DOMContentLoaded', () => {
     state.offset += state.limit;
     loadFamilies();
   });
+  for (const c of document.querySelectorAll('.role-toggle')) {
+    c.addEventListener('change', loadPlan);
+  }
+  $('#allowLr').addEventListener('change', loadPlan);
+  $('#applyBtn').addEventListener('click', applyPlan);
   $('#showSingles').addEventListener('change', (e) => {
     state.all = e.target.checked;
     state.offset = 0;

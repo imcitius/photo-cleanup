@@ -26,13 +26,22 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/families/{id}", get(routes::family))
         .route("/api/families/{id}/keeper", post(routes::set_keeper))
         .route("/api/derived", get(routes::derived))
+        .route("/api/plan", get(routes::plan))
+        .route("/api/plan/apply", post(routes::apply_plan))
+        .route("/api/quarantine", get(routes::quarantine))
+        .route("/api/quarantine/{id}/undo", post(routes::undo))
         .route("/api/thumb/{key}", get(routes::thumb))
         .route("/api/file/{id}", get(routes::original))
         .with_state(state)
 }
 
-pub async fn serve(db_path: &Path, thumbs: &Path, bind: SocketAddr) -> Result<()> {
-    let state = Arc::new(AppState::new(db_path, thumbs)?);
+pub async fn serve(
+    db_path: &Path,
+    thumbs: &Path,
+    quarantine: Option<std::path::PathBuf>,
+    bind: SocketAddr,
+) -> Result<()> {
+    let state = Arc::new(AppState::new(db_path, thumbs, quarantine)?);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("не занять адрес {bind}"))?;
