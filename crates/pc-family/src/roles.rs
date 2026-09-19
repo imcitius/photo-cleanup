@@ -94,7 +94,7 @@ fn looks_edited(f: &FileInfo) -> bool {
     f.derived_from.is_some()
         || f.software
             .as_deref()
-            .map(|s| s.to_ascii_lowercase())
+            .map(|s| s.to_lowercase())
             .is_some_and(|s| EDITORS.iter().any(|e| s.contains(e)))
 }
 
@@ -182,7 +182,7 @@ pub fn assign(files: &[FileInfo], members: &[usize], quality: &[f64]) -> Vec<Rol
         .max()
         .unwrap_or(0)
         .max(1);
-    let original_stem = original.map(|i| files[members[i]].stem().to_ascii_lowercase());
+    let original_stem = original.map(|i| files[members[i]].stem().to_lowercase());
 
     for i in 0..members.len() {
         if roles[i] != Role::Unknown {
@@ -207,7 +207,7 @@ pub fn assign(files: &[FileInfo], members: &[usize], quality: &[f64]) -> Vec<Rol
         // metadata, and full size.
         let same_name = original_stem
             .as_deref()
-            .is_some_and(|s| s == f.stem().to_ascii_lowercase());
+            .is_some_and(|s| s == f.stem().to_lowercase());
         if same_name && has_camera_exif(f) && f.pixels() * 10 >= best_pixels * 6 {
             roles[i] = Role::CameraJpeg;
             continue;

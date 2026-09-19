@@ -142,6 +142,11 @@ fn process(
             clip_high: Some(probe.metrics.clip_high as f64),
             entropy: Some(probe.metrics.entropy as f64),
             contrast: Some(probe.metrics.contrast as f64),
+            saturation: Some(probe.metrics.saturation as f64),
+            white_fraction: Some(probe.metrics.white_fraction as f64),
+            bimodality: Some(probe.metrics.bimodality as f64),
+            text_rows: Some(probe.metrics.text_rows as f64),
+            text_banding: Some(probe.metrics.text_banding as f64),
             ..base
         },
         meta: Some(NewMeta {

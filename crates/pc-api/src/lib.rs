@@ -26,6 +26,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/families/{id}", get(routes::family))
         .route("/api/families/{id}/keeper", post(routes::set_keeper))
         .route("/api/series", get(routes::series))
+        .route("/api/categories", get(routes::categories))
         .route("/api/derived", get(routes::derived))
         .route("/api/plan", get(routes::plan))
         .route("/api/plan/apply", post(routes::apply_plan))

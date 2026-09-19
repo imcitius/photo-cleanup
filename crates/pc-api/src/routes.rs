@@ -693,3 +693,66 @@ pub async fn series(
             .collect(),
     }))
 }
+
+// ---- categories ---------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct CategoryFile {
+    file_id: i64,
+    name: String,
+    dir: String,
+    size: i64,
+    width: i64,
+    height: i64,
+    confidence: f64,
+    evidence: String,
+    thumb: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CategoryGroup {
+    key: String,
+    label: &'static str,
+    count: i64,
+    bytes: i64,
+    files: Vec<CategoryFile>,
+}
+
+pub async fn categories(State(st): State<Arc<AppState>>) -> Api<Vec<CategoryGroup>> {
+    use pc_family::categories::Category;
+    let db = st.db.lock().unwrap();
+    let mut out = Vec::new();
+    for c in db.category_counts()? {
+        let label = Category::parse(&c.category)
+            .map(|x| x.label())
+            .unwrap_or("Прочее");
+        let files = db
+            .files_in_category(&c.category, 24)?
+            .into_iter()
+            .map(|m| CategoryFile {
+                file_id: m.file_id,
+                dir: m
+                    .path
+                    .rsplit_once('/')
+                    .map_or(String::new(), |(a, _)| a.into()),
+                name: m.name,
+                size: m.size,
+                width: m.width,
+                height: m.height,
+                // files_in_category reuses MemberRow: confidence rides in
+                // `quality`, the evidence string in `breakdown`.
+                confidence: m.quality,
+                evidence: m.breakdown,
+                thumb: m.thumb_key,
+            })
+            .collect();
+        out.push(CategoryGroup {
+            key: c.category,
+            label,
+            count: c.count,
+            bytes: c.bytes,
+            files,
+        });
+    }
+    Ok(Json(out))
+}

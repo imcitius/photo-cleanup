@@ -109,8 +109,8 @@ pub fn score(f: &FileInfo, best_pixels: i64, curation: Curation) -> Score {
         parts.push(("плотность данных".into(), (bpp * 4.0).clamp(0.0, 8.0)));
     }
 
-    let path = f.path.to_ascii_lowercase();
-    let name = f.name.to_ascii_lowercase();
+    let path = f.path.to_lowercase();
+    let name = f.name.to_lowercase();
     if let Some(hit) = LOW_VALUE_PATH.iter().find(|m| path.contains(**m)) {
         parts.push((format!("путь «{hit}»"), -15.0));
     }
@@ -221,6 +221,27 @@ mod tests {
             score(&a, best, d).total > score(&b, best, d).total,
             "бэкап не должен побеждать оригинал"
         );
+    }
+
+    #[test]
+    fn russian_path_penalties_actually_apply() {
+        // These fire on `to_lowercase`; with its ASCII-only cousin the
+        // Cyrillic entries in the list never matched and the penalty was
+        // silently absent.
+        let plain = file("/foto/2019/DSC1.JPG", 4000, 3000, "jpeg", 5_000_000);
+        let best = plain.pixels();
+        let d = Curation::default();
+        for path in [
+            "/foto/Загрузки/DSC1.JPG",
+            "/foto/БЭКАП/2019/DSC1.JPG",
+            "/foto/Резерв/DSC1.JPG",
+        ] {
+            let f = file(path, 4000, 3000, "jpeg", 5_000_000);
+            assert!(
+                score(&f, best, d).total < score(&plain, best, d).total,
+                "путь без штрафа: {path}"
+            );
+        }
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Grouping an archive into families: one photograph, several renditions.
 
+pub mod categories;
 pub mod curation;
 pub mod links;
 pub mod perceptual;

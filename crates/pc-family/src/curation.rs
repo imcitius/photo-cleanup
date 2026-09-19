@@ -20,7 +20,7 @@ const TAIL: usize = 3;
 fn tail_key(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let from = parts.len().saturating_sub(TAIL);
-    parts[from..].join("/").to_ascii_lowercase()
+    parts[from..].join("/").to_lowercase()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -56,7 +56,7 @@ impl CurationIndex {
             } else {
                 idx.by_tail.insert(tail, rating);
             }
-            idx.by_path.insert(path.to_ascii_lowercase(), rating);
+            idx.by_path.insert(path.to_lowercase(), rating);
         }
         idx
     }
@@ -66,7 +66,7 @@ impl CurationIndex {
     }
 
     pub fn lookup(&self, path: &str) -> Option<Curated> {
-        if let Some(rating) = self.by_path.get(&path.to_ascii_lowercase()) {
+        if let Some(rating) = self.by_path.get(&path.to_lowercase()) {
             return Some(Curated {
                 rating: *rating,
                 exact: true,

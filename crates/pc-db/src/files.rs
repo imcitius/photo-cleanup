@@ -33,6 +33,11 @@ pub struct NewFile {
     pub clip_high: Option<f64>,
     pub entropy: Option<f64>,
     pub contrast: Option<f64>,
+    pub saturation: Option<f64>,
+    pub white_fraction: Option<f64>,
+    pub bimodality: Option<f64>,
+    pub text_rows: Option<f64>,
+    pub text_banding: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -131,9 +136,10 @@ impl Db {
                                extension_lied, width, height, orientation, pixel_source,
                                partial_hash, pixel_hash, phash, dhash, phash_crops, thumb_key,
                                skipped_reason, indexed_run, first_seen_run, last_seen_run,
-                               sharpness, clip_low, clip_high, entropy, contrast)
+                               sharpness, clip_low, clip_high, entropy, contrast,
+                               saturation, white_fraction, bimodality, text_rows, text_banding)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
-                     ?21,?22,?22,?22,?23,?24,?25,?26,?27)
+                     ?21,?22,?22,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32)
              ON CONFLICT(path) DO UPDATE SET
                  name=excluded.name, disk=excluded.disk, dev=excluded.dev,
                  inode=excluded.inode, nlink=excluded.nlink, size=excluded.size,
@@ -146,7 +152,10 @@ impl Db {
                  skipped_reason=excluded.skipped_reason, indexed_run=excluded.indexed_run,
                  last_seen_run=excluded.last_seen_run, sharpness=excluded.sharpness,
                  clip_low=excluded.clip_low, clip_high=excluded.clip_high,
-                 entropy=excluded.entropy, contrast=excluded.contrast",
+                 entropy=excluded.entropy, contrast=excluded.contrast,
+                 saturation=excluded.saturation, white_fraction=excluded.white_fraction,
+                 bimodality=excluded.bimodality, text_rows=excluded.text_rows,
+                 text_banding=excluded.text_banding",
             params![
                 f.path,
                 f.name,
@@ -174,7 +183,12 @@ impl Db {
                 f.clip_low,
                 f.clip_high,
                 f.entropy,
-                f.contrast
+                f.contrast,
+                f.saturation,
+                f.white_fraction,
+                f.bimodality,
+                f.text_rows,
+                f.text_banding
             ],
         )?;
         Ok(self.conn.query_row(
@@ -316,6 +330,11 @@ pub struct FileInfo {
     pub clip_high: Option<f64>,
     pub entropy: Option<f64>,
     pub contrast: Option<f64>,
+    pub saturation: Option<f64>,
+    pub white_fraction: Option<f64>,
+    pub bimodality: Option<f64>,
+    pub text_rows: Option<f64>,
+    pub text_banding: Option<f64>,
     pub lens: Option<String>,
 }
 
@@ -361,7 +380,9 @@ impl Db {
                     m.taken_at, m.camera_model, m.body_serial, m.software,
                     m.xmp_document_id, m.xmp_original_id, m.xmp_derived_from,
                     m.dng_original_raw, m.lens,
-                    f.sharpness, f.clip_low, f.clip_high, f.entropy, f.contrast
+                    f.sharpness, f.clip_low, f.clip_high, f.entropy, f.contrast,
+                    f.saturation, f.white_fraction, f.bimodality, f.text_rows,
+                    f.text_banding
                FROM files f LEFT JOIN meta m ON m.file_id = f.id
               WHERE f.phash IS NOT NULL AND f.state = 'present'
               ORDER BY f.id",
@@ -397,6 +418,11 @@ impl Db {
                     clip_high: r.get(25)?,
                     entropy: r.get(26)?,
                     contrast: r.get(27)?,
+                    saturation: r.get(28)?,
+                    white_fraction: r.get(29)?,
+                    bimodality: r.get(30)?,
+                    text_rows: r.get(31)?,
+                    text_banding: r.get(32)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -861,5 +887,95 @@ impl Db {
             protected,
             members,
         }))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CategoryCount {
+    pub category: String,
+    pub count: i64,
+    pub bytes: i64,
+}
+
+impl Db {
+    /// Store a verdict, leaving any the user set by hand alone.
+    pub fn set_category(
+        &self,
+        file_id: i64,
+        category: &str,
+        confidence: f64,
+        evidence: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO file_categories(file_id, category, confidence, evidence, manual)
+             VALUES (?1,?2,?3,?4,0)
+             ON CONFLICT(file_id) DO UPDATE SET
+                 category=excluded.category, confidence=excluded.confidence,
+                 evidence=excluded.evidence
+               WHERE file_categories.manual = 0",
+            params![file_id, category, confidence, evidence],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_category_manual(&self, file_id: i64, category: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO file_categories(file_id, category, confidence, evidence, manual)
+             VALUES (?1,?2,1.0,'указано вручную',1)
+             ON CONFLICT(file_id) DO UPDATE SET
+                 category=excluded.category, confidence=1.0,
+                 evidence=excluded.evidence, manual=1",
+            params![file_id, category],
+        )?;
+        Ok(())
+    }
+
+    pub fn category_counts(&self) -> Result<Vec<CategoryCount>> {
+        let mut st = self.conn.prepare(
+            "SELECT c.category, COUNT(*), COALESCE(SUM(f.size), 0)
+               FROM file_categories c JOIN files f ON f.id = c.file_id
+              WHERE f.state = 'present'
+              GROUP BY c.category ORDER BY 2 DESC",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok(CategoryCount {
+                    category: r.get(0)?,
+                    count: r.get(1)?,
+                    bytes: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn files_in_category(&self, category: &str, limit: i64) -> Result<Vec<MemberRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT f.id, f.path, f.name, c.category, f.size, f.width, f.height,
+                    f.container, c.confidence, c.evidence, NULL, f.thumb_key
+               FROM file_categories c JOIN files f ON f.id = c.file_id
+              WHERE c.category = ?1 AND f.state = 'present'
+              ORDER BY c.confidence DESC, f.size DESC LIMIT ?2",
+        )?;
+        let rows = st
+            .query_map(params![category, limit], |r| {
+                Ok(MemberRow {
+                    file_id: r.get(0)?,
+                    path: r.get(1)?,
+                    name: r.get(2)?,
+                    role: r.get(3)?,
+                    size: r.get(4)?,
+                    width: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    height: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                    container: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                    quality: r.get::<_, Option<f64>>(8)?.unwrap_or(0.0),
+                    breakdown: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                    evidence: None,
+                    thumb_key: r.get(11)?,
+                    is_keeper: false,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 }

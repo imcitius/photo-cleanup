@@ -288,6 +288,63 @@ async function renderDerived() {
 }
 
 
+// ---- categories ---------------------------------------------------------
+
+async function renderCategories() {
+  const root = $('#categories');
+  root.replaceChildren(el('p', 'empty', 'Загрузка…'));
+  let groups;
+  try {
+    groups = await api('/api/categories');
+  } catch (e) {
+    root.replaceChildren(el('p', 'empty', 'Ошибка: ' + e.message));
+    return;
+  }
+  if (!groups.length) {
+    root.replaceChildren(el('p', 'empty',
+      'Ничего не классифицировано. Выполните `photo-cleanup categories build`.'));
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  for (const g of groups) {
+    frag.append(el('h2', null,
+      `${g.label} — ${plural(g.count, 'файл', 'файла', 'файлов')} · ${bytes(g.bytes)}`));
+    const grid = el('div', 'grid');
+    for (const f of g.files) {
+      const cell = el('div', 'cell');
+      const img = el('img');
+      img.loading = 'lazy';
+      img.alt = f.name;
+      img.title = `${f.name}\n${f.dir}\n${f.evidence}`;
+      img.src = f.thumb ? `/api/thumb/${f.thumb}` : '';
+      img.addEventListener('click', () => openFull(f.file_id, f.dir + '/' + f.name));
+      const cap = el('div', 'cap');
+      cap.append(el('span', null, f.name));
+      if (g.key !== 'photo') {
+        cap.append(el('span', 'conf', ` · ${(f.confidence * 100).toFixed(0)}%`));
+      }
+      cell.append(img, cap);
+      grid.append(cell);
+    }
+    frag.append(grid);
+    if (g.count > g.files.length) {
+      frag.append(el('p', 'muted', `показаны первые ${g.files.length} из ${g.count}`));
+    }
+  }
+
+  // The limit of the method, stated where someone might otherwise assume
+  // more than it does.
+  frag.append(el('div', 'note',
+    'Эти виды определяются по измеримым признакам: бумага не насыщена, чернила ' +
+    'дают бимодальную гистограмму, текст идёт строками с промежутками, у снимка ' +
+    'экрана нет камеры позади. Смысловые виды — «фото счётчика», «чек», ' +
+    '«документ такого-то типа» — так не определяются: это вопрос о содержании ' +
+    'картинки, и для него нужна модель.'));
+
+  root.replaceChildren(frag);
+}
+
 // ---- series -------------------------------------------------------------
 
 async function renderSeries() {
@@ -526,6 +583,7 @@ function showTab(name) {
   if (name === 'families') loadFamilies().catch((e) => {
     $('#familyList').replaceChildren(el('p', 'empty', 'Ошибка: ' + e.message));
   });
+  if (name === 'categories') renderCategories();
   if (name === 'series') renderSeries();
   if (name === 'plan') loadPlan();
   if (name === 'derived') renderDerived();

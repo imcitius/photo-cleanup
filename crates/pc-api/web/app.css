@@ -200,3 +200,21 @@ button.small {
 .protected-note {
   color: var(--danger); font-size: 12px; font-weight: 600; margin-bottom: 8px;
 }
+
+/* ---- categories ---- */
+
+.grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 10px; margin-bottom: 6px;
+}
+.cell img {
+  width: 100%; aspect-ratio: 3 / 2; object-fit: cover;
+  border-radius: 6px; border: 1px solid var(--line); background: var(--bg);
+  cursor: zoom-in; display: block;
+}
+.cell .cap { font-size: 11px; color: var(--muted); margin-top: 3px; overflow-wrap: anywhere; }
+.cell .conf { font-variant-numeric: tabular-nums; }
+.note {
+  background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn);
+  border-radius: var(--radius); padding: 10px 14px; margin: 14px 0; font-size: 13px;
+}

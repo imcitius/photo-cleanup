@@ -51,7 +51,7 @@ pub struct Link {
 fn stem_lower(name: &str) -> String {
     name.rsplit_once('.')
         .map_or(name, |(a, _)| a)
-        .to_ascii_lowercase()
+        .to_lowercase()
 }
 
 /// Every exact link the files themselves assert.

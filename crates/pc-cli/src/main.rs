@@ -40,6 +40,9 @@ enum Command {
     /// Семейства: один кадр — несколько представлений
     #[command(subcommand)]
     Families(FamiliesCmd),
+    /// Разложить по видам: документы, скриншоты, пустые кадры
+    #[command(subcommand)]
+    Categories(CategoriesCmd),
     /// Серии: несколько кадров одного момента и лучший из них
     #[command(subcommand)]
     Series(SeriesCmd),
@@ -86,6 +89,24 @@ struct ApplyArgs {
     quarantine: Option<PathBuf>,
     #[arg(long)]
     yes: bool,
+}
+
+#[derive(Subcommand)]
+enum CategoriesCmd {
+    /// Классифицировать всё, что в индексе
+    Build,
+    /// Сводка по видам
+    List,
+    /// Показать файлы одного вида
+    Show(CategoryShowArgs),
+}
+
+#[derive(Args)]
+struct CategoryShowArgs {
+    /// document, screenshot, blank, monochrome, photo
+    category: String,
+    #[arg(long, default_value_t = 25)]
+    limit: i64,
 }
 
 #[derive(Subcommand)]
@@ -321,6 +342,57 @@ fn main() -> Result<()> {
             drop(db);
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(pc_api::serve(&cli.db, &thumbs, a.quarantine, addr))
+        }
+        Command::Categories(CategoriesCmd::Build) => {
+            let r = pc_family::categories::build(&db)?;
+            println!("Классифицировано: {}", r.classified);
+            for (label, n) in &r.by_category {
+                println!("  {label}: {n}");
+            }
+            println!(
+                "\nСемантические виды — «фото счётчика», «чек» — здесь не определяются:\n\
+                 это вопрос о смысле картинки, а не о её пикселях, и нужна модель."
+            );
+            Ok(())
+        }
+        Command::Categories(CategoriesCmd::List) => {
+            let rows = db.category_counts()?;
+            if rows.is_empty() {
+                println!("Ничего не классифицировано. Сначала `categories build`.");
+                return Ok(());
+            }
+            for c in rows {
+                let label = pc_family::categories::Category::parse(&c.category)
+                    .map(|x| x.label())
+                    .unwrap_or("прочее");
+                println!(
+                    "  {:<22} {:>8}  {:>10}",
+                    label,
+                    pc_core::count_ru(c.count, "файл", "файла", "файлов"),
+                    fmt_bytes(c.bytes as u64)
+                );
+            }
+            Ok(())
+        }
+        Command::Categories(CategoriesCmd::Show(a)) => {
+            let rows = db.files_in_category(&a.category, a.limit)?;
+            if rows.is_empty() {
+                println!("В виде «{}» ничего нет.", a.category);
+                return Ok(());
+            }
+            for f in rows {
+                println!(
+                    "  {:>5.0}%  {:<40} {:>10}  {}",
+                    f.quality * 100.0,
+                    format!("{}×{}", f.width, f.height),
+                    fmt_bytes(f.size as u64),
+                    f.path
+                );
+                if !f.breakdown.is_empty() {
+                    println!("         {}", f.breakdown);
+                }
+            }
+            Ok(())
         }
         Command::Series(SeriesCmd::Build(a)) => {
             let r = pc_family::series::build(&db, a.gap)?;

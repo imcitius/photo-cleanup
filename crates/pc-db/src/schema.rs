@@ -228,6 +228,29 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX series_members_file ON series_members(file_id);
     CREATE INDEX series_started      ON series(started_at);
     "#,
+    // 007 — phase 4: what kind of picture this is.
+    r#"
+    ALTER TABLE files ADD COLUMN saturation     REAL;
+    ALTER TABLE files ADD COLUMN white_fraction REAL;
+    ALTER TABLE files ADD COLUMN bimodality     REAL;
+    ALTER TABLE files ADD COLUMN text_rows      REAL;
+
+    CREATE TABLE file_categories(
+        file_id    INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        category   TEXT    NOT NULL,
+        confidence REAL    NOT NULL,
+        evidence   TEXT,
+        -- A verdict the user corrected by hand is never overwritten by a
+        -- later pass: their answer is better than the measurement.
+        manual     INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX file_categories_cat ON file_categories(category);
+    "#,
+    // 008 — writing comes in lines with gaps; a fence does not.
+    r#"
+    ALTER TABLE files ADD COLUMN text_banding REAL;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {
