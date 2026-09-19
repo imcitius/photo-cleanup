@@ -555,12 +555,14 @@ dependencies = [
  "pc-apply",
  "pc-core",
  "pc-db",
+ "pc-family",
  "pc-hash",
  "pc-image",
  "pc-lightroom",
  "pc-walk",
  "rayon",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "tracing",
  "tracing-subscriber",
@@ -585,6 +587,23 @@ dependencies = [
  "anyhow",
  "pc-core",
  "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "pc-family"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "pc-core",
+ "pc-db",
+ "pc-hash",
+ "pc-image",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",

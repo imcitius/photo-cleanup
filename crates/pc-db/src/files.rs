@@ -272,3 +272,295 @@ impl Db {
         )?)
     }
 }
+
+/// Everything the grouping stage needs about one file, in a single row.
+#[derive(Debug, Clone, Default)]
+pub struct FileInfo {
+    pub id: i64,
+    pub path: String,
+    pub name: String,
+    pub size: i64,
+    pub container: String,
+    pub width: i64,
+    pub height: i64,
+    pub pixel_source: String,
+    pub partial_hash: Option<Vec<u8>>,
+    pub pixel_hash: Option<Vec<u8>>,
+    pub phash: u64,
+    pub dhash: u64,
+    pub crops: [u64; 5],
+    pub thumb_key: Option<String>,
+    pub taken_at: Option<i64>,
+    pub camera_model: Option<String>,
+    pub body_serial: Option<String>,
+    pub software: Option<String>,
+    pub doc_id: Option<String>,
+    pub orig_doc_id: Option<String>,
+    pub derived_from: Option<String>,
+    pub dng_original_raw: Option<String>,
+}
+
+impl FileInfo {
+    pub fn pixels(&self) -> i64 {
+        self.width * self.height
+    }
+
+    /// Filename without its extension, which is how a camera pairs a raw file
+    /// with the JPEG it wrote beside it.
+    pub fn stem(&self) -> &str {
+        self.name
+            .rsplit_once('.')
+            .map_or(self.name.as_str(), |(a, _)| a)
+    }
+
+    pub fn dir(&self) -> &str {
+        self.path.rsplit_once('/').map_or("", |(a, _)| a)
+    }
+
+    pub fn is_raw(&self) -> bool {
+        self.container == "tiff" && self.pixel_source == "preview"
+    }
+}
+
+fn crops_from(blob: Option<Vec<u8>>) -> [u64; 5] {
+    let mut out = [0u64; 5];
+    if let Some(b) = blob {
+        for (i, chunk) in b.as_chunks::<8>().0.iter().take(5).enumerate() {
+            out[i] = u64::from_le_bytes(*chunk);
+        }
+    }
+    out
+}
+
+impl Db {
+    /// Every successfully indexed image, joined with its metadata.
+    pub fn all_indexed(&self) -> Result<Vec<FileInfo>> {
+        let mut st = self.conn.prepare(
+            "SELECT f.id, f.path, f.name, f.size, f.container, f.width, f.height,
+                    f.pixel_source, f.partial_hash, f.pixel_hash, f.phash, f.dhash,
+                    f.phash_crops, f.thumb_key,
+                    m.taken_at, m.camera_model, m.body_serial, m.software,
+                    m.xmp_document_id, m.xmp_original_id, m.xmp_derived_from,
+                    m.dng_original_raw
+               FROM files f LEFT JOIN meta m ON m.file_id = f.id
+              WHERE f.phash IS NOT NULL
+              ORDER BY f.id",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok(FileInfo {
+                    id: r.get(0)?,
+                    path: r.get(1)?,
+                    name: r.get(2)?,
+                    size: r.get(3)?,
+                    container: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    width: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    height: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                    pixel_source: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                    partial_hash: r.get(8)?,
+                    pixel_hash: r.get(9)?,
+                    phash: r.get::<_, i64>(10)? as u64,
+                    dhash: r.get::<_, i64>(11)? as u64,
+                    crops: crops_from(r.get(12)?),
+                    thumb_key: r.get(13)?,
+                    taken_at: r.get(14)?,
+                    camera_model: r.get(15)?,
+                    body_serial: r.get(16)?,
+                    software: r.get(17)?,
+                    doc_id: r.get(18)?,
+                    orig_doc_id: r.get(19)?,
+                    derived_from: r.get(20)?,
+                    dng_original_raw: r.get(21)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+}
+
+impl Db {
+    pub fn clear_families(&self) -> Result<()> {
+        self.conn
+            .execute_batch("DELETE FROM family_members; DELETE FROM families;")?;
+        Ok(())
+    }
+
+    pub fn insert_family(
+        &self,
+        key_kind: &str,
+        taken_at: Option<i64>,
+        camera: Option<&str>,
+        keeper: Option<i64>,
+        run_id: i64,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO families(key_kind, taken_at, camera, keeper_file, built_run)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![key_kind, taken_at, camera, keeper, run_id],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn insert_family_member(
+        &self,
+        family_id: i64,
+        file_id: i64,
+        role: &str,
+        evidence: Option<&str>,
+        quality: f64,
+        breakdown: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO family_members(family_id, file_id, role, evidence,
+                                                   quality, breakdown)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![family_id, file_id, role, evidence, quality, breakdown],
+        )?;
+        Ok(())
+    }
+
+    pub fn role_counts(&self) -> Result<Vec<(String, i64, i64)>> {
+        let mut st = self.conn.prepare(
+            "SELECT fm.role, COUNT(*), COALESCE(SUM(f.size), 0)
+               FROM family_members fm JOIN files f ON f.id = fm.file_id
+              GROUP BY fm.role ORDER BY 3 DESC",
+        )?;
+        let rows = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MemberRow {
+    pub file_id: i64,
+    pub path: String,
+    pub name: String,
+    pub role: String,
+    pub size: i64,
+    pub width: i64,
+    pub height: i64,
+    pub container: String,
+    pub quality: f64,
+    pub breakdown: String,
+    pub evidence: Option<String>,
+    pub thumb_key: Option<String>,
+    pub is_keeper: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct FamilyRow {
+    pub id: i64,
+    pub key_kind: String,
+    pub taken_at: Option<i64>,
+    pub camera: Option<String>,
+    pub members: Vec<MemberRow>,
+}
+
+impl FamilyRow {
+    pub fn total_size(&self) -> i64 {
+        self.members.iter().map(|m| m.size).sum()
+    }
+}
+
+impl Db {
+    /// Families with more than one member, largest reclaimable first.
+    pub fn families(&self, only_multi: bool, limit: i64, offset: i64) -> Result<Vec<FamilyRow>> {
+        let having = if only_multi {
+            "HAVING COUNT(*) > 1"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT fa.id FROM families fa
+               JOIN family_members fm ON fm.family_id = fa.id
+               JOIN files f ON f.id = fm.file_id
+              GROUP BY fa.id {having}
+              ORDER BY SUM(CASE WHEN fm.role = 'copy' THEN f.size ELSE 0 END) DESC,
+                       SUM(f.size) DESC
+              LIMIT ?1 OFFSET ?2"
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let ids = st
+            .query_map(params![limit, offset], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(st);
+
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(f) = self.family(id)? {
+                out.push(f);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn family(&self, id: i64) -> Result<Option<FamilyRow>> {
+        let head = self
+            .conn
+            .query_row(
+                "SELECT id, key_kind, taken_at, camera, keeper_file FROM families WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, key_kind, taken_at, camera, keeper)) = head else {
+            return Ok(None);
+        };
+
+        let mut st = self.conn.prepare(
+            "SELECT fm.file_id, f.path, f.name, fm.role, f.size, f.width, f.height,
+                    f.container, fm.quality, fm.breakdown, fm.evidence, f.thumb_key
+               FROM family_members fm JOIN files f ON f.id = fm.file_id
+              WHERE fm.family_id = ?1
+              ORDER BY fm.quality DESC",
+        )?;
+        let members = st
+            .query_map(params![id], |r| {
+                let file_id: i64 = r.get(0)?;
+                Ok(MemberRow {
+                    file_id,
+                    path: r.get(1)?,
+                    name: r.get(2)?,
+                    role: r.get(3)?,
+                    size: r.get(4)?,
+                    width: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    height: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                    container: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                    quality: r.get::<_, Option<f64>>(8)?.unwrap_or(0.0),
+                    breakdown: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                    evidence: r.get(10)?,
+                    thumb_key: r.get(11)?,
+                    is_keeper: Some(file_id) == keeper,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(Some(FamilyRow {
+            id,
+            key_kind,
+            taken_at,
+            camera,
+            members,
+        }))
+    }
+
+    pub fn family_count(&self, only_multi: bool) -> Result<i64> {
+        let sql = if only_multi {
+            "SELECT COUNT(*) FROM (SELECT family_id FROM family_members
+                                    GROUP BY family_id HAVING COUNT(*) > 1)"
+        } else {
+            "SELECT COUNT(*) FROM families"
+        };
+        Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
+    }
+}

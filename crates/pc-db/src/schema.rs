@@ -143,6 +143,34 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX meta_docid     ON meta(xmp_document_id);
     CREATE INDEX meta_derived   ON meta(xmp_derived_from);
     "#,
+    // 003 — phase 1: one shutter press per family, one role per file.
+    r#"
+    CREATE TABLE families(
+        id          INTEGER PRIMARY KEY,
+        key_kind    TEXT    NOT NULL,
+        key_value   TEXT,
+        confidence  REAL    NOT NULL DEFAULT 1.0,
+        taken_at    INTEGER,
+        camera      TEXT,
+        keeper_file INTEGER REFERENCES files(id),
+        built_run   INTEGER REFERENCES runs(id)
+    );
+
+    CREATE TABLE family_members(
+        family_id   INTEGER NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        file_id     INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        role        TEXT    NOT NULL,
+        tier        TEXT,
+        evidence    TEXT,
+        quality     REAL,
+        breakdown   TEXT,
+        PRIMARY KEY (family_id, file_id)
+    );
+
+    CREATE INDEX family_members_file ON family_members(file_id);
+    CREATE INDEX family_members_role ON family_members(role);
+    CREATE INDEX families_taken      ON families(taken_at);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

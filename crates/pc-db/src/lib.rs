@@ -4,7 +4,7 @@ pub mod files;
 pub mod model;
 pub mod schema;
 
-pub use files::{FileRow, IndexStats, NewFile, NewMeta};
+pub use files::{FamilyRow, FileInfo, FileRow, IndexStats, MemberRow, NewFile, NewMeta};
 pub use model::{
     Bundle, BundleState, Catalog, JournalEntry, JournalStatus, NewBundle, NewCatalog,
     NewJournalEntry,

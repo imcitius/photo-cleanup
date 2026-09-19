@@ -16,6 +16,7 @@ pc-lightroom = { path = "crates/pc-lightroom" }
 pc-apply     = { path = "crates/pc-apply" }
 pc-image     = { path = "crates/pc-image" }
 pc-hash      = { path = "crates/pc-hash" }
+pc-family    = { path = "crates/pc-family" }
 
 anyhow = "1"
 thiserror = "2"

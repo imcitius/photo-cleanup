@@ -37,6 +37,9 @@ enum Command {
     /// Регенерируемые данные: превью Lightroom, кэши, системный мусор
     #[command(subcommand)]
     Derived(DerivedCmd),
+    /// Семейства: один кадр — несколько представлений
+    #[command(subcommand)]
+    Families(FamiliesCmd),
     /// Сводка по базе
     Status,
     /// Найденные каталоги Lightroom
@@ -66,6 +69,40 @@ struct IndexArgs {
     /// Перечитать даже то, что уже в индексе
     #[arg(long)]
     reindex: bool,
+}
+
+#[derive(Subcommand)]
+enum FamiliesCmd {
+    /// Построить семейства по связям и по сходству
+    Build(BuildArgs),
+    /// Показать семейства
+    List(FamListArgs),
+}
+
+#[derive(Args)]
+struct BuildArgs {
+    #[arg(long)]
+    thumbs: Option<PathBuf>,
+    /// Порог расстояния pHash для кандидатов
+    #[arg(long, default_value_t = 10)]
+    phash_max: u32,
+    /// Минимальный SSIM, при котором пара считается одним кадром
+    #[arg(long, default_value_t = 0.90)]
+    ssim_min: f64,
+}
+
+#[derive(Args)]
+struct FamListArgs {
+    #[arg(long, default_value_t = 20)]
+    limit: i64,
+    #[arg(long, default_value_t = 0)]
+    offset: i64,
+    /// Показывать и одиночные кадры
+    #[arg(long)]
+    all: bool,
+    /// Пути, связи и разбор оценки
+    #[arg(long, short)]
+    verbose: bool,
 }
 
 #[derive(Subcommand)]
@@ -142,14 +179,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Scan(a) => scan::run(&db, &a.roots, VERSION),
         Command::Index(a) => {
-            let thumbs = a.thumbs.unwrap_or_else(|| {
-                cli.db
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or(std::path::Path::new("."))
-                    .join("thumbs")
-            });
-            let store = pc_core::ThumbStore::new(&thumbs);
+            let store = pc_core::ThumbStore::new(thumbs_dir(&cli.db, a.thumbs));
             let summary = pc_cli::index::run(
                 &db,
                 &a.roots,
@@ -172,9 +202,56 @@ fn main() -> Result<()> {
             println!("Запись {} откачена.", a.journal);
             Ok(())
         }
+        Command::Families(FamiliesCmd::Build(a)) => {
+            let store = pc_core::ThumbStore::new(thumbs_dir(&cli.db, a.thumbs));
+            let params = pc_family::Params {
+                phash_max: a.phash_max,
+                ssim_min: a.ssim_min,
+                ..Default::default()
+            };
+            let r = pc_family::build(&db, &store, &params)?;
+            println!(
+                "Файлов {}, семейств {} (с несколькими файлами {}).\n\
+                 Точных связей {}, кандидатов по сходству {}, подтверждено {}.\n\
+                 Отклонено: по SSIM {}, как разные кадры серии {}, как однородные {}.",
+                r.files,
+                r.families,
+                r.multi_member,
+                r.exact_links,
+                r.perceptual_candidates,
+                r.perceptual_verified,
+                r.rejected_by_ssim,
+                r.rejected_as_series,
+                r.rejected_as_blank
+            );
+            pc_cli::families::print_summary(&db)?;
+            Ok(())
+        }
+        Command::Families(FamiliesCmd::List(a)) => {
+            let fams = db.families(!a.all, a.limit, a.offset)?;
+            if fams.is_empty() {
+                println!("Нечего показать. Сначала `families build`.");
+                return Ok(());
+            }
+            for f in &fams {
+                pc_cli::families::print_family(f, a.verbose);
+            }
+            pc_cli::families::print_summary(&db)?;
+            Ok(())
+        }
         Command::Status => cmd_status(&db),
         Command::Catalogs => cmd_catalogs(&db),
     }
+}
+
+/// Thumbnails live beside the database unless told otherwise.
+fn thumbs_dir(db: &std::path::Path, given: Option<PathBuf>) -> PathBuf {
+    given.unwrap_or_else(|| {
+        db.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."))
+            .join("thumbs")
+    })
 }
 
 fn parse_kind(s: &str) -> Result<DerivedKind> {

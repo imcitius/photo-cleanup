@@ -1,0 +1,21 @@
+[package]
+name = "pc-family"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pc-core.workspace = true
+pc-db.workspace = true
+pc-hash.workspace = true
+pc-image.workspace = true
+anyhow.workspace = true
+image.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
