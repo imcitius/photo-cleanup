@@ -7,8 +7,9 @@
 
 use pc_db::FileInfo;
 
-/// Path fragments that mark a file as having been through something lossy.
-const LOW_VALUE_PATH: [&str; 10] = [
+/// Path fragments that mark a file as having been through something lossy,
+/// or as living somewhere secondary.
+const LOW_VALUE_PATH: [&str; 16] = [
     "telegram",
     "whatsapp",
     "viber",
@@ -19,6 +20,12 @@ const LOW_VALUE_PATH: [&str; 10] = [
     "cache",
     "thumb",
     "preview",
+    "backup",
+    "бэкап",
+    "резерв",
+    "dump",
+    "восстановлен",
+    "recovered",
 ];
 
 /// Name fragments a derivative tends to carry.
@@ -50,6 +57,13 @@ fn container_rank(f: &FileInfo) -> (f64, &'static str) {
     }
 }
 
+/// What a live Lightroom catalog says about a file.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Curation {
+    pub in_catalog: bool,
+    pub rating: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Score {
     pub total: f64,
@@ -67,7 +81,7 @@ impl Score {
 }
 
 /// `pixels` is the family's best, used to score resolution relatively.
-pub fn score(f: &FileInfo, best_pixels: i64) -> Score {
+pub fn score(f: &FileInfo, best_pixels: i64, curation: Curation) -> Score {
     let mut parts: Vec<(String, f64)> = Vec::new();
 
     // Resolution, relative to the best in the family.
@@ -111,6 +125,15 @@ pub fn score(f: &FileInfo, best_pixels: i64) -> Score {
         parts.push(("след копирования в имени".into(), -8.0));
     }
 
+    // The photographer already judged this frame worth cataloguing, and in
+    // some cases worth stars. No heuristic here outranks that.
+    if curation.in_catalog {
+        parts.push(("в каталоге Lightroom".into(), 25.0));
+    }
+    if let Some(stars) = curation.rating.filter(|r| *r > 0) {
+        parts.push((format!("{stars} звёзд"), stars as f64 * 3.0));
+    }
+
     let total = parts.iter().map(|(_, v)| v).sum();
     Score {
         total,
@@ -141,7 +164,8 @@ mod tests {
         raw.camera_model = Some("ILCE-7M3".into());
         let export = file("/foto/DSC01234-Edit.jpg", 6000, 4000, "jpeg", 4_000_000);
         let best = raw.pixels();
-        assert!(score(&raw, best).total > score(&export, best).total);
+        let d = Curation::default();
+        assert!(score(&raw, best, d).total > score(&export, best, d).total);
     }
 
     #[test]
@@ -149,17 +173,54 @@ mod tests {
         let orig = file("/foto/2019/DSC01234.JPG", 6000, 4000, "jpeg", 8_000_000);
         let tg = file("/Telegram/IMG_20190714.jpg", 1280, 853, "jpeg", 180_000);
         let best = orig.pixels();
-        let (a, b) = (score(&orig, best).total, score(&tg, best).total);
+        let d = Curation::default();
+        let (a, b) = (score(&orig, best, d).total, score(&tg, best, d).total);
         assert!(a > b + 30.0, "разрыв всего {:.0}", a - b);
     }
 
     #[test]
     fn the_breakdown_names_every_term_it_applied() {
         let tg = file("/Telegram/IMG (1).jpg", 800, 600, "jpeg", 90_000);
-        let s = score(&tg, 24_000_000);
+        let s = score(&tg, 24_000_000, Curation::default());
         let text = s.explain();
         assert!(text.contains("telegram"), "{text}");
         assert!(text.contains("след копирования"), "{text}");
+    }
+
+    #[test]
+    fn a_catalogued_frame_outranks_an_identical_one_that_is_not() {
+        let a = file("/foto/2019/DSC01234.JPG", 4000, 3000, "jpeg", 5_000_000);
+        let b = file(
+            "/foto/Backup/2019/DSC01234.JPG",
+            4000,
+            3000,
+            "jpeg",
+            5_000_000,
+        );
+        let best = a.pixels();
+        let curated = Curation {
+            in_catalog: true,
+            rating: Some(5),
+        };
+        assert!(score(&a, best, curated).total > score(&b, best, Curation::default()).total);
+    }
+
+    #[test]
+    fn a_copy_in_a_backup_folder_scores_below_the_one_in_place() {
+        let a = file("/foto/2019/DSC01234.JPG", 4000, 3000, "jpeg", 5_000_000);
+        let b = file(
+            "/foto/Backup/2019/DSC01234.JPG",
+            4000,
+            3000,
+            "jpeg",
+            5_000_000,
+        );
+        let best = a.pixels();
+        let d = Curation::default();
+        assert!(
+            score(&a, best, d).total > score(&b, best, d).total,
+            "бэкап не должен побеждать оригинал"
+        );
     }
 
     #[test]
@@ -167,7 +228,8 @@ mod tests {
         let lean = file("/a/DSC1.jpg", 6000, 4000, "jpeg", 8_000_000);
         let bloated = file("/a/DSC2.jpg", 6000, 4000, "jpeg", 400_000_000);
         let best = lean.pixels();
-        let diff = score(&bloated, best).total - score(&lean, best).total;
+        let d = Curation::default();
+        let diff = score(&bloated, best, d).total - score(&lean, best, d).total;
         assert!(diff <= 8.0, "плотность дала {diff:.0} преимущества");
     }
 }

@@ -587,3 +587,91 @@ impl Db {
         Ok(true)
     }
 }
+
+impl Db {
+    pub fn replace_catalog_files(
+        &self,
+        catalog_id: i64,
+        entries: &[(String, Option<i64>, Option<i64>)],
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM lr_files WHERE catalog_id = ?1",
+            params![catalog_id],
+        )?;
+        let mut st = self.conn.prepare(
+            "INSERT OR REPLACE INTO lr_files(catalog_id, path, rating, pick)
+             VALUES (?1,?2,?3,?4)",
+        )?;
+        for (path, rating, pick) in entries {
+            st.execute(params![catalog_id, path, rating, pick])?;
+        }
+        Ok(())
+    }
+
+    /// Paths a live catalog points at, with the best rating any of them gave.
+    pub fn lightroom_protected(&self) -> Result<std::collections::HashMap<String, Option<i64>>> {
+        let mut st = self.conn.prepare(
+            "SELECT l.path, MAX(l.rating)
+               FROM lr_files l JOIN lr_catalogs c ON c.id = l.catalog_id
+              WHERE c.is_backup = 0
+              GROUP BY l.path",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Members of every family, with what the plan needs to judge them.
+    pub fn plan_rows(&self) -> Result<Vec<PlanRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT fm.family_id, fm.file_id, fm.role, f.path, f.size, f.width, f.height,
+                    f.mtime, f.inode, f.dev, f.disk, f.pixel_hash,
+                    fa.keeper_file
+               FROM family_members fm
+               JOIN files f    ON f.id = fm.file_id
+               JOIN families fa ON fa.id = fm.family_id
+              ORDER BY fm.family_id",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                let file_id: i64 = r.get(1)?;
+                Ok(PlanRow {
+                    family_id: r.get(0)?,
+                    file_id,
+                    role: r.get(2)?,
+                    path: r.get(3)?,
+                    size: r.get(4)?,
+                    width: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    height: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                    mtime: r.get(7)?,
+                    inode: r.get(8)?,
+                    dev: r.get(9)?,
+                    disk: r.get(10)?,
+                    pixel_hash: r.get(11)?,
+                    is_keeper: r.get::<_, Option<i64>>(12)? == Some(file_id),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanRow {
+    pub family_id: i64,
+    pub file_id: i64,
+    pub role: String,
+    pub path: String,
+    pub size: i64,
+    pub width: i64,
+    pub height: i64,
+    pub mtime: i64,
+    pub inode: i64,
+    pub dev: i64,
+    pub disk: String,
+    pub pixel_hash: Option<Vec<u8>>,
+    pub is_keeper: bool,
+}

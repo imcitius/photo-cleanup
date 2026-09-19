@@ -54,14 +54,18 @@ pub fn run(db: &Db, roots: &[PathBuf], version: &str) -> Result<()> {
 
         // A backup catalog is a zip-era artefact or a copy; reading it tells us
         // nothing useful and it never owns a live preview bundle.
+        let mut entries = Vec::new();
         if !c.is_backup {
-            match CatalogReader::open(&c.path).and_then(|r| r.file_count()) {
-                Ok(n) => file_count = Some(n),
+            match CatalogReader::open(&c.path).and_then(|r| r.entries()) {
+                Ok(list) => {
+                    file_count = Some(list.len() as i64);
+                    entries = list;
+                }
                 Err(e) => read_error = Some(e.to_string()),
             }
         }
 
-        db.upsert_catalog(&NewCatalog {
+        let catalog_id = db.upsert_catalog(&NewCatalog {
             path: key.clone(),
             name: c.name.clone(),
             disk: c.disk.label.clone(),
@@ -71,6 +75,16 @@ pub fn run(db: &Db, roots: &[PathBuf], version: &str) -> Result<()> {
             image_count: file_count,
             read_error: read_error.clone(),
         })?;
+
+        // Remember which frames the photographer has curated, so the plan
+        // can refuse to propose them for deletion.
+        if !entries.is_empty() {
+            let rows: Vec<(String, Option<i64>, Option<i64>)> = entries
+                .into_iter()
+                .map(|e| (e.path, e.rating, e.pick))
+                .collect();
+            db.replace_catalog_files(catalog_id, &rows)?;
+        }
 
         catalogs.insert(
             key,

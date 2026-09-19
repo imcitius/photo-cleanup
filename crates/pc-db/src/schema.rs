@@ -171,6 +171,22 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX family_members_role ON family_members(role);
     CREATE INDEX families_taken      ON families(taken_at);
     "#,
+    // 004 — files a live Lightroom catalog points at.
+    //
+    // These are the frames the photographer has already curated. They may be
+    // the keeper of a family, but they are never a deletion candidate until
+    // the protection is lifted deliberately.
+    r#"
+    CREATE TABLE lr_files(
+        catalog_id INTEGER NOT NULL REFERENCES lr_catalogs(id) ON DELETE CASCADE,
+        path       TEXT    NOT NULL,
+        rating     INTEGER,
+        pick       INTEGER,
+        PRIMARY KEY (catalog_id, path)
+    );
+
+    CREATE INDEX lr_files_path ON lr_files(path);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

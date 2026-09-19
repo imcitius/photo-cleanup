@@ -40,6 +40,10 @@ enum Command {
     /// Семейства: один кадр — несколько представлений
     #[command(subcommand)]
     Families(FamiliesCmd),
+    /// Что будет перенесено при текущей политике
+    Plan(PolicyArgs),
+    /// Перенести в карантин по плану
+    Apply(ApplyArgs),
     /// Запустить веб-интерфейс
     Serve(ServeArgs),
     /// Сводка по базе
@@ -53,6 +57,32 @@ struct ScanArgs {
     /// Корень обхода. Указывать /mnt/diskN/..., не /mnt/user/...
     #[arg(long = "root", required = true)]
     roots: Vec<PathBuf>,
+}
+
+#[derive(Args)]
+struct PolicyArgs {
+    /// Роль к удалению; можно повторять. По умолчанию только copy.
+    #[arg(long = "role")]
+    roles: Vec<String>,
+    /// Роль resize удаляется, только если кадр меньше этого
+    #[arg(long, default_value = "2M", value_parser = format::parse_size)]
+    resize_below: i64,
+    /// Снять защиту с файлов, на которые ссылаются каталоги Lightroom
+    #[arg(long)]
+    allow_lightroom: bool,
+    /// Показать все отказы, а не первые несколько
+    #[arg(long)]
+    show_refusals: bool,
+}
+
+#[derive(Args)]
+struct ApplyArgs {
+    #[command(flatten)]
+    policy: PolicyArgs,
+    #[arg(long)]
+    quarantine: Option<PathBuf>,
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -261,6 +291,11 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(pc_api::serve(&cli.db, &thumbs, addr))
         }
+        Command::Plan(a) => cmd_plan(&db, &a, None, false),
+        Command::Apply(a) => {
+            let q = a.quarantine.clone();
+            cmd_plan(&db, &a.policy, q.as_deref(), a.yes)
+        }
         Command::Status => cmd_status(&db),
         Command::Catalogs => cmd_catalogs(&db),
     }
@@ -427,6 +462,111 @@ fn print_index_breakdown(db: &Db) -> Result<()> {
             pc_core::count_ru(lied, "файл", "файла", "файлов")
         );
     }
+    Ok(())
+}
+
+fn build_policy(a: &PolicyArgs) -> Result<pc_family::Policy> {
+    let mut p = pc_family::Policy {
+        resize_below_pixels: a.resize_below.max(0),
+        respect_lightroom: !a.allow_lightroom,
+        ..Default::default()
+    };
+    if !a.roles.is_empty() {
+        p.remove_roles = a
+            .roles
+            .iter()
+            .map(|s| {
+                pc_family::Role::parse(s).with_context(|| {
+                    format!(
+                        "неизвестная роль «{s}». Доступно: copy, resize, export, \
+                         converted, camera-jpg, unknown"
+                    )
+                })
+            })
+            .collect::<Result<_>>()?;
+    }
+    if p.remove_roles.contains(&pc_family::Role::Original) {
+        bail!("роль original удалять нельзя: это сам снимок");
+    }
+    Ok(p)
+}
+
+fn cmd_plan(
+    db: &Db,
+    args: &PolicyArgs,
+    quarantine: Option<&std::path::Path>,
+    execute: bool,
+) -> Result<()> {
+    let policy = build_policy(args)?;
+    let plan = pc_family::plan::compute(db, &policy)?;
+
+    let roles: Vec<&str> = policy.remove_roles.iter().map(|r| r.as_str()).collect();
+    println!(
+        "Политика: удаляются роли [{}]{}\n",
+        roles.join(", "),
+        if policy.respect_lightroom {
+            ", файлы из каталогов Lightroom защищены"
+        } else {
+            ", ЗАЩИТА LIGHTROOM СНЯТА"
+        }
+    );
+
+    if plan.candidates.is_empty() {
+        println!("Под политику ничего не подпадает.");
+    } else {
+        println!(
+            "К переносу: {}, {}\n",
+            pc_core::count_ru(plan.candidates.len() as i64, "файл", "файла", "файлов"),
+            fmt_bytes(plan.bytes() as u64)
+        );
+        for c in plan.candidates.iter().take(15) {
+            println!("  {:>10}  {}", fmt_bytes(c.size as u64), c.path);
+            println!("              {}", c.reason);
+        }
+        if plan.candidates.len() > 15 {
+            println!("  … и ещё {}", plan.candidates.len() - 15);
+        }
+    }
+
+    if !plan.refusals.is_empty() {
+        println!(
+            "\nЗащищено от переноса: {}",
+            pc_core::count_ru(plan.refusals.len() as i64, "файл", "файла", "файлов")
+        );
+        let show = if args.show_refusals {
+            plan.refusals.len()
+        } else {
+            8
+        };
+        for r in plan.refusals.iter().take(show) {
+            println!("  {} — {}", r.path, r.why);
+        }
+        if plan.refusals.len() > show {
+            println!("  … и ещё {} (--show-refusals)", plan.refusals.len() - show);
+        }
+    }
+
+    if !execute {
+        if !plan.candidates.is_empty() {
+            println!("\nДля выполнения: photo-cleanup apply --yes");
+        }
+        return Ok(());
+    }
+
+    let run_id = db
+        .latest_run()?
+        .context("нет ни одного прогона, сначала выполните scan или index")?;
+    println!("\nПроверяю каждый файл перед переносом…");
+    let report = pc_apply::apply(db, run_id, &plan.candidates, quarantine)?;
+    println!("Перенесено: {}", report.totals.summary());
+    for (path, why) in &report.refused {
+        println!("  отказано: {path} — {why}");
+    }
+    println!(
+        "\nМесто пока не освободилось — файлы в карантине.\n\
+         Вернуть: photo-cleanup derived undo --journal <id>\n\
+         Освободить: photo-cleanup derived purge --older-than 7d --yes"
+    );
     Ok(())
 }
 

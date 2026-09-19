@@ -1,13 +1,16 @@
 //! Grouping an archive into families: one photograph, several renditions.
 
+pub mod curation;
 pub mod links;
 pub mod perceptual;
+pub mod plan;
 pub mod quality;
 pub mod roles;
 pub mod unionfind;
 
 pub use links::{Link, LinkKind};
 pub use perceptual::Params;
+pub use plan::{Plan, Policy};
 pub use roles::Role;
 
 use anyhow::Result;
@@ -102,6 +105,10 @@ pub fn build(db: &Db, store: &ThumbStore, params: &Params) -> Result<BuildReport
     }
 
     // --- write out --------------------------------------------------------
+    // What the photographer already curated. This is both a protection and
+    // the strongest quality signal there is, so it belongs in the score.
+    let curated = curation::CurationIndex::build(db.lightroom_protected()?);
+
     let groups = uf.groups();
     db.clear_families()?;
     let run_id = db.latest_run()?.unwrap_or(0);
@@ -115,18 +122,46 @@ pub fn build(db: &Db, store: &ThumbStore, params: &Params) -> Result<BuildReport
             .unwrap_or(0);
         let scores: Vec<quality::Score> = members
             .iter()
-            .map(|&m| quality::score(&files[m], best_pixels))
+            .map(|&m| {
+                let c = curated
+                    .lookup(&files[m].path)
+                    .map(|k| quality::Curation {
+                        in_catalog: true,
+                        rating: k.rating,
+                    })
+                    .unwrap_or_default();
+                quality::score(&files[m], best_pixels, c)
+            })
             .collect();
         let totals: Vec<f64> = scores.iter().map(|s| s.total).collect();
         let member_roles = roles::assign(&files, members, &totals);
 
         // Roles exist only now, so the keeper is chosen here rather than from
         // the raw quality score: an original outranks a larger export.
+        //
+        // Ties are broken deliberately rather than by iteration order. Three
+        // byte-identical copies score the same to the decimal, and letting
+        // chance decide which one is "the original" means the tool can offer
+        // to move the file in its proper place and keep the one in a backup
+        // folder — which is exactly backwards.
         let keeper_pos = (0..members.len())
             .max_by(|&x, &y| {
-                let vx = totals[x] + roles::keeper_bonus(member_roles[x]);
-                let vy = totals[y] + roles::keeper_bonus(member_roles[y]);
-                vx.partial_cmp(&vy).unwrap_or(std::cmp::Ordering::Equal)
+                let key = |i: usize| {
+                    let f = &files[members[i]];
+                    (
+                        totals[i] + roles::keeper_bonus(member_roles[i]),
+                        // Shallower paths are the working copy; deeper ones
+                        // tend to be archives of it.
+                        -(f.path.matches('/').count() as f64),
+                        -(f.path.len() as f64),
+                    )
+                };
+                let (a, b) = (key(x), key(y));
+                a.partial_cmp(&b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    // Final fallback: the path itself, so the answer never
+                    // changes between runs over the same archive.
+                    .then_with(|| files[members[y]].path.cmp(&files[members[x]].path))
             })
             .unwrap_or(0);
 

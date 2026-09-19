@@ -454,16 +454,23 @@ impl Db {
     }
 
     /// Entries still sitting in quarantine, oldest first.
+    ///
+    /// Both kinds count: a regenerable bundle and a photograph are moved by
+    /// different code paths but land in the same quarantine, and anything
+    /// that forgets one of them leaves that space unreclaimable and those
+    /// files invisible to `status` and `purge`.
     pub fn journal_quarantined(&self, applied_before: Option<i64>) -> Result<Vec<JournalEntry>> {
+        const OPS: &str = "op IN ('quarantine', 'quarantine-file')";
         match applied_before {
             Some(ts) => self.journal_rows(
-                "SELECT * FROM journal WHERE status='done' AND op='quarantine'
-                   AND applied_at <= ?1 ORDER BY applied_at",
+                &format!(
+                    "SELECT * FROM journal WHERE status='done' AND {OPS}
+                       AND applied_at <= ?1 ORDER BY applied_at"
+                ),
                 &[&ts],
             ),
             None => self.journal_rows(
-                "SELECT * FROM journal WHERE status='done' AND op='quarantine'
-                 ORDER BY applied_at",
+                &format!("SELECT * FROM journal WHERE status='done' AND {OPS} ORDER BY applied_at"),
                 &[],
             ),
         }

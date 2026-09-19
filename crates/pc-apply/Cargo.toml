@@ -8,6 +8,9 @@ license.workspace = true
 [dependencies]
 pc-core.workspace = true
 pc-db.workspace = true
+pc-family.workspace = true
+pc-image.workspace = true
+pc-hash.workspace = true
 anyhow.workspace = true
 rusqlite.workspace = true
 tracing.workspace = true

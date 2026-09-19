@@ -775,6 +775,9 @@ dependencies = [
  "anyhow",
  "pc-core",
  "pc-db",
+ "pc-family",
+ "pc-hash",
+ "pc-image",
  "rusqlite",
  "tempfile",
  "tracing",
@@ -787,6 +790,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "clap",
+ "image",
  "pc-api",
  "pc-apply",
  "pc-core",
@@ -803,6 +807,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]
@@ -860,6 +865,7 @@ name = "pc-image"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "image",
  "kamadak-exif",
  "quick-xml",

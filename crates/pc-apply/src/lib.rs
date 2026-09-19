@@ -5,6 +5,10 @@
 //! which is on the same filesystem and therefore a `rename(2)`: instant, and
 //! instantly reversible. Space comes back only at `purge`.
 
+pub mod files;
+
+pub use files::{apply, companions, same_picture, ApplyReport, FileOutcome};
+
 use anyhow::{bail, Context, Result};
 use pc_core::{fmt_bytes, Disk};
 use pc_db::{Bundle, BundleState, Db, JournalStatus};
@@ -46,7 +50,7 @@ fn disk_of(b: &Bundle) -> Disk {
 
 /// Device of `path`, or of its nearest existing ancestor when it does not
 /// exist yet.
-fn dev_of_nearest_existing(path: &Path) -> Result<u64> {
+pub(crate) fn dev_of_nearest_existing(path: &Path) -> Result<u64> {
     use std::os::unix::fs::MetadataExt;
     let mut cur = path;
     loop {
@@ -84,6 +88,34 @@ pub fn quarantine_dest(b: &Bundle, override_root: Option<&Path>) -> Result<PathB
                 );
             }
             Ok(root.join(&b.disk).join(rel))
+        }
+    }
+}
+
+/// Where an indexed file goes when quarantined, mirroring its path under the
+/// quarantine root on its own filesystem.
+pub fn quarantine_dest_for(
+    path: &str,
+    _file_id: i64,
+    _db: &Db,
+    override_root: Option<&Path>,
+) -> Result<PathBuf> {
+    let src = PathBuf::from(path);
+    let mut map = pc_core::DiskMap::new();
+    let disk = map.resolve(&src)?;
+    let rel = disk.relative(&src);
+    match override_root {
+        None => Ok(disk.quarantine_root().join(rel)),
+        Some(root) => {
+            let dev = crate::dev_of_nearest_existing(root)?;
+            if dev != disk.dev {
+                bail!(
+                    "карантин {} на другой файловой системе, чем {path} — \
+                     перенос превратился бы в копирование",
+                    root.display()
+                );
+            }
+            Ok(root.join(&disk.label).join(rel))
         }
     }
 }
@@ -134,7 +166,7 @@ fn dir_stats(root: &Path) -> (u64, u64, i64) {
     (count, size, newest)
 }
 
-fn rename_with_parents(src: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn rename_with_parents(src: &Path, dst: &Path) -> Result<()> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -241,9 +273,18 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
     }
     let dst = entry.dst.clone().context("в записи нет пути назначения")?;
     rename_with_parents(Path::new(&dst), Path::new(&entry.src))?;
+    // Sidecars that travelled with the photograph come home with it.
+    for side in files::companions(Path::new(&dst)) {
+        if let Some(name) = side.file_name() {
+            let back = Path::new(&entry.src).with_file_name(name);
+            let _ = rename_with_parents(&side, &back);
+        }
+    }
     db.journal_mark_undone(journal_id)?;
-    if let Some(bid) = entry.target_id {
-        db.set_bundle_state(bid, BundleState::Present)?;
+    if entry.op == "quarantine" {
+        if let Some(bid) = entry.target_id {
+            db.set_bundle_state(bid, BundleState::Present)?;
+        }
     }
     Ok(())
 }
@@ -268,8 +309,12 @@ pub fn purge(db: &Db, older_than_secs: i64) -> Result<Totals> {
         match res {
             Ok(()) => {
                 db.journal_mark_purged(e.id)?;
-                if let Some(bid) = e.target_id {
-                    db.set_bundle_state(bid, BundleState::Purged)?;
+                // Only a bundle has a state to move; a photograph's row is
+                // identified by the journal entry alone.
+                if e.op == "quarantine" {
+                    if let Some(bid) = e.target_id {
+                        db.set_bundle_state(bid, BundleState::Purged)?;
+                    }
                 }
                 t.bundles += 1;
                 t.files += e.file_count as u64;

@@ -8,7 +8,7 @@
 
 use pc_db::FileInfo;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub enum Role {
     Original,
     CameraJpeg,
@@ -128,12 +128,24 @@ pub fn assign(files: &[FileInfo], members: &[usize], quality: &[f64]) -> Vec<Rol
         if twins.len() < 2 {
             continue;
         }
+        // Identical twins score identically, so the tie-break decides which
+        // path is treated as the real one. It must be deterministic, and it
+        // must prefer the copy that is not buried in an archive folder.
         let best = *twins
             .iter()
             .max_by(|&&x, &&y| {
-                quality[x]
-                    .partial_cmp(&quality[y])
+                let key = |i: usize| {
+                    let p = &files[members[i]].path;
+                    (
+                        quality[i],
+                        -(p.matches('/').count() as f64),
+                        -(p.len() as f64),
+                    )
+                };
+                key(x)
+                    .partial_cmp(&key(y))
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| files[members[y]].path.cmp(&files[members[x]].path))
             })
             .unwrap();
         for t in twins {

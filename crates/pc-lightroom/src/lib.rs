@@ -70,6 +70,51 @@ impl CatalogReader {
             .query_row("SELECT COUNT(*) FROM AgLibraryFile", [], |r| r.get(0))?)
     }
 
+    /// Every master the catalog points at, with the judgements the
+    /// photographer already made about it.
+    ///
+    /// A five-star frame with develop history is the last thing that should
+    /// ever be proposed for deletion, and the catalog is the only place that
+    /// knows it.
+    pub fn entries(&self) -> Result<Vec<CatalogEntry>> {
+        for t in ["AgLibraryFile", "AgLibraryFolder", "AgLibraryRootFolder"] {
+            if !table_exists(&self.conn, t) {
+                bail!("нет таблицы {t} (незнакомая версия схемы)");
+            }
+        }
+        // Ratings live in a table that has moved between versions, so the
+        // join is optional: losing a rating is a worse outcome than losing
+        // the protection itself.
+        let has_images = table_exists(&self.conn, "Adobe_images");
+        let sql = if has_images {
+            "SELECT rf.absolutePath, fo.pathFromRoot, f.idx_filename,
+                    i.rating, i.pick, i.fileFormat
+               FROM AgLibraryFile f
+               JOIN AgLibraryFolder fo     ON f.folder = fo.id_local
+               JOIN AgLibraryRootFolder rf ON fo.rootFolder = rf.id_local
+               LEFT JOIN Adobe_images i    ON i.rootFile = f.id_local"
+        } else {
+            "SELECT rf.absolutePath, fo.pathFromRoot, f.idx_filename,
+                    NULL, NULL, NULL
+               FROM AgLibraryFile f
+               JOIN AgLibraryFolder fo     ON f.folder = fo.id_local
+               JOIN AgLibraryRootFolder rf ON fo.rootFolder = rf.id_local"
+        };
+        let mut st = self.conn.prepare(sql)?;
+        let rows = st.query_map([], |r| {
+            let root: String = r.get(0)?;
+            let rel: Option<String> = r.get(1)?;
+            let file: String = r.get(2)?;
+            Ok(CatalogEntry {
+                path: join_catalog_path(&root, rel.as_deref().unwrap_or(""), &file),
+                rating: r.get::<_, Option<f64>>(3)?.map(|v| v as i64),
+                pick: r.get::<_, Option<f64>>(4)?.map(|v| v as i64),
+                format: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Absolute paths of every master file the catalog points at.
     pub fn original_paths(&self) -> Result<Vec<String>> {
         for t in ["AgLibraryFile", "AgLibraryFolder", "AgLibraryRootFolder"] {
@@ -110,6 +155,17 @@ fn join_catalog_path(root: &str, rel: &str, file: &str) -> String {
     s.push('/');
     s.push_str(file);
     s
+}
+
+/// One master file as the catalog sees it.
+#[derive(Debug, Clone)]
+pub struct CatalogEntry {
+    pub path: String,
+    /// Stars, 0 to 5.
+    pub rating: Option<i64>,
+    /// Flag: 1 picked, -1 rejected.
+    pub pick: Option<i64>,
+    pub format: Option<String>,
 }
 
 /// Result of checking whether a catalog's masters are all reachable.
@@ -173,6 +229,55 @@ mod tests {
             r.original_paths().unwrap(),
             vec!["/photos/2019/a.arw", "/photos/2019/b.arw"]
         );
+    }
+
+    #[test]
+    fn reads_ratings_when_the_catalog_has_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cat = tmp.path().join("Rated.lrcat");
+        let conn = Connection::open(&cat).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE AgLibraryRootFolder(id_local INTEGER PRIMARY KEY, absolutePath TEXT);
+             CREATE TABLE AgLibraryFolder(id_local INTEGER PRIMARY KEY, pathFromRoot TEXT, rootFolder INTEGER);
+             CREATE TABLE AgLibraryFile(id_local INTEGER PRIMARY KEY, folder INTEGER, idx_filename TEXT);
+             CREATE TABLE Adobe_images(id_local INTEGER PRIMARY KEY, rootFile INTEGER, rating REAL, pick REAL, fileFormat TEXT);
+             INSERT INTO AgLibraryRootFolder VALUES (1, '/photos/');
+             INSERT INTO AgLibraryFolder     VALUES (1, '', 1);
+             INSERT INTO AgLibraryFile       VALUES (1, 1, 'keep.arw'), (2, 1, 'meh.arw');
+             INSERT INTO Adobe_images        VALUES (1, 1, 5.0, 1.0, 'RAW'), (2, 2, NULL, NULL, 'RAW');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let e = CatalogReader::open(&cat).unwrap().entries().unwrap();
+        assert_eq!(e.len(), 2);
+        let five = e.iter().find(|x| x.path.ends_with("keep.arw")).unwrap();
+        assert_eq!(five.rating, Some(5));
+        assert_eq!(five.pick, Some(1));
+        let plain = e.iter().find(|x| x.path.ends_with("meh.arw")).unwrap();
+        assert_eq!(plain.rating, None);
+    }
+
+    #[test]
+    fn a_catalog_without_the_images_table_still_yields_its_masters() {
+        // Protection matters more than the rating that decorates it.
+        let tmp = tempfile::tempdir().unwrap();
+        let cat = tmp.path().join("Old.lrcat");
+        let conn = Connection::open(&cat).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE AgLibraryRootFolder(id_local INTEGER PRIMARY KEY, absolutePath TEXT);
+             CREATE TABLE AgLibraryFolder(id_local INTEGER PRIMARY KEY, pathFromRoot TEXT, rootFolder INTEGER);
+             CREATE TABLE AgLibraryFile(id_local INTEGER PRIMARY KEY, folder INTEGER, idx_filename TEXT);
+             INSERT INTO AgLibraryRootFolder VALUES (1, '/photos/');
+             INSERT INTO AgLibraryFolder     VALUES (1, '2019/', 1);
+             INSERT INTO AgLibraryFile       VALUES (1, 1, 'a.arw');",
+        )
+        .unwrap();
+        drop(conn);
+        let e = CatalogReader::open(&cat).unwrap().entries().unwrap();
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].path, "/photos/2019/a.arw");
+        assert_eq!(e[0].rating, None);
     }
 
     #[test]

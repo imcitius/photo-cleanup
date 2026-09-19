@@ -5,5 +5,4 @@ pub mod families;
 pub mod format;
 pub mod index;
 pub mod permit;
-pub mod read;
 pub mod scan;

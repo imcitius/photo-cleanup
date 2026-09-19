@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 image.workspace = true
+blake3.workspace = true
 kamadak-exif.workspace = true
 quick-xml.workspace = true
 serde.workspace = true

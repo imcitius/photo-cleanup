@@ -16,7 +16,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use crate::permit::DiskPermits;
-use crate::read;
+use pc_image::read;
 
 pub struct Options {
     pub min_file_size: u64,

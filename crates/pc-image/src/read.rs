@@ -5,8 +5,8 @@
 //! one small head read plus one seek replaces reading the whole file — the
 //! single largest saving in the pipeline.
 
+use crate::{sniff, tiff, Container, HEAD_BYTES};
 use anyhow::{bail, Result};
-use pc_image::{sniff, tiff, Container, HEAD_BYTES};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -87,7 +87,7 @@ pub fn read_for_probe(path: &Path, size: u64) -> Result<Read1> {
             bytes_read += bytes.len() as u64;
             // Byte length only orders the candidates; pixels decide.
             if let Some(e) = tiff::accept_preview(&bytes) {
-                if e.pixels() >= pc_image::thumb::MIN_PREVIEW_PIXELS
+                if e.pixels() >= crate::thumb::MIN_PREVIEW_PIXELS
                     && best.as_ref().is_none_or(|(_, p)| e.pixels() > *p)
                 {
                     best = Some((bytes[..e.len].to_vec(), e.pixels()));

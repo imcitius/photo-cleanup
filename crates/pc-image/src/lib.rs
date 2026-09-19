@@ -3,11 +3,13 @@
 
 pub mod jpeg;
 pub mod meta;
+pub mod read;
 pub mod sniff;
 pub mod thumb;
 pub mod tiff;
 
 pub use meta::{ImageMeta, Provenance};
+pub use read::{full_hash, read_for_probe, Read1};
 pub use sniff::{sniff, Container};
 pub use thumb::{Thumbnail, GRAY_SIDE, THUMB_SIZE};
 
