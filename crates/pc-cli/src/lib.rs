@@ -2,4 +2,7 @@
 //! can be exercised by integration tests rather than only through the binary.
 
 pub mod format;
+pub mod index;
+pub mod permit;
+pub mod read;
 pub mod scan;

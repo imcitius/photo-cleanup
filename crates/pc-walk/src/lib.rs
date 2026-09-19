@@ -14,6 +14,7 @@ use pc_core::{DerivedKind, Disk, DiskMap};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -40,10 +41,52 @@ pub struct CatalogHit {
     pub disk: Disk,
 }
 
+/// A regular file worth looking at. What it actually is gets decided by its
+/// magic bytes later; the walk only filters out what is too small to be a
+/// photograph and what lives somewhere we never index.
+#[derive(Debug, Clone)]
+pub struct FileHit {
+    pub path: PathBuf,
+    pub name: String,
+    pub size: u64,
+    pub mtime: i64,
+    pub inode: u64,
+    pub nlink: u64,
+    pub disk: Disk,
+}
+
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// Files below this are icons, sprites and UI assets from the old drive
+    /// dumps, not photographs.
+    pub min_file_size: u64,
+    /// Collect candidate files, not just derived-data bundles.
+    pub collect_files: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            min_file_size: 100 * 1024,
+            collect_files: false,
+        }
+    }
+}
+
+/// A bundle we refuse to look inside, recorded so the user can see that it
+/// was found and deliberately left alone.
+#[derive(Debug, Clone)]
+pub struct ProtectedHit {
+    pub path: PathBuf,
+    pub name: String,
+}
+
 #[derive(Debug, Default)]
 pub struct ScanResult {
     pub bundles: Vec<BundleHit>,
     pub catalogs: Vec<CatalogHit>,
+    pub files: Vec<FileHit>,
+    pub protected: Vec<ProtectedHit>,
     pub dirs_visited: u64,
     pub errors: Vec<String>,
 }
@@ -52,6 +95,8 @@ impl ScanResult {
     fn merge(&mut self, other: ScanResult) {
         self.bundles.extend(other.bundles);
         self.catalogs.extend(other.catalogs);
+        self.files.extend(other.files);
+        self.protected.extend(other.protected);
         self.dirs_visited += other.dirs_visited;
         self.errors.extend(other.errors);
     }
@@ -77,7 +122,7 @@ fn dir_stats(root: &Path) -> (u64, u64, i64) {
     (count, size, newest)
 }
 
-fn walk_dir(dir: &Path, disk: &Disk, out: &mut ScanResult) {
+fn walk_dir(dir: &Path, disk: &Disk, opts: &Options, out: &mut ScanResult) {
     out.dirs_visited += 1;
 
     let rd = match fs::read_dir(dir) {
@@ -106,6 +151,11 @@ fn walk_dir(dir: &Path, disk: &Disk, out: &mut ScanResult) {
             if name == pc_core::QUARANTINE_DIR {
                 continue;
             }
+            // Photo libraries own their contents; we neither index nor touch.
+            if pc_core::is_protected_bundle(&name) {
+                out.protected.push(ProtectedHit { path, name });
+                continue;
+            }
             if let Some((kind, owner_base)) = classify_dir(&name) {
                 let (file_count, size, newest_mtime) = dir_stats(&path);
                 let owner_ref = owner_base.map(|b| dir.join(format!("{b}.lrcat")));
@@ -125,7 +175,7 @@ fn walk_dir(dir: &Path, disk: &Disk, out: &mut ScanResult) {
             if pc_core::is_pruned_dir_name(&name) {
                 continue;
             }
-            walk_dir(&path, disk, out);
+            walk_dir(&path, disk, opts, out);
             continue;
         }
 
@@ -159,6 +209,23 @@ fn walk_dir(dir: &Path, disk: &Disk, out: &mut ScanResult) {
                 newest_mtime: md.as_ref().map(pc_core::time::mtime_unix).unwrap_or(0),
                 disk: disk.clone(),
             });
+            continue;
+        }
+
+        if opts.collect_files {
+            let Ok(md) = entry.metadata() else { continue };
+            if md.len() < opts.min_file_size {
+                continue;
+            }
+            out.files.push(FileHit {
+                name,
+                size: md.len(),
+                mtime: pc_core::time::mtime_unix(&md),
+                inode: md.ino(),
+                nlink: md.nlink(),
+                disk: disk.clone(),
+                path,
+            });
         }
     }
 }
@@ -168,6 +235,10 @@ fn walk_dir(dir: &Path, disk: &Disk, out: &mut ScanResult) {
 /// An Unraid array is not striped, so parallelism pays off across spindles but
 /// hurts within one: each disk gets a single sequential walker.
 pub fn scan(roots: &[PathBuf]) -> Result<ScanResult> {
+    scan_with(roots, &Options::default())
+}
+
+pub fn scan_with(roots: &[PathBuf], opts: &Options) -> Result<ScanResult> {
     let mut map = DiskMap::new();
     let mut by_disk: BTreeMap<u64, (Disk, Vec<PathBuf>)> = BTreeMap::new();
 
@@ -188,7 +259,7 @@ pub fn scan(roots: &[PathBuf]) -> Result<ScanResult> {
         let mut local = ScanResult::default();
         for p in &paths {
             tracing::info!(disk = %disk.label, root = %p.display(), "обход");
-            walk_dir(p, &disk, &mut local);
+            walk_dir(p, &disk, opts, &mut local);
         }
         merged.lock().unwrap().merge(local);
     });
@@ -196,5 +267,41 @@ pub fn scan(roots: &[PathBuf]) -> Result<ScanResult> {
     let mut out = merged.into_inner().unwrap();
     out.bundles.sort_by_key(|b| std::cmp::Reverse(b.size));
     out.catalogs.sort_by(|a, b| a.path.cmp(&b.path));
+    // Read order follows the inode, so the head of a spinning disk travels
+    // forward through the platter instead of chasing directory order.
+    out.files.sort_by_key(|f| (f.disk.dev, f.inode));
     Ok(out)
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::*;
+
+    #[test]
+    fn a_photos_library_is_recorded_but_never_entered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("Photos Library.photoslibrary/originals/A");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("1234.heic"), vec![0u8; 200_000]).unwrap();
+        // A loose photograph beside it must still be seen.
+        std::fs::write(tmp.path().join("loose.jpg"), vec![0u8; 200_000]).unwrap();
+
+        let r = scan_with(
+            &[tmp.path().to_path_buf()],
+            &Options {
+                collect_files: true,
+                min_file_size: 1024,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(r.protected.len(), 1);
+        assert!(r.protected[0].name.ends_with(".photoslibrary"));
+        let names: Vec<_> = r.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["loose.jpg"],
+            "внутрь библиотеки заходить нельзя"
+        );
+    }
 }

@@ -30,8 +30,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Обойти корни и составить опись
+    /// Обойти корни и составить опись производных данных
     Scan(ScanArgs),
+    /// Прочитать изображения и построить индекс
+    Index(IndexArgs),
     /// Регенерируемые данные: превью Lightroom, кэши, системный мусор
     #[command(subcommand)]
     Derived(DerivedCmd),
@@ -46,6 +48,24 @@ struct ScanArgs {
     /// Корень обхода. Указывать /mnt/diskN/..., не /mnt/user/...
     #[arg(long = "root", required = true)]
     roots: Vec<PathBuf>,
+}
+
+#[derive(Args)]
+struct IndexArgs {
+    #[arg(long = "root", required = true)]
+    roots: Vec<PathBuf>,
+    /// Каталог кэша тамбнейлов. По умолчанию рядом с базой.
+    #[arg(long)]
+    thumbs: Option<PathBuf>,
+    /// Минимальный размер файла; меньше — иконки и ассеты, не фотографии
+    #[arg(long, default_value = "100K", value_parser = format::parse_size)]
+    min_size: i64,
+    /// Читателей на физический диск. Больше двух на HDD только вредит.
+    #[arg(long, default_value_t = 2)]
+    readers_per_disk: usize,
+    /// Перечитать даже то, что уже в индексе
+    #[arg(long)]
+    reindex: bool,
 }
 
 #[derive(Subcommand)]
@@ -121,6 +141,29 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Scan(a) => scan::run(&db, &a.roots, VERSION),
+        Command::Index(a) => {
+            let thumbs = a.thumbs.unwrap_or_else(|| {
+                cli.db
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(std::path::Path::new("."))
+                    .join("thumbs")
+            });
+            let store = pc_core::ThumbStore::new(&thumbs);
+            let summary = pc_cli::index::run(
+                &db,
+                &a.roots,
+                &store,
+                &pc_cli::index::Options {
+                    min_file_size: a.min_size.max(0) as u64,
+                    readers_per_disk: a.readers_per_disk.max(1),
+                    reindex: a.reindex,
+                },
+            )?;
+            println!("\n{}", summary.report());
+            print_index_breakdown(&db)?;
+            Ok(())
+        }
         Command::Derived(DerivedCmd::List(a)) => cmd_list(&db, a),
         Command::Derived(DerivedCmd::Clean(a)) => cmd_clean(&db, a),
         Command::Derived(DerivedCmd::Purge(a)) => cmd_purge(&db, a),
@@ -264,6 +307,30 @@ fn cmd_purge(db: &Db, a: PurgeArgs) -> Result<()> {
     Ok(())
 }
 
+fn print_index_breakdown(db: &Db) -> Result<()> {
+    let rows = db.container_counts()?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    println!("\nПо контейнерам:");
+    for (name, count, bytes) in rows {
+        println!(
+            "  {:<16} {:>8}  {:>10}",
+            name,
+            pc_core::count_ru(count, "файл", "файла", "файлов"),
+            fmt_bytes(bytes as u64)
+        );
+    }
+    let lied = db.mislabelled_count()?;
+    if lied > 0 {
+        println!(
+            "\n{} — расширение не совпало с содержимым.",
+            pc_core::count_ru(lied, "файл", "файла", "файлов")
+        );
+    }
+    Ok(())
+}
+
 fn cmd_status(db: &Db) -> Result<()> {
     let all = db.list_bundles(&pc_db::model::BundleFilter::default())?;
     let present: Vec<_> = all
@@ -286,6 +353,14 @@ fn cmd_status(db: &Db) -> Result<()> {
         blocked.len(),
         fmt_bytes(sum(&blocked))
     );
+
+    let idx = db.index_stats()?;
+    if idx.total > 0 {
+        println!(
+            "\nВ индексе файлов:    {}\n  изображений:       {:>4}\n  пропущено:         {:>4}",
+            idx.total, idx.images, idx.skipped
+        );
+    }
 
     let q = pc_apply::quarantined_totals(db)?;
     println!("\nВ карантине:         {}", q.summary());

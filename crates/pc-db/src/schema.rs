@@ -74,6 +74,75 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX journal_status ON journal(status);
     CREATE INDEX journal_target ON journal(target_kind, target_id);
     "#,
+    // 002 — phase 1: the image index itself.
+    r#"
+    CREATE TABLE files(
+        id              INTEGER PRIMARY KEY,
+        path            TEXT    NOT NULL UNIQUE,
+        name            TEXT    NOT NULL,
+        disk            TEXT    NOT NULL,
+        dev             INTEGER NOT NULL,
+        inode           INTEGER NOT NULL,
+        nlink           INTEGER NOT NULL,
+        size            INTEGER NOT NULL,
+        mtime           INTEGER NOT NULL,
+        container       TEXT,
+        extension_lied  INTEGER NOT NULL DEFAULT 0,
+        width           INTEGER,
+        height          INTEGER,
+        orientation     INTEGER,
+        pixel_source    TEXT,
+        -- size plus the head and tail of the file: enough to separate photos
+        -- without reading 149 GiB of sensor data. The full hash is computed
+        -- only when a file is about to be acted on.
+        partial_hash    BLOB,
+        full_hash       BLOB,
+        pixel_hash      BLOB,
+        phash           INTEGER,
+        dhash           INTEGER,
+        phash_crops     BLOB,
+        thumb_key       TEXT,
+        skipped_reason  TEXT,
+        indexed_run     INTEGER REFERENCES runs(id),
+        first_seen_run  INTEGER,
+        last_seen_run   INTEGER
+    );
+
+    CREATE INDEX files_partial ON files(partial_hash);
+    CREATE INDEX files_pixel   ON files(pixel_hash);
+    CREATE INDEX files_phash   ON files(phash);
+    CREATE INDEX files_size    ON files(size);
+    CREATE INDEX files_inode   ON files(dev, inode);
+    CREATE INDEX files_disk    ON files(disk);
+    CREATE INDEX files_name    ON files(name);
+
+    CREATE TABLE meta(
+        file_id         INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        taken_at        INTEGER,
+        date_source     TEXT,
+        camera_make     TEXT,
+        camera_model    TEXT,
+        body_serial     TEXT,
+        lens            TEXT,
+        iso             INTEGER,
+        f_number        REAL,
+        focal_length    REAL,
+        exposure        TEXT,
+        gps_lat         REAL,
+        gps_lon         REAL,
+        software        TEXT,
+        xmp_document_id TEXT,
+        xmp_original_id TEXT,
+        xmp_derived_from TEXT,
+        dng_original_raw TEXT
+    );
+
+    CREATE INDEX meta_taken     ON meta(taken_at);
+    CREATE INDEX meta_shot      ON meta(body_serial, taken_at);
+    CREATE INDEX meta_dng       ON meta(dng_original_raw);
+    CREATE INDEX meta_docid     ON meta(xmp_document_id);
+    CREATE INDEX meta_derived   ON meta(xmp_derived_from);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

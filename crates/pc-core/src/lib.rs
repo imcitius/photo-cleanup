@@ -2,10 +2,12 @@
 
 pub mod bytes;
 pub mod disk;
+pub mod thumbstore;
 pub mod time;
 
 pub use bytes::fmt_bytes;
 pub use disk::{Disk, DiskMap};
+pub use thumbstore::ThumbStore;
 
 use std::path::Path;
 
@@ -116,6 +118,27 @@ pub fn is_system_junk_name(name: &str) -> bool {
     name == ".DS_Store" || name == "Thumbs.db" || name == "desktop.ini" || name.starts_with("._")
 }
 
+/// Application bundles that own their contents and must never be touched.
+///
+/// An Apple Photos library keeps its originals under UUID names and a SQLite
+/// database that maps them; moving or deleting anything inside corrupts the
+/// library, and a later "repair" can purge what it thinks are orphans. The
+/// only correct way to delete from one is through Photos itself.
+///
+/// These are pruned outright for now. Indexing them read-only — so that loose
+/// copies of photographs they already hold can be removed safely — is a
+/// separate piece of work.
+pub fn is_protected_bundle(name: &str) -> bool {
+    const SUFFIXES: [&str; 5] = [
+        ".photoslibrary",
+        ".photolibrary",
+        ".migratedphotolibrary",
+        ".aplibrary",
+        ".pvm",
+    ];
+    SUFFIXES.iter().any(|s| name.ends_with(s)) || name == "Photo Booth Library"
+}
+
 /// Directories that are pruned during the walk and never indexed.
 pub fn is_pruned_dir_name(name: &str) -> bool {
     matches!(
@@ -131,7 +154,32 @@ pub fn is_pruned_dir_name(name: &str) -> bool {
             | "#recycle"
             | "node_modules"
             | ".git"
+            | "Program Files"
+            | "Windows"
+            | "AppData"
     )
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    #[test]
+    fn photo_libraries_are_protected() {
+        assert!(is_protected_bundle("Photos Library.photoslibrary"));
+        assert!(is_protected_bundle("Old.migratedphotolibrary"));
+        assert!(is_protected_bundle("Photo Booth Library"));
+        assert!(!is_protected_bundle("Lightroom_lib"));
+        assert!(!is_protected_bundle("foto"));
+    }
+
+    #[test]
+    fn junk_names_are_recognised() {
+        assert!(is_system_junk_name(".DS_Store"));
+        assert!(is_system_junk_name("._DSC01234.ARW"));
+        assert!(is_system_junk_name("Thumbs.db"));
+        assert!(!is_system_junk_name("DSC01234.ARW"));
+    }
 }
 
 /// Our own quarantine directory, so a rescan never re-reports quarantined data.

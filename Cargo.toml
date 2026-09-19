@@ -14,6 +14,8 @@ pc-db        = { path = "crates/pc-db" }
 pc-walk      = { path = "crates/pc-walk" }
 pc-lightroom = { path = "crates/pc-lightroom" }
 pc-apply     = { path = "crates/pc-apply" }
+pc-image     = { path = "crates/pc-image" }
+pc-hash      = { path = "crates/pc-hash" }
 
 anyhow = "1"
 thiserror = "2"
@@ -26,6 +28,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
 rayon = "1"
 tempfile = "3"
+blake3 = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "bmp", "webp", "gif"] }
+kamadak-exif = "0.6"
+quick-xml = "0.38"
+memmap2 = "0.9"
 
 [profile.release]
 opt-level = 3
