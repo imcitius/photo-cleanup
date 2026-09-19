@@ -64,21 +64,67 @@ photo-cleanup derived purge --older-than 7d --yes
 `system-junk`. Вид `lr-catalog-data` существует в описи, но недоступен для
 удаления.
 
-## Docker
+## Запуск на NAS
+
+Образ, собранный на Маке, живёт в демоне Мака — на NAS это другая машина
+и другой Docker. Сборку надо доставить.
+
+Самый простой путь: **собрать на самом NAS и получить статический бинарь**,
+который запускается без контейнера вообще.
 
 ```bash
-docker buildx build --platform linux/amd64 -t photo-cleanup:dev --load .
+scripts/deploy-to-nas.sh root@tower /mnt/user/appdata/photo-cleanup
+```
+
+Скрипт копирует исходники по rsync, запускает сборку там (архитектура
+совпадает, эмуляции нет) и оставляет `/mnt/user/appdata/photo-cleanup/photo-cleanup`.
+
+Вручную то же самое:
+
+```bash
+rsync -az --delete --exclude target --exclude .git . root@tower:/mnt/user/appdata/photo-cleanup/src/
 ```
 
 ```bash
+ssh root@tower "cd /mnt/user/appdata/photo-cleanup/src && docker build --target export --output type=local,dest=.. ."
+```
+
+Бинарь статический (musl, SQLite вкомпилирован), зависимостей нет — на Unraid
+переживает обновления ОС.
+
+### Если собирать всё-таки на Маке
+
+Тогда образ нужно перенести целиком:
+
+```bash
+docker build --platform linux/amd64 -t photo-cleanup:dev .
+```
+
+```bash
+docker save photo-cleanup:dev | gzip | ssh root@tower "gunzip | docker load"
+```
+
+Либо выгрузить один бинарь и скопировать его:
+
+```bash
+docker build --platform linux/amd64 --target export --output type=local,dest=./dist .
+```
+
+```bash
+scp dist/photo-cleanup root@tower:/mnt/user/appdata/photo-cleanup/
+```
+
+### Запуск в контейнере
+
+```bash
 docker run --rm \
-  -v /mnt/disk1:/mnt/disk1 -v /mnt/disk2:/mnt/disk2 -v /mnt/disk3:/mnt/disk3 \
+  -v /mnt/disk1:/mnt/disk1:ro -v /mnt/disk2:/mnt/disk2:ro -v /mnt/disk3:/mnt/disk3:ro \
   -v /mnt/cache/appdata/photo-cleanup:/db \
   photo-cleanup:dev --db /db/pc.db scan --root /mnt/disk3/data/media/foto
 ```
 
-На фазе сканирования монтируйте диски read-only (`-v /mnt/disk3:/mnt/disk3:ro`);
-запись нужна только для `clean`, `undo` и `purge`.
+На фазе сканирования монтируйте диски read-only; запись нужна только для
+`clean`, `undo` и `purge`.
 
 ## Структура
 

@@ -1,0 +1,7 @@
+target
+.git
+.a5c
+*.db
+*.db-wal
+*.db-shm
+dist
