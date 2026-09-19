@@ -179,3 +179,24 @@ button.small {
   padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 13px;
 }
 .qrow .grow { flex: 1; overflow-wrap: anywhere; }
+
+/* ---- series ---- */
+
+.series {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px 14px; margin-bottom: 10px;
+}
+.series h3 { margin: 0 0 2px; font-size: 14px; font-weight: 600; }
+.series .meta { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+.strip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; }
+.shot { flex: 0 0 148px; }
+.shot img {
+  width: 148px; height: 99px; object-fit: cover; border-radius: 6px;
+  border: 2px solid transparent; background: var(--bg); cursor: zoom-in;
+}
+.shot.best img { border-color: var(--accent); }
+.shot .cap { font-size: 11px; color: var(--muted); margin-top: 3px; overflow-wrap: anywhere; }
+.shot .best-tag { color: var(--accent); font-weight: 650; font-size: 11px; }
+.protected-note {
+  color: var(--danger); font-size: 12px; font-weight: 600; margin-bottom: 8px;
+}

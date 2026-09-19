@@ -28,6 +28,11 @@ pub struct NewFile {
     pub phash_crops: Option<Vec<u8>>,
     pub thumb_key: Option<String>,
     pub skipped_reason: Option<String>,
+    pub sharpness: Option<f64>,
+    pub clip_low: Option<f64>,
+    pub clip_high: Option<f64>,
+    pub entropy: Option<f64>,
+    pub contrast: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -125,9 +130,10 @@ impl Db {
             "INSERT INTO files(path, name, disk, dev, inode, nlink, size, mtime, container,
                                extension_lied, width, height, orientation, pixel_source,
                                partial_hash, pixel_hash, phash, dhash, phash_crops, thumb_key,
-                               skipped_reason, indexed_run, first_seen_run, last_seen_run)
+                               skipped_reason, indexed_run, first_seen_run, last_seen_run,
+                               sharpness, clip_low, clip_high, entropy, contrast)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
-                     ?21,?22,?22,?22)
+                     ?21,?22,?22,?22,?23,?24,?25,?26,?27)
              ON CONFLICT(path) DO UPDATE SET
                  name=excluded.name, disk=excluded.disk, dev=excluded.dev,
                  inode=excluded.inode, nlink=excluded.nlink, size=excluded.size,
@@ -138,7 +144,9 @@ impl Db {
                  pixel_hash=excluded.pixel_hash, phash=excluded.phash, dhash=excluded.dhash,
                  phash_crops=excluded.phash_crops, thumb_key=excluded.thumb_key,
                  skipped_reason=excluded.skipped_reason, indexed_run=excluded.indexed_run,
-                 last_seen_run=excluded.last_seen_run",
+                 last_seen_run=excluded.last_seen_run, sharpness=excluded.sharpness,
+                 clip_low=excluded.clip_low, clip_high=excluded.clip_high,
+                 entropy=excluded.entropy, contrast=excluded.contrast",
             params![
                 f.path,
                 f.name,
@@ -161,7 +169,12 @@ impl Db {
                 f.phash_crops,
                 f.thumb_key,
                 f.skipped_reason,
-                run_id
+                run_id,
+                f.sharpness,
+                f.clip_low,
+                f.clip_high,
+                f.entropy,
+                f.contrast
             ],
         )?;
         Ok(self.conn.query_row(
@@ -298,6 +311,12 @@ pub struct FileInfo {
     pub orig_doc_id: Option<String>,
     pub derived_from: Option<String>,
     pub dng_original_raw: Option<String>,
+    pub sharpness: Option<f64>,
+    pub clip_low: Option<f64>,
+    pub clip_high: Option<f64>,
+    pub entropy: Option<f64>,
+    pub contrast: Option<f64>,
+    pub lens: Option<String>,
 }
 
 impl FileInfo {
@@ -341,7 +360,8 @@ impl Db {
                     f.phash_crops, f.thumb_key,
                     m.taken_at, m.camera_model, m.body_serial, m.software,
                     m.xmp_document_id, m.xmp_original_id, m.xmp_derived_from,
-                    m.dng_original_raw
+                    m.dng_original_raw, m.lens,
+                    f.sharpness, f.clip_low, f.clip_high, f.entropy, f.contrast
                FROM files f LEFT JOIN meta m ON m.file_id = f.id
               WHERE f.phash IS NOT NULL AND f.state = 'present'
               ORDER BY f.id",
@@ -371,6 +391,12 @@ impl Db {
                     orig_doc_id: r.get(19)?,
                     derived_from: r.get(20)?,
                     dng_original_raw: r.get(21)?,
+                    lens: r.get(22)?,
+                    sharpness: r.get(23)?,
+                    clip_low: r.get(24)?,
+                    clip_high: r.get(25)?,
+                    entropy: r.get(26)?,
+                    contrast: r.get(27)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -684,4 +710,156 @@ pub struct PlanRow {
     pub disk: String,
     pub pixel_hash: Option<Vec<u8>>,
     pub is_keeper: bool,
+}
+
+impl Db {
+    pub fn clear_series(&self) -> Result<()> {
+        self.conn
+            .execute_batch("DELETE FROM series_members; DELETE FROM series;")?;
+        Ok(())
+    }
+
+    pub fn insert_series(
+        &self,
+        kind: &str,
+        started_at: Option<i64>,
+        camera: Option<&str>,
+        best: Option<i64>,
+        protected: bool,
+        run_id: i64,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO series(kind, started_at, camera, best_file, protected, built_run)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![kind, started_at, camera, best, protected as i64, run_id],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn insert_series_member(
+        &self,
+        series_id: i64,
+        file_id: i64,
+        rank: i64,
+        score: f64,
+        breakdown: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO series_members(series_id, file_id, rank, score, breakdown)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![series_id, file_id, rank, score, breakdown],
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SeriesMemberRow {
+    pub file_id: i64,
+    pub name: String,
+    pub path: String,
+    pub rank: i64,
+    pub score: f64,
+    pub breakdown: String,
+    pub sharpness: Option<f64>,
+    pub thumb_key: Option<String>,
+    pub taken_at: Option<i64>,
+    pub is_best: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SeriesRow {
+    pub id: i64,
+    pub kind: String,
+    pub started_at: Option<i64>,
+    pub camera: Option<String>,
+    pub protected: bool,
+    pub members: Vec<SeriesMemberRow>,
+}
+
+impl Db {
+    pub fn series_count(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM series", [], |r| r.get(0))?)
+    }
+
+    pub fn series_list(&self, limit: i64, offset: i64) -> Result<Vec<SeriesRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT id FROM series ORDER BY (
+                 SELECT COUNT(*) FROM series_members m WHERE m.series_id = series.id
+             ) DESC, started_at LIMIT ?1 OFFSET ?2",
+        )?;
+        let ids = st
+            .query_map(params![limit, offset], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(st);
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(s) = self.series(id)? {
+                out.push(s);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn series(&self, id: i64) -> Result<Option<SeriesRow>> {
+        let head = self
+            .conn
+            .query_row(
+                "SELECT id, kind, started_at, camera, protected, best_file
+                   FROM series WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, i64>(4)? != 0,
+                        r.get::<_, Option<i64>>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, kind, started_at, camera, protected, best)) = head else {
+            return Ok(None);
+        };
+
+        let mut st = self.conn.prepare(
+            "SELECT sm.file_id, f.name, f.path, sm.rank, sm.score, sm.breakdown,
+                    f.sharpness, f.thumb_key, m.taken_at
+               FROM series_members sm
+               JOIN files f ON f.id = sm.file_id
+               LEFT JOIN meta m ON m.file_id = f.id
+              WHERE sm.series_id = ?1
+              ORDER BY sm.rank",
+        )?;
+        let members = st
+            .query_map(params![id], |r| {
+                let file_id: i64 = r.get(0)?;
+                Ok(SeriesMemberRow {
+                    file_id,
+                    name: r.get(1)?,
+                    path: r.get(2)?,
+                    rank: r.get(3)?,
+                    score: r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+                    breakdown: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    sharpness: r.get(6)?,
+                    thumb_key: r.get(7)?,
+                    taken_at: r.get(8)?,
+                    is_best: Some(file_id) == best,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(Some(SeriesRow {
+            id,
+            kind,
+            started_at,
+            camera,
+            protected,
+            members,
+        }))
+    }
 }

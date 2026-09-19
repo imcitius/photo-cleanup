@@ -4,7 +4,10 @@ pub mod files;
 pub mod model;
 pub mod schema;
 
-pub use files::{FamilyRow, FileInfo, FileRow, IndexStats, MemberRow, NewFile, NewMeta, PlanRow};
+pub use files::{
+    FamilyRow, FileInfo, FileRow, IndexStats, MemberRow, NewFile, NewMeta, PlanRow,
+    SeriesMemberRow, SeriesRow,
+};
 pub use model::{
     Bundle, BundleState, Catalog, JournalEntry, JournalStatus, NewBundle, NewCatalog,
     NewJournalEntry,

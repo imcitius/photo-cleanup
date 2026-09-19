@@ -603,3 +603,93 @@ pub async fn undo(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) -> R
             .into_response(),
     }
 }
+
+// ---- series -------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct SeriesQuery {
+    #[serde(default = "default_series_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+}
+
+fn default_series_limit() -> i64 {
+    20
+}
+
+#[derive(Serialize)]
+pub struct SeriesMemberOut {
+    file_id: i64,
+    name: String,
+    dir: String,
+    rank: i64,
+    score: f64,
+    breakdown: String,
+    sharpness: Option<f64>,
+    thumb: Option<String>,
+    taken_at: Option<i64>,
+    is_best: bool,
+}
+
+#[derive(Serialize)]
+pub struct SeriesOut {
+    id: i64,
+    kind: String,
+    label: &'static str,
+    started_at: Option<i64>,
+    camera: Option<String>,
+    protected: bool,
+    members: Vec<SeriesMemberOut>,
+}
+
+#[derive(Serialize)]
+pub struct SeriesPage {
+    total: i64,
+    series: Vec<SeriesOut>,
+}
+
+pub async fn series(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<SeriesQuery>,
+) -> Api<SeriesPage> {
+    let db = st.db.lock().unwrap();
+    let rows = db.series_list(q.limit.clamp(1, 100), q.offset.max(0))?;
+    Ok(Json(SeriesPage {
+        total: db.series_count()?,
+        series: rows
+            .into_iter()
+            .map(|s| SeriesOut {
+                id: s.id,
+                label: match s.kind.as_str() {
+                    "pixel-shift" => "pixel-shift",
+                    "bracket" => "брекетинг",
+                    _ => "серия",
+                },
+                kind: s.kind,
+                started_at: s.started_at,
+                camera: s.camera,
+                protected: s.protected,
+                members: s
+                    .members
+                    .into_iter()
+                    .map(|m| SeriesMemberOut {
+                        file_id: m.file_id,
+                        dir: m
+                            .path
+                            .rsplit_once('/')
+                            .map_or(String::new(), |(a, _)| a.into()),
+                        name: m.name,
+                        rank: m.rank,
+                        score: m.score,
+                        breakdown: m.breakdown,
+                        sharpness: m.sharpness,
+                        thumb: m.thumb_key,
+                        taken_at: m.taken_at,
+                        is_best: m.is_best,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }))
+}

@@ -196,6 +196,38 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE files ADD COLUMN state TEXT NOT NULL DEFAULT 'present';
     CREATE INDEX files_state ON files(state);
     "#,
+    // 006 — phase 3: technical quality, and the series it lets us rank.
+    r#"
+    ALTER TABLE files ADD COLUMN sharpness REAL;
+    ALTER TABLE files ADD COLUMN clip_low  REAL;
+    ALTER TABLE files ADD COLUMN clip_high REAL;
+    ALTER TABLE files ADD COLUMN entropy   REAL;
+    ALTER TABLE files ADD COLUMN contrast  REAL;
+
+    CREATE TABLE series(
+        id         INTEGER PRIMARY KEY,
+        kind       TEXT    NOT NULL,
+        started_at INTEGER,
+        camera     TEXT,
+        best_file  INTEGER REFERENCES files(id),
+        -- Pixel-shift sets are four frames of one scene that a camera merges
+        -- later. They look identical and must never be thinned.
+        protected  INTEGER NOT NULL DEFAULT 0,
+        built_run  INTEGER REFERENCES runs(id)
+    );
+
+    CREATE TABLE series_members(
+        series_id INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+        file_id   INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        rank      INTEGER NOT NULL,
+        score     REAL,
+        breakdown TEXT,
+        PRIMARY KEY (series_id, file_id)
+    );
+
+    CREATE INDEX series_members_file ON series_members(file_id);
+    CREATE INDEX series_started      ON series(started_at);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

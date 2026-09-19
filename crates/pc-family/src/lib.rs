@@ -6,6 +6,7 @@ pub mod perceptual;
 pub mod plan;
 pub mod quality;
 pub mod roles;
+pub mod series;
 pub mod unionfind;
 
 pub use links::{Link, LinkKind};

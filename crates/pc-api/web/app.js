@@ -288,6 +288,61 @@ async function renderDerived() {
 }
 
 
+// ---- series -------------------------------------------------------------
+
+async function renderSeries() {
+  const root = $('#series');
+  root.replaceChildren(el('p', 'empty', 'Загрузка…'));
+  let data;
+  try {
+    data = await api('/api/series?limit=25');
+  } catch (e) {
+    root.replaceChildren(el('p', 'empty', 'Ошибка: ' + e.message));
+    return;
+  }
+  if (!data.series.length) {
+    root.replaceChildren(el('p', 'empty',
+      'Серий нет. Выполните `photo-cleanup series build`.'));
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  frag.append(el('p', 'muted',
+    `${plural(data.total, 'серия', 'серии', 'серий')} · ` +
+    'кадры серии не дубликаты: инструмент лишь отмечает лучший'));
+
+  for (const s of data.series) {
+    const node = el('div', 'series');
+    node.append(el('h3', null,
+      `${s.label} · ${plural(s.members.length, 'кадр', 'кадра', 'кадров')}`));
+    node.append(el('div', 'meta',
+      [when(s.started_at), s.camera || 'камера неизвестна'].join(' · ')));
+    if (s.protected) {
+      node.append(el('div', 'protected-note',
+        'Не прореживать: один снимок, хранится несколькими файлами (pixel-shift).'));
+    }
+
+    const strip = el('div', 'strip');
+    for (const m of s.members) {
+      const shot = el('div', 'shot' + (m.is_best ? ' best' : ''));
+      const img = el('img');
+      img.loading = 'lazy';
+      img.alt = m.name;
+      img.title = `${m.name}\n${m.breakdown}`;
+      img.src = m.thumb ? `/api/thumb/${m.thumb}` : '';
+      img.addEventListener('click', () => openFull(m.file_id, m.dir + '/' + m.name));
+      shot.append(img);
+      if (m.is_best) shot.append(el('div', 'best-tag', '★ лучший кадр'));
+      shot.append(el('div', 'cap',
+        `${m.name}\nрезкость ${(m.sharpness || 0).toFixed(0)} · оценка ${m.score.toFixed(0)}`));
+      strip.append(shot);
+    }
+    node.append(strip);
+    frag.append(node);
+  }
+  root.replaceChildren(frag);
+}
+
 // ---- policy and plan ----------------------------------------------------
 
 function policyQuery() {
@@ -471,6 +526,7 @@ function showTab(name) {
   if (name === 'families') loadFamilies().catch((e) => {
     $('#familyList').replaceChildren(el('p', 'empty', 'Ошибка: ' + e.message));
   });
+  if (name === 'series') renderSeries();
   if (name === 'plan') loadPlan();
   if (name === 'derived') renderDerived();
 }

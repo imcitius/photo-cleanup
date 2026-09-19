@@ -114,6 +114,38 @@ fn truncate_start(s: &str, max: usize) -> String {
     format!("…{}", s.chars().skip(n - max + 1).collect::<String>())
 }
 
+pub fn print_series(s: &pc_db::SeriesRow, verbose: bool) {
+    let label = match s.kind.as_str() {
+        "pixel-shift" => "pixel-shift",
+        "bracket" => "брекетинг",
+        _ => "серия",
+    };
+    println!(
+        "\n🎞  {} · {} · {} · {}{}",
+        label,
+        short_date(s.started_at),
+        s.camera.as_deref().unwrap_or("камера неизвестна"),
+        count_ru(s.members.len() as i64, "кадр", "кадра", "кадров"),
+        if s.protected {
+            "  [НЕ ПРОРЕЖИВАТЬ: один снимок из нескольких файлов]"
+        } else {
+            ""
+        }
+    );
+    for m in &s.members {
+        println!(
+            "  {} {:<34} резкость {:>8.1}   оценка {:>5.0}",
+            if m.is_best { "★" } else { " " },
+            truncate(&m.name, 34),
+            m.sharpness.unwrap_or(0.0),
+            m.score
+        );
+        if verbose {
+            println!("      {}", m.breakdown);
+        }
+    }
+}
+
 pub fn print_summary(db: &Db) -> anyhow::Result<()> {
     let rows = db.role_counts()?;
     if rows.is_empty() {

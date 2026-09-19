@@ -137,6 +137,11 @@ fn process(
             dhash: Some(bits_to_i64(pc_hash::dhash(gray))),
             phash_crops: Some(crop_bytes),
             thumb_key,
+            sharpness: Some(probe.metrics.sharpness as f64),
+            clip_low: Some(probe.metrics.clip_low as f64),
+            clip_high: Some(probe.metrics.clip_high as f64),
+            entropy: Some(probe.metrics.entropy as f64),
+            contrast: Some(probe.metrics.contrast as f64),
             ..base
         },
         meta: Some(NewMeta {

@@ -40,6 +40,9 @@ enum Command {
     /// Семейства: один кадр — несколько представлений
     #[command(subcommand)]
     Families(FamiliesCmd),
+    /// Серии: несколько кадров одного момента и лучший из них
+    #[command(subcommand)]
+    Series(SeriesCmd),
     /// Что будет перенесено при текущей политике
     Plan(PolicyArgs),
     /// Перенести в карантин по плану
@@ -83,6 +86,31 @@ struct ApplyArgs {
     quarantine: Option<PathBuf>,
     #[arg(long)]
     yes: bool,
+}
+
+#[derive(Subcommand)]
+enum SeriesCmd {
+    /// Найти серии и отранжировать кадры
+    Build(SeriesBuildArgs),
+    /// Показать серии
+    List(SeriesListArgs),
+}
+
+#[derive(Args)]
+struct SeriesBuildArgs {
+    /// Максимальный разрыв между кадрами одной серии, секунд
+    #[arg(long, default_value_t = 10)]
+    gap: i64,
+}
+
+#[derive(Args)]
+struct SeriesListArgs {
+    #[arg(long, default_value_t = 10)]
+    limit: i64,
+    #[arg(long, default_value_t = 0)]
+    offset: i64,
+    #[arg(long, short)]
+    verbose: bool,
 }
 
 #[derive(Args)]
@@ -293,6 +321,33 @@ fn main() -> Result<()> {
             drop(db);
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(pc_api::serve(&cli.db, &thumbs, a.quarantine, addr))
+        }
+        Command::Series(SeriesCmd::Build(a)) => {
+            let r = pc_family::series::build(&db, a.gap)?;
+            println!("Серий: {}, кадров в них: {}.", r.series, r.frames);
+            for (kind, n) in &r.by_kind {
+                println!("  {kind}: {n}");
+            }
+            if r.protected > 0 {
+                println!(
+                    "\n{} защищено от прореживания (pixel-shift: один снимок, хранится \
+                     несколькими файлами).",
+                    r.protected
+                );
+            }
+            Ok(())
+        }
+        Command::Series(SeriesCmd::List(a)) => {
+            let rows = db.series_list(a.limit, a.offset)?;
+            if rows.is_empty() {
+                println!("Серий нет. Сначала `photo-cleanup series build`.");
+                return Ok(());
+            }
+            for s in &rows {
+                pc_cli::families::print_series(s, a.verbose);
+            }
+            println!("\nВсего серий: {}", db.series_count()?);
+            Ok(())
         }
         Command::Plan(a) => cmd_plan(&db, &a, None, false),
         Command::Apply(a) => {

@@ -3,12 +3,14 @@
 
 pub mod jpeg;
 pub mod meta;
+pub mod metrics;
 pub mod read;
 pub mod sniff;
 pub mod thumb;
 pub mod tiff;
 
 pub use meta::{ImageMeta, Provenance};
+pub use metrics::Metrics;
 pub use read::{full_hash, read_for_probe, Read1};
 pub use sniff::{sniff, Container};
 pub use thumb::{Thumbnail, GRAY_SIDE, THUMB_SIZE};
@@ -32,6 +34,8 @@ pub struct Probe {
     /// Where the pixels used for hashing came from.
     pub source: PixelSource,
     pub thumb: Thumbnail,
+    /// Technical quality, measured on the decoded frame before downscaling.
+    pub metrics: Metrics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +111,7 @@ pub fn probe_parts(
         }
     };
 
+    let metrics = metrics::measure(&pixels);
     let thumb = thumb::make(&pixels, meta.orientation);
     Ok(Probe {
         container,
@@ -116,5 +121,6 @@ pub fn probe_parts(
         meta,
         source,
         thumb,
+        metrics,
     })
 }
