@@ -1,0 +1,16 @@
+[package]
+name = "pc-walk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pc-core.workspace = true
+anyhow.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

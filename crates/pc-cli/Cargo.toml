@@ -1,0 +1,29 @@
+[package]
+name = "pc-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "pc_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "photo-cleanup"
+path = "src/main.rs"
+
+[dependencies]
+pc-core.workspace = true
+pc-db.workspace = true
+pc-walk.workspace = true
+pc-lightroom.workspace = true
+pc-apply.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

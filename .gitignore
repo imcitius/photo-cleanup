@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+/.a5c
+/tmp
