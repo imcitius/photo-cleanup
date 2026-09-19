@@ -6,7 +6,7 @@ pub mod thumbstore;
 pub mod time;
 
 pub use bytes::fmt_bytes;
-pub use disk::{Disk, DiskMap};
+pub use disk::{dev_of_nearest_existing, Disk, DiskMap};
 pub use thumbstore::ThumbStore;
 
 use std::path::Path;

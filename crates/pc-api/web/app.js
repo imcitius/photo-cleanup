@@ -572,6 +572,104 @@ function openLightbox(m) {
 
 // ---- wiring -------------------------------------------------------------
 
+
+// ---- reorganisation -----------------------------------------------------
+
+/// The browser shows where every file would land; the move itself is done at
+/// the command line. Reorganisation touches the whole archive at once, and a
+/// mistyped root deserves a deliberate second look rather than one click.
+function organizeQuery() {
+  return new URLSearchParams({
+    root: $('#orgRoot').value.trim(),
+    gap_hours: $('#orgGap').value || '6',
+    allow_lightroom: $('#orgAllowLr').checked,
+    skip_uncertain: $('#orgSkipUncertain').checked,
+  });
+}
+
+async function loadOrganize() {
+  const totals = $('#orgTotals');
+  if (!$('#orgRoot').value.trim()) {
+    totals.textContent = 'Укажите корень нового дерева — он обязан быть на том же диске, что и файлы.';
+    $('#orgCommand').hidden = true;
+    $('#orgEvents').replaceChildren();
+    $('#orgSample').replaceChildren();
+    $('#orgSampleHead').hidden = true;
+    $('#orgRefusalsHead').hidden = true;
+    $('#orgRefusals').replaceChildren();
+    return;
+  }
+  totals.textContent = 'Считаю…';
+  let p;
+  try {
+    p = await api('/api/organize?' + organizeQuery());
+  } catch (e) {
+    totals.textContent = 'Ошибка: ' + e.message;
+    $('#orgCommand').hidden = true;
+    return;
+  }
+
+  const parts = [
+    el('span', null, p.total_files
+      ? `${plural(p.total_files, 'файл', 'файла', 'файлов')} · ${bytes(p.total_bytes)} · ` +
+        `${plural(p.events.length, 'событие', 'события', 'событий')}`
+      : 'Переносить нечего'),
+  ];
+  const notes = [];
+  if (p.already_placed) notes.push(`${p.already_placed} уже на месте`);
+  if (p.renamed) notes.push(`${p.renamed} переименований из-за совпадения имён`);
+  if (p.uncertain) notes.push(`${p.uncertain} датированы не по съёмке`);
+  if (!p.respect_lightroom) notes.push('⚠ защита каталогов Lightroom снята');
+  if (p.by_source.length) {
+    notes.push('дата: ' + p.by_source.map((s) => `${s.label} ${s.count}`).join(', '));
+  }
+  if (notes.length) parts.push(el('span', 'sub', notes.join(' · ')));
+  totals.replaceChildren(...parts);
+
+  $('#orgCommand').textContent = p.command;
+  $('#orgCommand').hidden = p.total_files === 0;
+
+  const ev = document.createDocumentFragment();
+  for (const e of p.events) {
+    const row = el('div', 'event-row');
+    row.append(
+      el('span', 'name', `${e.year}/${e.name}`),
+      el('span', 'count', `${plural(e.count, 'кадр', 'кадра', 'кадров')} · ${bytes(e.bytes)}`),
+    );
+    ev.append(row);
+  }
+  $('#orgEvents').replaceChildren(ev);
+
+  const sample = document.createDocumentFragment();
+  for (const m of p.sample) {
+    const row = el('div', 'move-row');
+    const dst = el('span', 'dst', m.rel);
+    if (m.renamed_from) {
+      dst.append(el('span', 'flag', `имя занято, было ${m.renamed_from}`));
+    } else if (m.uncertain) {
+      dst.append(el('span', 'flag', `дата: ${m.source}`));
+    }
+    const src = el('span', 'src', '← ' + m.src);
+    src.title = m.src;
+    row.append(dst, src);
+    sample.append(row);
+  }
+  if (p.total_files > p.sample.length) {
+    sample.append(el('p', 'empty', `показаны первые ${p.sample.length} из ${p.total_files}`));
+  }
+  $('#orgSample').replaceChildren(sample);
+  $('#orgSampleHead').hidden = p.sample.length === 0;
+
+  const rf = document.createDocumentFragment();
+  for (const r of p.refusals) {
+    const n = el('div', 'refusal');
+    n.append(el('span', null, `${r.count} — `), el('span', 'why', r.label));
+    rf.append(n);
+  }
+  $('#orgRefusals').replaceChildren(rf);
+  $('#orgRefusalsHead').hidden = p.refusals.length === 0;
+}
+
 function showTab(name) {
   for (const b of document.querySelectorAll('#tabs button')) {
     b.classList.toggle('active', b.dataset.tab === name);
@@ -587,6 +685,7 @@ function showTab(name) {
   if (name === 'series') renderSeries();
   if (name === 'plan') loadPlan();
   if (name === 'derived') renderDerived();
+  if (name === 'organize') loadOrganize();
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -607,6 +706,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   $('#allowLr').addEventListener('change', loadPlan);
   $('#applyBtn').addEventListener('click', applyPlan);
+  $('#orgBtn').addEventListener('click', loadOrganize);
+  $('#orgRoot').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadOrganize(); });
   $('#showSingles').addEventListener('change', (e) => {
     state.all = e.target.checked;
     state.offset = 0;

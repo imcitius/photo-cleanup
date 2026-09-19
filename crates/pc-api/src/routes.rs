@@ -604,6 +604,189 @@ pub async fn undo(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) -> R
     }
 }
 
+// ---- reorganisation -----------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct OrganizeQuery {
+    /// Root of the new tree. Empty means the user has not chosen one yet.
+    #[serde(default)]
+    root: String,
+    /// Hours between shots that separate two events.
+    #[serde(default)]
+    gap_hours: Option<f64>,
+    #[serde(default)]
+    allow_lightroom: bool,
+    #[serde(default)]
+    skip_uncertain: bool,
+}
+
+#[derive(Serialize)]
+pub struct OrganizeMoveOut {
+    src: String,
+    dst: String,
+    /// `dst` without the root, which is what the user is actually reading.
+    rel: String,
+    event: String,
+    size: i64,
+    source: &'static str,
+    uncertain: bool,
+    renamed_from: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct OrganizeEventOut {
+    name: String,
+    year: String,
+    count: usize,
+    bytes: i64,
+}
+
+#[derive(Serialize)]
+pub struct CountOut {
+    label: String,
+    count: usize,
+}
+
+#[derive(Serialize)]
+pub struct OrganizeOut {
+    root: String,
+    gap_hours: f64,
+    respect_lightroom: bool,
+    total_files: usize,
+    total_bytes: i64,
+    events: Vec<OrganizeEventOut>,
+    already_placed: usize,
+    renamed: usize,
+    uncertain: usize,
+    by_source: Vec<CountOut>,
+    refusals: Vec<CountOut>,
+    sample: Vec<OrganizeMoveOut>,
+    /// What to type to carry it out. The browser shows the plan; the move
+    /// itself is a deliberate act at the command line.
+    command: String,
+}
+
+const ORGANIZE_SAMPLE: usize = 60;
+
+pub async fn organize(State(st): State<Arc<AppState>>, Query(q): Query<OrganizeQuery>) -> Response {
+    if q.root.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "не указан корень нового дерева" })),
+        )
+            .into_response();
+    }
+    let gap_hours = q.gap_hours.unwrap_or(6.0).clamp(0.25, 72.0);
+    let opts = pc_organize::Options {
+        root: std::path::PathBuf::from(q.root.trim()),
+        gap_secs: (gap_hours * 3600.0) as i64,
+        respect_lightroom: !q.allow_lightroom,
+        skip_uncertain: q.skip_uncertain,
+    };
+
+    let db = st.db.lock().unwrap();
+    let plan = match pc_organize::compute(&db, &opts) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("{e:#}") })),
+            )
+                .into_response()
+        }
+    };
+
+    let root_str = opts.root.to_string_lossy().into_owned();
+    let rel = |dst: &str| -> String {
+        dst.strip_prefix(&root_str)
+            .map(|p| p.trim_start_matches('/').to_string())
+            .unwrap_or_else(|| dst.to_string())
+    };
+
+    let mut events: Vec<OrganizeEventOut> = Vec::new();
+    for m in &plan.moves {
+        let year = rel(&m.dst).split('/').next().unwrap_or("").to_string();
+        match events
+            .iter_mut()
+            .find(|e| e.name == m.event && e.year == year)
+        {
+            Some(e) => {
+                e.count += 1;
+                e.bytes += m.size;
+            }
+            None => events.push(OrganizeEventOut {
+                name: m.event.clone(),
+                year,
+                count: 1,
+                bytes: m.size,
+            }),
+        }
+    }
+    events.sort_by(|a, b| a.year.cmp(&b.year).then(a.name.cmp(&b.name)));
+
+    let mut refusals: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for r in &plan.refusals {
+        let head = r.why.split(" — ").next().unwrap_or(&r.why).to_string();
+        *refusals.entry(head).or_default() += 1;
+    }
+
+    Json(OrganizeOut {
+        total_files: plan.moves.len(),
+        total_bytes: plan.bytes(),
+        already_placed: plan.already_placed,
+        renamed: plan.renamed,
+        uncertain: plan.uncertain,
+        by_source: plan
+            .by_source
+            .iter()
+            .map(|(s, n)| CountOut {
+                label: s.label().to_string(),
+                count: *n,
+            })
+            .collect(),
+        refusals: refusals
+            .into_iter()
+            .map(|(label, count)| CountOut { label, count })
+            .collect(),
+        sample: plan
+            .moves
+            .iter()
+            .take(ORGANIZE_SAMPLE)
+            .map(|m| OrganizeMoveOut {
+                rel: rel(&m.dst),
+                src: m.src.clone(),
+                dst: m.dst.clone(),
+                event: m.event.clone(),
+                size: m.size,
+                source: m.date.source.label(),
+                uncertain: m.date.uncertain(),
+                renamed_from: m.renamed_from.clone(),
+            })
+            .collect(),
+        events,
+        command: format!(
+            "photo-cleanup --db {} organize apply --root {} --gap {}h{}{} --yes",
+            st.db_path.display(),
+            root_str,
+            gap_hours,
+            if q.allow_lightroom {
+                " --allow-lightroom"
+            } else {
+                ""
+            },
+            if q.skip_uncertain {
+                " --skip-uncertain"
+            } else {
+                ""
+            }
+        ),
+        respect_lightroom: opts.respect_lightroom,
+        gap_hours,
+        root: root_str,
+    })
+    .into_response()
+}
+
 // ---- series -------------------------------------------------------------
 
 #[derive(Deserialize)]

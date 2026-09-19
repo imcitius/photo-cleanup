@@ -50,6 +50,9 @@ enum Command {
     Plan(PolicyArgs),
     /// Перенести в карантин по плану
     Apply(ApplyArgs),
+    /// Разложить архив по датам: YYYY/YYYY-MM-DD_событие
+    #[command(subcommand)]
+    Organize(OrganizeCmd),
     /// Запустить веб-интерфейс
     Serve(ServeArgs),
     /// Сводка по базе
@@ -87,6 +90,57 @@ struct ApplyArgs {
     policy: PolicyArgs,
     #[arg(long)]
     quarantine: Option<PathBuf>,
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Subcommand)]
+enum OrganizeCmd {
+    /// Показать, что и куда переедет
+    Plan(OrganizeArgs),
+    /// Выполнить переносы
+    Apply(OrganizeApplyArgs),
+    /// Вернуть файлы прогона туда, откуда их взяли
+    Undo(OrganizeUndoArgs),
+    /// Прогоны, которые что-то переносили
+    Runs,
+}
+
+#[derive(Args)]
+struct OrganizeArgs {
+    /// Корень нового дерева. Обязан быть на том же диске, что и файлы.
+    #[arg(long)]
+    root: PathBuf,
+    /// Разрыв между съёмками, после которого начинается новое событие
+    #[arg(long, default_value = "6h", value_parser = format::parse_duration)]
+    gap: i64,
+    /// Переносить и файлы, на которые ссылаются каталоги Lightroom
+    #[arg(long)]
+    allow_lightroom: bool,
+    /// Не трогать файлы, дата которых — догадка (путь или mtime)
+    #[arg(long)]
+    skip_uncertain: bool,
+    /// Разложить, не дожидаясь разбора дубликатов
+    #[arg(long)]
+    allow_duplicates: bool,
+    /// Сколько переносов показать
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(Args)]
+struct OrganizeApplyArgs {
+    #[command(flatten)]
+    opts: OrganizeArgs,
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+struct OrganizeUndoArgs {
+    /// Номер прогона; по умолчанию последний, который что-то переносил
+    #[arg(long)]
+    run: Option<i64>,
     #[arg(long)]
     yes: bool,
 }
@@ -426,6 +480,10 @@ fn main() -> Result<()> {
             let q = a.quarantine.clone();
             cmd_plan(&db, &a.policy, q.as_deref(), a.yes)
         }
+        Command::Organize(OrganizeCmd::Plan(a)) => cmd_organize(&db, &a, false),
+        Command::Organize(OrganizeCmd::Apply(a)) => cmd_organize(&db, &a.opts, a.yes),
+        Command::Organize(OrganizeCmd::Undo(a)) => cmd_organize_undo(&db, &a),
+        Command::Organize(OrganizeCmd::Runs) => cmd_organize_runs(&db),
         Command::Status => cmd_status(&db),
         Command::Catalogs => cmd_catalogs(&db),
     }
@@ -697,6 +755,216 @@ fn cmd_plan(
          Вернуть: photo-cleanup derived undo --journal <id>\n\
          Освободить: photo-cleanup derived purge --older-than 7d --yes"
     );
+    Ok(())
+}
+
+/// Reorganisation runs after deduplication, never before it: laying copies
+/// out by date only spreads them across a tidy tree.
+fn refuse_until_deduplicated(db: &Db) -> Result<()> {
+    let dup = pc_family::plan::compute(db, &pc_family::Policy::default())?;
+    if dup.candidates.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "сначала разбор дубликатов: под перенос в карантин подходит {} ({}).\n\
+         Реорганизация до дедупа разложит по новому дереву и копии тоже.\n\
+         Выполните `photo-cleanup plan`, затем `apply --yes` — либо, если так и задумано, \
+         добавьте --allow-duplicates.",
+        pc_core::count_ru(dup.candidates.len() as i64, "файл", "файла", "файлов"),
+        fmt_bytes(dup.bytes() as u64)
+    )
+}
+
+fn rel_to<'a>(path: &'a str, root: &std::path::Path) -> &'a str {
+    let root = root.to_string_lossy();
+    path.strip_prefix(root.as_ref())
+        .map(|p| p.trim_start_matches('/'))
+        .unwrap_or(path)
+}
+
+fn cmd_organize(db: &Db, a: &OrganizeArgs, execute: bool) -> Result<()> {
+    if !a.allow_duplicates {
+        refuse_until_deduplicated(db)?;
+    }
+
+    let opts = pc_organize::Options {
+        root: a.root.clone(),
+        gap_secs: a.gap.max(60),
+        respect_lightroom: !a.allow_lightroom,
+        skip_uncertain: a.skip_uncertain,
+    };
+    let plan = pc_organize::compute(db, &opts)?;
+
+    println!(
+        "Дерево: {}\nСобытие — разрыв съёмки больше {} ч.{}\n",
+        a.root.display(),
+        a.gap as f64 / 3600.0,
+        if opts.respect_lightroom {
+            " Файлы из каталогов Lightroom не трогаем."
+        } else {
+            " ЗАЩИТА LIGHTROOM СНЯТА: ссылки в каталогах разорвутся."
+        }
+    );
+
+    if plan.moves.is_empty() {
+        println!("Переносить нечего.");
+        if plan.already_placed > 0 {
+            println!(
+                "  {} уже лежат там, где нужно.",
+                pc_core::count_ru(plan.already_placed as i64, "файл", "файла", "файлов")
+            );
+        }
+        print_refusals(&plan);
+        return Ok(());
+    }
+
+    println!(
+        "К переносу: {}, {}\nСобытий: {}{}{}",
+        pc_core::count_ru(plan.moves.len() as i64, "файл", "файла", "файлов"),
+        fmt_bytes(plan.bytes() as u64),
+        plan.events,
+        if plan.already_placed > 0 {
+            format!("; уже на месте: {}", plan.already_placed)
+        } else {
+            String::new()
+        },
+        if plan.renamed > 0 {
+            format!("; переименований из-за совпадения имён: {}", plan.renamed)
+        } else {
+            String::new()
+        }
+    );
+
+    println!("\nОткуда взята дата:");
+    for (source, n) in &plan.by_source {
+        println!("  {:<18} {:>8}", source.label(), n);
+    }
+    if plan.uncertain > 0 {
+        println!(
+            "\n{} датированы не по съёмке: имя файла, путь или mtime.\n\
+             Те, чья дата известна лишь до месяца или года, лежат отдельной папкой,\n\
+             а не притворяются конкретным днём. Исключить их совсем: --skip-uncertain",
+            pc_core::count_ru(plan.uncertain as i64, "файл", "файла", "файлов")
+        );
+    }
+
+    println!("\nПримеры переносов:");
+    for m in plan.moves.iter().take(a.limit) {
+        println!("  {:<44} ← {}", rel_to(&m.dst, &a.root), m.src);
+        if let Some(old) = &m.renamed_from {
+            println!("      имя занято, было {old}");
+        }
+    }
+    if plan.moves.len() > a.limit {
+        println!("  … и ещё {}", plan.moves.len() - a.limit);
+    }
+    print_refusals(&plan);
+
+    if !execute {
+        println!(
+            "\nНичего не изменено. Для выполнения: \n  photo-cleanup organize apply --root {} --yes",
+            a.root.display()
+        );
+        return Ok(());
+    }
+
+    let run_id = db
+        .latest_run()?
+        .context("нет ни одного прогона, сначала выполните scan")?;
+    let report = pc_apply::organize(db, run_id, &plan.moves)?;
+
+    println!(
+        "\nПеренесено: {}, {}{}{}",
+        pc_core::count_ru(report.moved as i64, "файл", "файла", "файлов"),
+        fmt_bytes(report.bytes),
+        if report.sidecars > 0 {
+            format!(", спутников {}", report.sidecars)
+        } else {
+            String::new()
+        },
+        if report.pruned_dirs > 0 {
+            format!(", опустевших каталогов убрано {}", report.pruned_dirs)
+        } else {
+            String::new()
+        }
+    );
+    for (path, why) in report.refused.iter().take(10) {
+        println!("  не перенесён {path} — {why}");
+    }
+    if report.refused.len() > 10 {
+        println!("  … и ещё {}", report.refused.len() - 10);
+    }
+    println!("\nВернуть всё обратно: photo-cleanup organize undo --run {run_id} --yes");
+    Ok(())
+}
+
+fn print_refusals(plan: &pc_organize::Plan) {
+    if plan.refusals.is_empty() {
+        return;
+    }
+    println!(
+        "\nНе трогаем {}:",
+        pc_core::count_ru(plan.refusals.len() as i64, "файл", "файла", "файлов")
+    );
+    let mut by_reason: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for r in &plan.refusals {
+        // The reason starts with what it is about; the tail carries the path
+        // or the rating and would splinter the count.
+        let head = r.why.split(" — ").next().unwrap_or(&r.why);
+        *by_reason.entry(head).or_default() += 1;
+    }
+    for (why, n) in by_reason {
+        println!("  {n:>8}  {why}");
+    }
+}
+
+fn cmd_organize_undo(db: &Db, a: &OrganizeUndoArgs) -> Result<()> {
+    let runs = db.organize_runs()?;
+    let run_id = match a.run {
+        Some(id) => id,
+        None => runs
+            .first()
+            .map(|(id, ..)| *id)
+            .context("ни один прогон ничего не раскладывал")?,
+    };
+    let moved = runs
+        .iter()
+        .find(|(id, ..)| *id == run_id)
+        .map(|(_, n, _)| *n)
+        .unwrap_or(0);
+
+    println!(
+        "Прогон {run_id}: {} вернутся туда, откуда были взяты.",
+        pc_core::count_ru(moved, "файл", "файла", "файлов")
+    );
+    if !a.yes {
+        println!("Для выполнения добавьте --yes.");
+        return Ok(());
+    }
+    let (back, failed) = pc_apply::undo_run(db, run_id)?;
+    println!("Возвращено: {back}.");
+    for f in failed.iter().take(10) {
+        println!("  не удалось: {f}");
+    }
+    if failed.len() > 10 {
+        println!("  … и ещё {}", failed.len() - 10);
+    }
+    Ok(())
+}
+
+fn cmd_organize_runs(db: &Db) -> Result<()> {
+    let runs = db.organize_runs()?;
+    if runs.is_empty() {
+        println!("Ничего ещё не раскладывалось.");
+        return Ok(());
+    }
+    for (id, n, at) in runs {
+        println!(
+            "  прогон {id:<4} {:>8}  {}",
+            pc_core::count_ru(n, "файл", "файла", "файлов"),
+            pc_core::time::fmt_datetime_ru(at)
+        );
+    }
     Ok(())
 }
 

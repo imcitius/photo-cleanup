@@ -425,7 +425,11 @@ impl Db {
         Ok(())
     }
 
-    fn journal_rows(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<JournalEntry>> {
+    pub(crate) fn journal_rows(
+        &self,
+        sql: &str,
+        p: &[&dyn rusqlite::ToSql],
+    ) -> Result<Vec<JournalEntry>> {
         let mut st = self.conn.prepare(sql)?;
         let rows = st
             .query_map(p, |r| {

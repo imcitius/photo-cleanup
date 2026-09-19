@@ -15,6 +15,7 @@
     <button data-tab="categories">Виды</button>
     <button data-tab="series">Серии</button>
     <button data-tab="plan">План и перенос</button>
+    <button data-tab="organize">Раскладка</button>
     <button data-tab="derived">Производные данные</button>
   </nav>
   <span id="hint">J / K — навигация · Space — сменить лучший · Enter — крупно</span>
@@ -65,6 +66,39 @@
     <div id="refusals"></div>
     <h2>В карантине</h2>
     <div id="quarantine"></div>
+  </section>
+
+  <section id="organize" class="tab">
+    <div class="policy">
+      <div class="policy-roles">
+        <label><strong>Корень нового дерева:</strong>
+          <input type="text" id="orgRoot" placeholder="/mnt/disk3/Photo" size="40">
+        </label>
+        <label>разрыв между съёмками
+          <input type="number" id="orgGap" value="6" min="1" max="72" step="1" size="3"> ч
+        </label>
+      </div>
+      <div class="policy-roles">
+        <label title="Перенос разрывает ссылки в каталогах Lightroom">
+          <input type="checkbox" id="orgAllowLr"> трогать файлы из каталогов Lightroom
+        </label>
+        <label title="Дата из пути или mtime — это догадка, а не съёмка">
+          <input type="checkbox" id="orgSkipUncertain"> пропускать файлы с ненадёжной датой
+        </label>
+        <button id="orgBtn" class="small">Показать раскладку</button>
+      </div>
+      <div id="orgTotals" class="totals"></div>
+      <div class="policy-actions">
+        <span class="muted">Перенос выполняется из командной строки — раскладка трогает
+          весь архив, и такой шаг стоит сделать осознанно:</span>
+      </div>
+      <pre id="orgCommand" class="command" hidden></pre>
+    </div>
+    <div id="orgEvents"></div>
+    <h2 id="orgSampleHead" hidden>Куда поедут файлы</h2>
+    <div id="orgSample"></div>
+    <h2 id="orgRefusalsHead" hidden>Не трогаем</h2>
+    <div id="orgRefusals"></div>
   </section>
 
   <section id="derived" class="tab"></section>

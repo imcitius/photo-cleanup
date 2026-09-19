@@ -22,31 +22,10 @@ fn role_rank(role: &str) -> u8 {
 }
 
 fn short_date(ts: Option<i64>) -> String {
-    let Some(ts) = ts else {
-        return "дата неизвестна".into();
-    };
-    // Civil date from a Unix timestamp, without pulling in a date library
-    // for one line of output.
-    let days = ts.div_euclid(86_400);
-    let secs = ts.rem_euclid(86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = era * 400 + yoe + i64::from(m <= 2);
-    format!(
-        "{:02}.{:02}.{} {:02}:{:02}:{:02}",
-        d,
-        m,
-        y,
-        secs / 3600,
-        (secs / 60) % 60,
-        secs % 60
-    )
+    match ts {
+        Some(ts) => pc_core::time::fmt_datetime_ru(ts),
+        None => "дата неизвестна".into(),
+    }
 }
 
 pub fn print_family(f: &FamilyRow, verbose: bool) {

@@ -28,6 +28,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/series", get(routes::series))
         .route("/api/categories", get(routes::categories))
         .route("/api/derived", get(routes::derived))
+        .route("/api/organize", get(routes::organize))
         .route("/api/plan", get(routes::plan))
         .route("/api/plan/apply", post(routes::apply_plan))
         .route("/api/quarantine", get(routes::quarantine))

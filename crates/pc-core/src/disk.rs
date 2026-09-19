@@ -62,6 +62,26 @@ pub fn mount_root(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
+/// `st_dev` of `path`, or of its nearest existing ancestor.
+///
+/// A destination directory usually does not exist yet — the point of asking
+/// is to find out which filesystem it *will* be created on, so that a move
+/// into it is a rename and not a copy of the whole archive.
+pub fn dev_of_nearest_existing(path: &Path) -> io::Result<u64> {
+    let mut cur = path;
+    loop {
+        if let Ok(md) = fs::metadata(cur) {
+            return Ok(md.dev());
+        }
+        cur = cur.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("не найти существующий предок для {}", path.display()),
+            )
+        })?;
+    }
+}
+
 fn label_for(mount: &Path) -> String {
     match mount.file_name().and_then(|s| s.to_str()) {
         Some(name) if !name.is_empty() => name.to_string(),

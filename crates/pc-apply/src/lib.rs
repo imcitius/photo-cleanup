@@ -6,8 +6,10 @@
 //! instantly reversible. Space comes back only at `purge`.
 
 pub mod files;
+pub mod organize;
 
 pub use files::{apply, companions, same_picture, ApplyReport, FileOutcome};
+pub use organize::{organize, undo_run, OrganizeReport};
 
 use anyhow::{bail, Context, Result};
 use pc_core::{fmt_bytes, Disk};
@@ -51,19 +53,6 @@ fn disk_of(b: &Bundle) -> Disk {
 
 /// Device of `path`, or of its nearest existing ancestor when it does not
 /// exist yet.
-pub(crate) fn dev_of_nearest_existing(path: &Path) -> Result<u64> {
-    use std::os::unix::fs::MetadataExt;
-    let mut cur = path;
-    loop {
-        if let Ok(md) = fs::metadata(cur) {
-            return Ok(md.dev());
-        }
-        cur = cur
-            .parent()
-            .with_context(|| format!("не найти существующий предок для {}", path.display()))?;
-    }
-}
-
 /// Where a bundle goes when quarantined.
 ///
 /// The default sits at the root of the bundle's own filesystem, which makes
@@ -79,7 +68,7 @@ pub fn quarantine_dest(b: &Bundle, override_root: Option<&Path>) -> Result<PathB
     match override_root {
         None => Ok(disk.quarantine_root().join(rel)),
         Some(root) => {
-            let dev = dev_of_nearest_existing(root)?;
+            let dev = pc_core::dev_of_nearest_existing(root)?;
             if dev != b.dev as u64 {
                 bail!(
                     "карантин {} находится на другой файловой системе, чем {} — \
@@ -108,7 +97,7 @@ pub fn quarantine_dest_for(
     match override_root {
         None => Ok(disk.quarantine_root().join(rel)),
         Some(root) => {
-            let dev = crate::dev_of_nearest_existing(root)?;
+            let dev = pc_core::dev_of_nearest_existing(root)?;
             if dev != disk.dev {
                 bail!(
                     "карантин {} на другой файловой системе, чем {path} — \
@@ -273,18 +262,45 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
         );
     }
     let dst = entry.dst.clone().context("в записи нет пути назначения")?;
-    rename_with_parents(Path::new(&dst), Path::new(&entry.src))?;
-    // Sidecars that travelled with the photograph come home with it.
-    for side in files::companions(Path::new(&dst)) {
-        if let Some(name) = side.file_name() {
-            let back = Path::new(&entry.src).with_file_name(name);
+    let dst_path = PathBuf::from(&dst);
+    let src_path = PathBuf::from(&entry.src);
+    let sidecars = files::companions(&dst_path);
+    rename_with_parents(&dst_path, &src_path)?;
+
+    let name_of = |p: &Path| -> String {
+        p.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    // Sidecars that travelled with the photograph come home with it. A
+    // reorganisation may have renamed the file out of a name collision, in
+    // which case they carry the new stem and have to be carried back.
+    let new_stem = organize::stem_of(&name_of(&dst_path)).to_string();
+    let old_stem = organize::stem_of(&name_of(&src_path)).to_string();
+    for side in sidecars {
+        if let Some(name) = side.file_name().and_then(|s| s.to_str()) {
+            let back = src_path.with_file_name(organize::sidecar_name(name, &new_stem, &old_stem));
             let _ = rename_with_parents(&side, &back);
         }
     }
+    // The directories the file came out of are ours to remove only while
+    // they are empty; `remove_dir` declines to take away anything else, and
+    // the archive's own roots are never touched.
+    if let Some(parent) = dst_path.parent() {
+        let roots = db.all_run_roots()?.into_iter().map(PathBuf::from).collect();
+        organize::prune_empty(
+            &[parent.to_path_buf()].into_iter().collect(),
+            &roots,
+            organize::UNDO_LEVELS,
+        );
+    }
+
     db.journal_mark_undone(journal_id)?;
     match (entry.op.as_str(), entry.target_id) {
         ("quarantine", Some(bid)) => db.set_bundle_state(bid, BundleState::Present)?,
         ("quarantine-file", Some(fid)) => db.set_file_state(fid, "present")?,
+        ("organize", Some(fid)) => db.set_file_path(fid, &entry.src, &name_of(&src_path))?,
         _ => {}
     }
     Ok(())

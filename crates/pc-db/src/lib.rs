@@ -2,6 +2,7 @@
 
 pub mod files;
 pub mod model;
+pub mod organize;
 pub mod schema;
 
 pub use files::{
@@ -12,6 +13,7 @@ pub use model::{
     Bundle, BundleState, Catalog, JournalEntry, JournalStatus, NewBundle, NewCatalog,
     NewJournalEntry,
 };
+pub use organize::OrganizeRow;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;

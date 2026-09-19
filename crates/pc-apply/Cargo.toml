@@ -9,6 +9,7 @@ license.workspace = true
 pc-core.workspace = true
 pc-db.workspace = true
 pc-family.workspace = true
+pc-organize.workspace = true
 pc-image.workspace = true
 pc-hash.workspace = true
 anyhow.workspace = true

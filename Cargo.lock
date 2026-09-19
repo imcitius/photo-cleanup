@@ -763,6 +763,7 @@ dependencies = [
  "pc-core",
  "pc-db",
  "pc-family",
+ "pc-organize",
  "serde",
  "serde_json",
  "tokio",
@@ -779,6 +780,7 @@ dependencies = [
  "pc-family",
  "pc-hash",
  "pc-image",
+ "pc-organize",
  "rusqlite",
  "tempfile",
  "tracing",
@@ -800,6 +802,7 @@ dependencies = [
  "pc-hash",
  "pc-image",
  "pc-lightroom",
+ "pc-organize",
  "pc-walk",
  "rayon",
  "rusqlite",
@@ -881,6 +884,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "rusqlite",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "pc-organize"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pc-core",
+ "pc-db",
+ "pc-family",
+ "pc-image",
  "tempfile",
  "tracing",
 ]
