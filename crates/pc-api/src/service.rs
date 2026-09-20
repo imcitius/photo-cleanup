@@ -248,8 +248,10 @@ fn suggested_roots() -> Vec<String> {
         out.extend(found.into_iter().map(|name| format!("/mnt/{name}")));
     }
     if out.is_empty() {
-        if let Some(home) = std::env::var_os("HOME") {
-            for name in ["Pictures", "Photos"] {
+        // Windows names it differently, and there is no /mnt to look in.
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+        if let Some(home) = home {
+            for name in ["Pictures", "Photos", "Изображения"] {
                 let p = FsPath::new(&home).join(name);
                 if p.is_dir() {
                     out.push(p.display().to_string());

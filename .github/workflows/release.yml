@@ -112,6 +112,31 @@ jobs:
       - name: Показать, что получилось
         run: docker buildx imagetools inspect ${{ env.IMAGE }}:latest
 
+  # One self-contained .exe: the interface is compiled into the binary, so
+  # there is nothing to install beside it.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p pc-cli
+      - run: |
+          mkdir photo-cleanup-windows
+          copy target\release\photo-cleanup.exe photo-cleanup-windows\
+          copy packaging\windows\*.bat photo-cleanup-windows\
+          copy packaging\windows\README.txt photo-cleanup-windows\
+          .\photo-cleanup-windows\photo-cleanup.exe --version
+          Compress-Archive -Path photo-cleanup-windows\* -DestinationPath photo-cleanup-windows-x64.zip
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-windows
+          path: photo-cleanup-windows-x64.zip
+          if-no-files-found: error
+
   macos:
     runs-on: macos-14
     steps:
@@ -131,7 +156,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [manifest, macos]
+    needs: [manifest, macos, windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -153,3 +178,6 @@ jobs:
 
             Бинарники ниже — статические, зависимостей нет.
             Запуск: `./photo-cleanup serve --bind 0.0.0.0:8080`.
+
+            Для Windows — `photo-cleanup-windows-x64.zip`: распаковать и
+            запустить `Запустить photo-cleanup.bat`, браузер откроется сам.

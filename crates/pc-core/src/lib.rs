@@ -5,6 +5,7 @@ pub mod disk;
 pub mod lang;
 pub mod thumbstore;
 pub mod time;
+pub mod volume;
 
 pub use bytes::fmt_bytes;
 pub use disk::{dev_of_nearest_existing, Disk, DiskMap};
@@ -131,6 +132,33 @@ impl BlockReason {
     }
 }
 
+/// Split a stored path into its directory and its file name.
+///
+/// Paths are kept as strings once they are in the database, and Windows
+/// writes them with backslashes — so splitting on `/` alone would hand the
+/// whole path back as the file name on half the machines this runs on.
+pub fn split_path(path: &str) -> (&str, &str) {
+    match path.rfind(['/', '\\']) {
+        Some(i) => (&path[..i], &path[i + 1..]),
+        None => ("", path),
+    }
+}
+
+/// The last component of a stored path.
+pub fn base_name(path: &str) -> &str {
+    split_path(path).1
+}
+
+/// The directory a stored path sits in.
+pub fn dir_name(path: &str) -> &str {
+    split_path(path).0
+}
+
+/// Path components, on either separator, with empty ones dropped.
+pub fn path_parts(path: &str) -> Vec<&str> {
+    path.split(['/', '\\']).filter(|s| !s.is_empty()).collect()
+}
+
 /// True for names we never descend into or index.
 pub fn is_system_junk_name(name: &str) -> bool {
     name == ".DS_Store" || name == "Thumbs.db" || name == "desktop.ini" || name.starts_with("._")
@@ -176,6 +204,27 @@ pub fn is_pruned_dir_name(name: &str) -> bool {
             | "Windows"
             | "AppData"
     )
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn either_separator_splits_a_stored_path() {
+        assert_eq!(split_path("/foto/2019/a.jpg"), ("/foto/2019", "a.jpg"));
+        assert_eq!(
+            split_path(r"D:\Фото\2019\a.jpg"),
+            (r"D:\Фото\2019", "a.jpg")
+        );
+        assert_eq!(split_path("a.jpg"), ("", "a.jpg"));
+    }
+
+    #[test]
+    fn components_drop_the_empty_ones_on_either_separator() {
+        assert_eq!(path_parts("/mnt/disk3/foto/"), ["mnt", "disk3", "foto"]);
+        assert_eq!(path_parts(r"D:\foto\2019"), ["D:", "foto", "2019"]);
+    }
 }
 
 #[cfg(test)]

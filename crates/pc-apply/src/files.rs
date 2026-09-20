@@ -9,7 +9,6 @@ use anyhow::{bail, Context, Result};
 use pc_db::{Db, JournalStatus};
 use pc_family::plan::Candidate;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::{rename_with_parents, Totals};
@@ -42,7 +41,7 @@ pub fn companions(path: &Path) -> Vec<PathBuf> {
         if let Ok(md) = fs::metadata(&p) {
             // On case-insensitive filesystems .xmp and .XMP can address
             // one directory entry. Count and move that companion once.
-            if md.is_file() && identities.insert((md.dev(), md.ino())) {
+            if md.is_file() && identities.insert(pc_core::volume::entry_key(&md, &p)) {
                 out.push(p);
             }
         }

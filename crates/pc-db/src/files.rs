@@ -384,7 +384,7 @@ impl FileInfo {
     }
 
     pub fn dir(&self) -> &str {
-        self.path.rsplit_once('/').map_or("", |(a, _)| a)
+        pc_core::dir_name(&self.path)
     }
 
     pub fn is_raw(&self) -> bool {

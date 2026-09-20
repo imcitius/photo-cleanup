@@ -190,6 +190,9 @@ struct SeriesListArgs {
 
 #[derive(Args)]
 struct ServeArgs {
+    /// Open the interface in a browser once the server is listening
+    #[arg(long)]
+    open: bool,
     /// Address. 0.0.0.0 to reach it from other machines.
     #[arg(long, default_value = "127.0.0.1:8080")]
     bind: String,
@@ -399,7 +402,7 @@ fn main() -> Result<()> {
             // The database is reopened inside the server, so release ours.
             drop(db);
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(pc_api::serve(&cli.db, &thumbs, a.quarantine, addr))
+            rt.block_on(pc_api::serve(&cli.db, &thumbs, a.quarantine, addr, a.open))
         }
         Command::Categories(CategoriesCmd::Build) => {
             let r = pc_family::categories::build(&db)?;

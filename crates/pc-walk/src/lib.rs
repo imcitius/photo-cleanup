@@ -14,7 +14,6 @@ use pc_core::{DerivedKind, Disk, DiskMap};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -237,8 +236,8 @@ fn walk_dir(
                 name,
                 size: md.len(),
                 mtime: pc_core::time::mtime_unix(&md),
-                inode: md.ino(),
-                nlink: md.nlink(),
+                inode: pc_core::volume::inode_of(&md),
+                nlink: pc_core::volume::links_of(&md),
                 disk: disk.clone(),
                 path,
             });

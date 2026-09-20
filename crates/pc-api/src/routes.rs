@@ -242,10 +242,7 @@ fn to_out(f: FamilyRow, db: &pc_db::Db) -> FamilyOut {
                 rating: catalogs.iter().filter_map(|v|v["rating"].as_i64()).max(),
                 catalogs: catalogs.iter().filter_map(|v|v["name"].as_str().map(str::to_string)).collect(),
                 file_id: m.file_id,
-                dir: m
-                    .path
-                    .rsplit_once('/')
-                    .map_or(String::new(), |(a, _)| a.into()),
+                dir: pc_core::dir_name(&m.path).to_string(),
                 name: m.name,
                 role: role.as_str(),
                 role_label: role.label(),
@@ -586,10 +583,7 @@ fn build_plan(st: &AppState, q: &PlanQuery) -> Result<PlanOut, Box<Response>> {
         .take(500)
         .map(|c| PlanItem {
             file_id: c.file_id,
-            name: c
-                .path
-                .rsplit_once('/')
-                .map_or(c.path.clone(), |(_, b)| b.to_string()),
+            name: pc_core::base_name(&c.path).to_string(),
             path: c.path.clone(),
             size: c.size,
             role: c.role.as_str(),
@@ -667,10 +661,7 @@ pub async fn quarantine(State(st): State<Arc<AppState>>) -> Api<Vec<QuarantineIt
                 QuarantineItem {
                     journal_id: e.id,
                     file_id,
-                    name: e
-                        .src
-                        .rsplit_once('/')
-                        .map_or(e.src.clone(), |(_, b)| b.to_string()),
+                    name: pc_core::base_name(&e.src).to_string(),
                     kind: if is_file {
                         pc_core::tr!("снимок", "photograph").into()
                     } else {
@@ -807,7 +798,11 @@ pub async fn organize(State(st): State<Arc<AppState>>, Query(q): Query<OrganizeQ
 
     let mut events: Vec<OrganizeEventOut> = Vec::new();
     for m in &plan.moves {
-        let year = rel(&m.dst).split('/').next().unwrap_or("").to_string();
+        let year = pc_core::path_parts(&rel(&m.dst))
+            .first()
+            .copied()
+            .unwrap_or("")
+            .to_string();
         match events
             .iter_mut()
             .find(|e| e.name == m.event && e.year == year)
@@ -961,10 +956,7 @@ pub async fn series(
                     .into_iter()
                     .map(|m| SeriesMemberOut {
                         file_id: m.file_id,
-                        dir: m
-                            .path
-                            .rsplit_once('/')
-                            .map_or(String::new(), |(a, _)| a.into()),
+                        dir: pc_core::dir_name(&m.path).to_string(),
                         name: m.name,
                         rank: m.rank,
                         score: m.score,
@@ -1024,10 +1016,7 @@ pub async fn categories(State(st): State<Arc<AppState>>) -> Api<Vec<CategoryGrou
             .into_iter()
             .map(|m| CategoryFile {
                 file_id: m.file_id,
-                dir: m
-                    .path
-                    .rsplit_once('/')
-                    .map_or(String::new(), |(a, _)| a.into()),
+                dir: pc_core::dir_name(&m.path).to_string(),
                 name: m.name,
                 size: m.size,
                 width: m.width,

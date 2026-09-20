@@ -137,6 +137,25 @@ If you would rather not use Docker, every release carries static binaries for
 Linux (amd64, arm64) and for macOS on Apple Silicon. No dependencies: unpack
 and run.
 
+## Windows
+
+Download `photo-cleanup-windows-x64.zip` from the
+[latest release](https://github.com/imcitius/photo-cleanup/releases/latest),
+unpack it anywhere, and double-click **Start photo-cleanup.bat**. The browser
+opens by itself.
+
+One `.exe` and nothing else to install: the interface is compiled into the
+binary. The index and the thumbnail cache are written next to it, so moving or
+deleting that folder leaves nothing behind.
+
+A note on what Windows cannot tell us. Unix names a filesystem with a device
+number; Windows has no cheap equivalent, so the drive letter stands in. That is
+the right granularity for both things this depends on — which disk to read in
+parallel, and whether a move is a rename — and the gap is a folder mounted into
+another volume's tree, which a home archive rarely has. Hard links are not
+detected there either: without an inode, two names for one file are counted
+twice rather than mistaken for each other.
+
 ## How it reads an archive
 
 Reading is deliberately cheap. A raw file is 25 MB of sensor data wrapped

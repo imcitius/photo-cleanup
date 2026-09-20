@@ -11,14 +11,15 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use crate::volume::device_of;
 use crate::QUARANTINE_DIR;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Disk {
-    /// `st_dev` of the filesystem. The identity we actually rely on.
+    /// Identity of the filesystem: `st_dev` on Unix, the drive or share on
+    /// Windows. What everything else keys off.
     pub dev: u64,
     /// Mount point, i.e. the highest ancestor still on the same `st_dev`.
     pub mount: PathBuf,
@@ -42,12 +43,14 @@ impl Disk {
 pub fn mount_root(path: &Path) -> io::Result<PathBuf> {
     let path = path.canonicalize()?;
     let md = fs::metadata(&path)?;
-    let dev = md.dev();
+    let dev = device_of(&md, &path);
 
     let mut cur = if md.is_dir() {
-        path
+        path.clone()
     } else {
-        path.parent().unwrap_or(Path::new("/")).to_path_buf()
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.clone())
     };
 
     loop {
@@ -55,7 +58,7 @@ pub fn mount_root(path: &Path) -> io::Result<PathBuf> {
             return Ok(cur);
         };
         match fs::metadata(parent) {
-            Ok(m) if m.dev() == dev => cur = parent.to_path_buf(),
+            Ok(m) if device_of(&m, parent) == dev => cur = parent.to_path_buf(),
             // A different device, or an unreadable parent: `cur` is the top.
             _ => return Ok(cur),
         }
@@ -71,7 +74,7 @@ pub fn dev_of_nearest_existing(path: &Path) -> io::Result<u64> {
     let mut cur = path;
     loop {
         if let Ok(md) = fs::metadata(cur) {
-            return Ok(md.dev());
+            return Ok(device_of(&md, cur));
         }
         cur = cur.parent().ok_or_else(|| {
             io::Error::new(
@@ -105,7 +108,7 @@ impl DiskMap {
     }
 
     pub fn resolve(&mut self, path: &Path) -> io::Result<Disk> {
-        let dev = fs::metadata(path)?.dev();
+        let dev = device_of(&fs::metadata(path)?, path);
         if let Some(d) = self.by_dev.get(&dev) {
             return Ok(d.clone());
         }

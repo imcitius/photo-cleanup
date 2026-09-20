@@ -132,7 +132,7 @@ mod tests {
         db.upsert_file(
             &files::NewFile {
                 path: path.into(),
-                name: path.rsplit('/').next().unwrap_or(path).into(),
+                name: pc_core::base_name(path).into(),
                 disk: "root".into(),
                 size: 1000,
                 ..Default::default()

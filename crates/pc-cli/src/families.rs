@@ -63,7 +63,7 @@ pub fn print_family(f: &FamilyRow, verbose: bool) {
             fmt_bytes(m.size as u64)
         );
         if verbose {
-            let dir = m.path.rsplit_once('/').map_or("", |(a, _)| a);
+            let dir = pc_core::dir_name(&m.path);
             println!("       {}", truncate_start(dir, 72));
             if let Some(ev) = &m.evidence {
                 if let Some(detail) = short_evidence(ev) {

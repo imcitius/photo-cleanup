@@ -150,10 +150,7 @@ pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
                 keeper_id: keeper.file_id,
                 keeper_path: keeper.path.clone(),
                 reason: {
-                    let name = keeper
-                        .path
-                        .rsplit_once('/')
-                        .map_or(keeper.path.as_str(), |(_, b)| b);
+                    let name = pc_core::base_name(&keeper.path);
                     // Only a copy is guaranteed to be the same pixels. For
                     // the other roles the honest claim is weaker, and saying
                     // more than is true is how a user agrees to something

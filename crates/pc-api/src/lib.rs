@@ -64,11 +64,28 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// Show the interface in the operator's browser.
+///
+/// Called once the socket is listening, so the first page load does not race
+/// the server. A failure here is not worth reporting: the address is printed
+/// on the line above either way.
+fn open_in_browser(url: &str) {
+    let (cmd, args): (&str, &[&str]) = if cfg!(windows) {
+        ("cmd", &["/C", "start", ""])
+    } else if cfg!(target_vendor = "apple") {
+        ("open", &[])
+    } else {
+        ("xdg-open", &[])
+    };
+    let _ = std::process::Command::new(cmd).args(args).arg(url).spawn();
+}
+
 pub async fn serve(
     db_path: &Path,
     thumbs: &Path,
     quarantine: Option<std::path::PathBuf>,
     bind: SocketAddr,
+    open: bool,
 ) -> Result<()> {
     let mut state = AppState::new(db_path, thumbs, quarantine)?;
     {
@@ -84,6 +101,9 @@ pub async fn serve(
         .await
         .with_context(|| pc_core::tf!("не занять адрес {0}", "cannot bind {0}", bind))?;
     let local = listener.local_addr()?;
+    if open {
+        open_in_browser(&format!("http://{local}"));
+    }
     println!(
         "{}",
         pc_core::tf!("Интерфейс: http://{0}", "Interface: http://{0}", local)

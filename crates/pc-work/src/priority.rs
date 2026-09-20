@@ -11,16 +11,27 @@
 /// macOS has an explicit class for exactly this. It lowers the thread's CPU
 /// priority *and* puts its disk reads in the throttled I/O tier, which is
 /// what keeps the rest of the machine responsive while gigabytes stream past.
-/// Elsewhere a `nice` value is the portable equivalent; on Linux it applies
-/// per thread, which is what we want.
+/// Windows has the same idea under a different name. Elsewhere a `nice` value
+/// is the portable equivalent; on Linux it applies per thread, which is what
+/// we want.
 pub fn background_thread() {
     #[cfg(target_vendor = "apple")]
     unsafe {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
     }
-    #[cfg(not(target_vendor = "apple"))]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     unsafe {
         libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+    }
+    #[cfg(windows)]
+    unsafe {
+        // BEGIN lowers CPU priority and the I/O priority together, and holds
+        // until the matching END — which never comes, because the thread is
+        // a decoder that exists only for this work.
+        windows_sys::Win32::System::Threading::SetThreadPriority(
+            windows_sys::Win32::System::Threading::GetCurrentThread(),
+            windows_sys::Win32::System::Threading::THREAD_MODE_BACKGROUND_BEGIN,
+        );
     }
 }
 

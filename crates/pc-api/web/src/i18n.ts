@@ -99,7 +99,8 @@ export function duration(seconds: number) {
   return `${Math.floor(m / 60)} ${ui.hoursShort} ${m % 60} ${ui.minutesShort}`;
 }
 
-export const basename = (p: string) => p.split("/").pop() || p;
+/** The last component of a path, whichever separator the server uses. */
+export const basename = (p: string) => p.split(/[/\\]/).pop() || p;
 
 /** Colour for a finished job's badge. */
 export const jobTone = (state: string) =>

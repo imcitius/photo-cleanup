@@ -18,7 +18,7 @@ use std::collections::HashMap;
 const TAIL: usize = 3;
 
 fn tail_key(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let parts = pc_core::path_parts(path);
     let from = parts.len().saturating_sub(TAIL);
     parts[from..].join("/").to_lowercase()
 }

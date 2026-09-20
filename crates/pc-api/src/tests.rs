@@ -240,7 +240,10 @@ async fn recovery_and_directory_boundaries() {
     assert_eq!(jobs[0]["state"], "interrupted");
     let secret = f.archive.join("not-a-directory");
     std::fs::write(&secret, b"not exposed").unwrap();
+    // Symlinks need an elevated process on Windows, so the escape attempt
+    // through one is checked where it can be made.
     let link = f.archive.join("escape");
+    #[cfg(unix)]
     std::os::unix::fs::symlink("/", &link).unwrap();
     let (s, v) = f
         .req(
@@ -251,7 +254,12 @@ async fn recovery_and_directory_boundaries() {
         .await;
     assert_eq!(s, 200);
     assert_eq!(v["directories"].as_array().unwrap().len(), 0);
-    for path in [link, secret, f.archive.join("../")] {
+    let mut escapes = vec![secret, f.archive.join("../")];
+    #[cfg(unix)]
+    escapes.push(link);
+    #[cfg(windows)]
+    let _ = link;
+    for path in escapes {
         let (s, _) = f
             .req(
                 "GET",

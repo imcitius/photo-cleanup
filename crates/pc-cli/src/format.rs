@@ -136,7 +136,7 @@ pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
 
 /// Keep the last three components: enough to identify the catalog.
 fn short_path(p: &str) -> String {
-    let parts: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
+    let parts = pc_core::path_parts(p);
     if parts.len() <= 3 {
         return p.to_string();
     }
