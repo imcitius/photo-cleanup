@@ -167,17 +167,22 @@ jobs:
           path: /tmp/bin
           pattern: binary-*
           merge-multiple: true
+      # The image is tagged by its version, without the tag's leading "v":
+      # that is what docker/metadata-action writes, and a pull command naming
+      # a tag that was never pushed is worse than no pull command at all.
+      - id: ver
+        run: echo "number=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - name: Собрать релиз
         uses: softprops/action-gh-release@v2
         with:
           files: /tmp/bin/*
           generate_release_notes: true
           body: |
-            Образ: `docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}`
-            Архитектуры: `linux/amd64`, `linux/arm64`.
+            Image: `docker pull ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.number }}`
+            Architectures: `linux/amd64`, `linux/arm64`.
 
-            Бинарники ниже — статические, зависимостей нет.
-            Запуск: `./photo-cleanup serve --bind 0.0.0.0:8080`.
+            The binaries below are static and need nothing installed.
+            Run: `./photo-cleanup serve --bind 0.0.0.0:8080`.
 
-            Для Windows — `photo-cleanup-windows-x64.zip`: распаковать и
-            запустить `Запустить photo-cleanup.bat`, браузер откроется сам.
+            On Windows, take `photo-cleanup-windows-x64.zip`: unpack it and
+            run `Start photo-cleanup.bat` — the browser opens by itself.
