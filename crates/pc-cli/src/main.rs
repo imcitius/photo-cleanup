@@ -57,6 +57,8 @@ enum Command {
     Serve(ServeArgs),
     /// Summary of the database
     Status,
+    /// What one image file says about itself, and what happens when it is read
+    Inspect(InspectArgs),
     /// Lightroom catalogues that were found
     Catalogs,
 }
@@ -143,6 +145,12 @@ struct OrganizeUndoArgs {
     run: Option<i64>,
     #[arg(long)]
     yes: bool,
+}
+
+#[derive(Args)]
+struct InspectArgs {
+    /// The image to look at
+    path: PathBuf,
 }
 
 #[derive(Args)]
@@ -502,8 +510,73 @@ fn main() -> Result<()> {
         Command::Organize(OrganizeCmd::Undo(a)) => cmd_organize_undo(&db, &a),
         Command::Organize(OrganizeCmd::Runs) => cmd_organize_runs(&db),
         Command::Status => cmd_status(&db),
+        Command::Inspect(a) => cmd_inspect(&a.path),
         Command::Catalogs => cmd_catalogs(&db),
     }
+}
+
+/// Everything the tool can say about one file, without leaving the machine.
+///
+/// A picture that comes out grey, or does not come out at all, is a question
+/// about that file: which flavour of the format it is, and what the decoder
+/// made of it. This prints both, so the answer does not depend on having
+/// exiftool at hand — on a NAS there usually is none.
+fn cmd_inspect(path: &std::path::Path) -> Result<()> {
+    let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let container = pc_image::sniff::sniff(&bytes);
+    println!("File:      {}", path.display());
+    println!("Size:      {}", fmt_bytes(bytes.len() as u64));
+    println!("Container: {}", container.as_str());
+
+    if let Some(s) = pc_image::tiff::summary(&bytes) {
+        println!(
+            "Byte order: {}",
+            if s.big_endian {
+                "big-endian (MM)"
+            } else {
+                "little-endian (II)"
+            }
+        );
+        for (n, dir) in s.directories.iter().enumerate() {
+            println!("Directory {n}:");
+            for (tag, name, values) in &dir.tags {
+                let shown = values
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("  {tag:>5} {name:<26} {shown}");
+            }
+        }
+    }
+
+    match pc_image::probe(path, &bytes, pc_core::file_name_str(path)) {
+        Ok(p) => {
+            println!(
+                "Read:      {} × {} · pixels from {}",
+                p.width,
+                p.height,
+                p.source.as_str()
+            );
+            let m = p.metrics;
+            println!(
+                "Measured:  chroma {:.3} · tonal range {:.0} · entropy {:.2} · contrast {:.1} · sharpness {:.1}",
+                m.chroma, m.tonal_range, m.entropy, m.contrast, m.sharpness
+            );
+            // A frame with no colour and no tonal range is the grey square
+            // the interface would show, and saying so beats making the
+            // person compare numbers.
+            if m.tonal_range < 8.0 {
+                println!(
+                    "Verdict:   the decoded frame is flat — one tone across the whole picture, \n           which is what a grey thumbnail is. The file decodes, but not into \n           this photograph."
+                );
+            } else {
+                println!("Verdict:   decodes into a picture with something in it.");
+            }
+        }
+        Err(e) => println!("Read:      FAILED — {e}"),
+    }
+    Ok(())
 }
 
 /// Thumbnails live beside the database unless told otherwise.
