@@ -7,6 +7,8 @@ photographs, reachable from a browser, with no internet involved.
 *[Читать по-русски](README.ru.md) · the interface speaks both languages and
 switches in Settings.*
 
+![Archive overview](assets/screenshots/overview.png)
+
 ---
 
 ## What it does
@@ -16,10 +18,21 @@ wrote beside it, a DNG conversion and a Lightroom export are four different
 objects describing one moment. Only an exact copy of one of them is rubbish,
 and the tool says which is which rather than calling them all duplicates.
 
+![Duplicates and versions](assets/screenshots/duplicates.png)
+
 **Tells a burst from a duplicate.** Seventy frames of a horse clearing a jump
 are seventy photographs. The tool groups them, ranks them on sharpness,
 clipping and detail, and lets you flip between two frames in the same spot —
 which is the only way a difference of a few pixels becomes visible.
+
+![Bursts](assets/screenshots/bursts.png)
+
+Frames are listed in shooting order, not in quality order: read out of
+sequence, the subject jumps back and forth and the frame you are looking for
+could be anywhere. ★ picks the keeper, and the ones you do not want are marked
+and collected into the move plan.
+
+![Comparing two frames](assets/screenshots/compare.png)
 
 **Accounts for derived data.** Lightroom previews, caches, system junk. It
 recognises a bundle by its directory name and never walks inside: twenty-four
@@ -42,6 +55,13 @@ on disk. One button brings it back.
 
 Space returns only at `purge`, which is a separate action, after a holding
 period, behind a typed confirmation.
+
+![Plan and move](assets/screenshots/plan.png)
+
+Every candidate says which file makes it redundant and why. Frames you marked
+by hand say so, and do not depend on the role checkboxes above.
+
+![Quarantine](assets/screenshots/quarantine.png)
 
 | | |
 |---|---|
