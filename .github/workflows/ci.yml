@@ -1,5 +1,16 @@
 name: Checks
-on: [push, pull_request]
+# Ветки и запросы на слияние, но не теги: тег ставится на уже проверенный
+# коммит, и второй прогон того же дерева ничего не проверяет.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Быстрая серия пушей оставляла очередь из прогонов по устаревшим деревьям.
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Windows has no st_dev, no inode and a different path separator, so it is
   # the platform that catches a Unix assumption creeping back in. It runs the
