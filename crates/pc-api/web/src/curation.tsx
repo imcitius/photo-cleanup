@@ -15,7 +15,7 @@ import {
   VirtualList,
 } from "./components";
 import { basename, bytes, number, ui, when } from "./i18n";
-import type { Category, Family, Member, Series } from "./types";
+import type { Category, Family, Member, Preview, Series } from "./types";
 import type { Start } from "./workflow";
 export interface ImageRef {
   file_id: number;
@@ -212,6 +212,20 @@ export function ImageViewer({
           </figure>
         ))}
       </div>
+      {/* Where this frame is and what the camera wrote. Deciding between two
+          versions means knowing which folder each came from, and that was the
+          one thing the viewer did not say. */}
+      <div className="viewer-details">
+        {shown.map((image, i) => (
+          <details key={`d-${i}-${image.file_id}`} open>
+            <summary>
+              {image.name}
+              {comparing && i === 0 ? ` · ${ui.pinnedFrame}` : ""}
+            </summary>
+            <FileDetails fileId={image.file_id} />
+          </details>
+        ))}
+      </div>
       {/* The next frames, fetched quietly, so flipping is instant rather than
           a wait in which the difference is forgotten. */}
       <div hidden>
@@ -271,6 +285,11 @@ export function Families({
     ),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
+    [pending, setPending] = useState<{
+      family: number;
+      token: string;
+      names: string[];
+    } | null>(null),
     [focused, setFocused] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null),
     searchRef = useRef<HTMLInputElement>(null);
@@ -394,6 +413,55 @@ export function Families({
     document.addEventListener("keydown", listener);
     return () => document.removeEventListener("keydown", listener);
   }, [cache, selected, focused, total, busy, disabled]);
+  // Ask the server what moving this one group would do, and hold the answer
+  // until the user presses again. The token ties the confirmation to the plan
+  // that was shown: if the group changed in between, the run is refused.
+  const prepareGroup = async (family: Family) => {
+    setBusy(true);
+    setError("");
+    try {
+      const preview = await post<Preview>("/preview", {
+        kind: "plan-apply",
+        params: { roles: ["copy"], family_id: family.id },
+      });
+      if (!preview.items.length) {
+        setError(ui.groupApplyNothing);
+        return;
+      }
+      setPending({
+        family: family.id,
+        token: preview.token,
+        names: preview.items.map((i) => basename(i.path)),
+      });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runGroup = async (family: Family) => {
+    if (!pending) return;
+    setBusy(true);
+    setError("");
+    try {
+      await post("/jobs", {
+        kind: "plan-apply",
+        params: { roles: ["copy"], family_id: family.id },
+        plan_token: pending.token,
+      });
+      setPending(null);
+      // The group leaves the list on its own: its copies are no longer in
+      // the archive, so it stops being a group of several files.
+      setSelected(null);
+      onChange();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const split = async (m: Member) => {
     setBusy(true);
     setError("");
@@ -596,6 +664,40 @@ export function Families({
                 </div>
               </div>
               <p className="muted">{ui.familyActionsHelp}</p>
+              {/* Ten thousand groups is not a decision anybody makes in one
+                  press. This moves the exact copies of *this* group, after
+                  showing which files they are — the same plan as the one on
+                  the plan screen, narrowed to what is on screen. */}
+              {!!selected.removable_bytes && (
+                <div className="group-apply">
+                  {pending?.family === selected.id ? (
+                    <>
+                      <span>
+                        {ui.groupApplyConfirm} {pending.names.join(", ")} ·{" "}
+                        {bytes(selected.removable_bytes)}
+                      </span>
+                      <Button
+                        kind="primary"
+                        disabled={disabled || busy}
+                        onClick={() => runGroup(selected)}
+                      >
+                        {ui.move}
+                      </Button>
+                      <Button disabled={busy} onClick={() => setPending(null)}>
+                        {ui.cancel}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      icon="arrow"
+                      disabled={disabled || busy}
+                      onClick={() => prepareGroup(selected)}
+                    >
+                      {ui.groupApply} · {bytes(selected.removable_bytes)}
+                    </Button>
+                  )}
+                </div>
+              )}
               <div className="section-heading">
                 <span className="muted">{t("versii_snimka")}</span>
                 <Button

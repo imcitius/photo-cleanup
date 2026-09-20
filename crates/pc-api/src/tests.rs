@@ -254,7 +254,14 @@ async fn recovery_and_directory_boundaries() {
         .await;
     assert_eq!(s, 200);
     assert_eq!(v["directories"].as_array().unwrap().len(), 0);
-    let mut escapes = vec![secret, f.archive.join("../")];
+    // Spelled as text: joining `..` onto a Windows verbatim path makes Rust
+    // fold it away, which would leave nothing for the endpoint to refuse.
+    let up = PathBuf::from(format!(
+        "{}{}..",
+        f.archive.display(),
+        std::path::MAIN_SEPARATOR
+    ));
+    let mut escapes = vec![secret, up];
     #[cfg(unix)]
     escapes.push(link);
     #[cfg(windows)]
@@ -708,6 +715,55 @@ async fn a_rejected_frame_moves_beside_itself_and_comes_back() {
     let restored = f.apply(&back).await;
     assert_eq!(restored["state"], "done", "{restored}");
     assert!(photo.exists(), "файл не вернулся");
+}
+
+#[tokio::test]
+async fn one_group_can_be_acted_on_without_touching_the_rest() {
+    // Ten thousand groups is a frightening button. Acting on the group in
+    // front of you has to move that group's copies and nothing else.
+    let f = Fixture::new();
+    for (n, shade) in [("a", 40u8), ("b", 200u8)] {
+        let img = image::RgbImage::from_fn(240, 180, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, shade])
+        });
+        let mut encoded = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+            .encode_image(&img)
+            .unwrap();
+        std::fs::write(f.archive.join(format!("{n}.jpg")), &encoded).unwrap();
+        std::fs::write(f.archive.join(format!("{n} copy.jpg")), &encoded).unwrap();
+    }
+    let id = f
+        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+    let id = f.start("families", json!({})).await;
+    assert_eq!(f.wait(id).await["state"], "done");
+
+    let (_, groups) = f.req("GET", "/api/families?limit=10", Value::Null).await;
+    let groups = groups["families"].as_array().unwrap();
+    assert_eq!(groups.len(), 2, "{groups:?}");
+    let one = groups[0]["id"].as_i64().unwrap();
+
+    let whole = f.preview("plan-apply", json!({"roles":["copy"]})).await;
+    assert_eq!(whole["items"].as_array().unwrap().len(), 2, "{whole}");
+
+    let narrowed = f
+        .preview("plan-apply", json!({"roles":["copy"],"family_id":one}))
+        .await;
+    let items = narrowed["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{narrowed}");
+    let moved = items[0]["path"].as_str().unwrap().to_string();
+
+    let done = f.apply(&narrowed).await;
+    assert_eq!(done["state"], "done", "{done}");
+    let left: Vec<String> = std::fs::read_dir(&f.archive)
+        .unwrap()
+        .filter_map(|e| Some(e.ok()?.file_name().to_str()?.to_string()))
+        .filter(|n| n.ends_with(".jpg"))
+        .collect();
+    assert_eq!(left.len(), 3, "тронули лишнее: {left:?}");
+    assert!(!Path::new(&moved).exists(), "{moved}");
 }
 
 #[tokio::test]

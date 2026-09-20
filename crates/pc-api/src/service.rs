@@ -585,7 +585,15 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     policy.remove_roles.insert(role);
                 }
             }
-            let plan = pc_family::plan::compute(db, &policy)?;
+            let mut plan = pc_family::plan::compute(db, &policy)?;
+            // One group at a time. Ten thousand groups is not a decision
+            // anybody makes in one press, so the interface offers each group
+            // its own, and the plan behind it is the same plan — narrowed,
+            // not a second code path with its own rules.
+            if let Some(family) = r.params.get("family_id").and_then(Value::as_i64) {
+                plan.candidates.retain(|c| c.family_id == family);
+                plan.refusals.clear();
+            }
             for refusal in plan.refusals {
                 add_refusal(refusal.path, refusal.why);
             }

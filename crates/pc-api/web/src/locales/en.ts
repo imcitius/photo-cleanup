@@ -168,6 +168,10 @@ export const ui = {
   familyActionsHelp:
     "A group is one photograph in several files. “Keep this one” chooses which version stays; “This is a different shot” takes a file out of the group when it does not belong. Nothing moves until you approve the plan.",
   noExactCopies: "no exact copies",
+  groupApply: "Move this group's copies",
+  groupApplyConfirm: "Going to quarantine:",
+  groupApplyNothing:
+    "This group holds no exact copies — there is nothing to move. Different versions of a shot stay where they are.",
   compare: "Compare",
   compareHelp: "Pick two files to compare",
   previousFrame: "Previous frame",

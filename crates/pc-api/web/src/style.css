@@ -436,6 +436,39 @@ main {
   border-radius: 8px;
 }
 
+/* Path and metadata under the frame being looked at. */
+.viewer-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+  margin-top: 12px;
+}
+.viewer-details > details {
+  min-width: 0;
+}
+.viewer-details summary {
+  font-weight: 600;
+}
+/* Which folder the frame came from is half the decision, so the path is
+   shown whole rather than cut off at the column edge. */
+.viewer-details .path {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Acting on one group, where the group is already on screen. */
+.group-apply {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--subtle);
+  border-radius: 10px;
+  font-size: 13px;
+}
+
 /* Folders the server can see, offered before anything is chosen. */
 .suggested-roots {
   display: flex;
