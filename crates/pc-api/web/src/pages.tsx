@@ -395,6 +395,7 @@ export function Setup({
     [min, setMin] = useState(settings.min_size),
     [readers, setReaders] = useState(2),
     [reindex, setReindex] = useState(false),
+    [allThumbs, setAllThumbs] = useState(false),
     [phash, setPhash] = useState(settings.phash_max),
     [ssim, setSsim] = useState(settings.ssim_min),
     [gap, setGap] = useState(settings.series_gap_secs),
@@ -423,6 +424,7 @@ export function Setup({
         phash_max: phash,
         ssim_min: ssim,
         gap_secs: gap,
+        all: allThumbs,
       });
       onSettings();
     } catch (e) {
@@ -580,8 +582,19 @@ export function Setup({
             >
               {ui.rebuildThumbs}
             </Button>
-            <span className="muted">{ui.rebuildThumbsHelp}</span>
+            {/* A thumbnail can be wrong without looking empty — a file read
+                the wrong way gives noise, and noise passes for a picture. A
+                run that reads the archive again settles it. */}
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={allThumbs}
+                onChange={(e) => setAllThumbs(e.target.checked)}
+              />
+              {ui.rebuildThumbsAll}
+            </label>
           </div>
+          <span className="muted">{ui.rebuildThumbsHelp}</span>
         </div>
       </section>
       <section className="panel setup-section">

@@ -215,6 +215,7 @@ export const ui = {
   rebuildThumbs: "Rebuild thumbnails",
   rebuildThumbsHelp:
     "Checks the stored thumbnails and makes again the ones that are missing, unreadable or grey. Only those files are read from the archive.",
+  rebuildThumbsAll: "all of them, not only the bad ones",
   hideCopies: "Show one file each",
   copiesInBurstHelp:
     "These frames are the same file in several places. The plan keeps one of them; the rest go to quarantine with the other copies.",
