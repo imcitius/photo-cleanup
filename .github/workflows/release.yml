@@ -62,10 +62,14 @@ jobs:
           path: photo-cleanup-linux-*
           if-no-files-found: error
 
+      # The digest travels as a file name, and upload-artifact refuses a
+      # colon in one — so the `sha256:` prefix is stripped here and put back
+      # when the manifest is assembled.
       - name: Записать digest
         run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
       - uses: actions/upload-artifact@v4
         with:
           name: digest-${{ strategy.job-index }}
