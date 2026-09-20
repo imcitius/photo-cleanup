@@ -587,7 +587,17 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     policy.remove_roles.insert(role);
                 }
             }
-            let mut plan = pc_family::plan::compute(db, &policy)?;
+            // Narrowed where the rows are read, not after: a press on one
+            // group of ten thousand should not walk the whole archive twice.
+            let scope = pc_family::plan::Scope {
+                family: r.params.get("family_id").and_then(Value::as_i64),
+                folder: r
+                    .params
+                    .get("folder")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            };
+            let mut plan = pc_family::plan::compute_scoped(db, &policy, &scope)?;
             // One group at a time. Ten thousand groups is not a decision
             // anybody makes in one press, so the interface offers each group
             // its own, and the plan behind it is the same plan — narrowed,

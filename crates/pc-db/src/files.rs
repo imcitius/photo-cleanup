@@ -771,6 +771,23 @@ impl Db {
     }
 
     pub fn plan_rows(&self) -> Result<Vec<PlanRow>> {
+        self.plan_rows_scoped(None, None)
+    }
+
+    /// The rows a plan is built from, narrowed to one group or one folder.
+    ///
+    /// Acting on a single group used to read every member of every group in
+    /// the archive — sixty thousand rows to decide about two files, twice
+    /// over, because the run re-checks the plan it was given. The narrowing
+    /// belongs here, where the rows are fetched.
+    ///
+    /// The folder is matched by prefix, which is as far as SQL can take it;
+    /// the caller still decides what counts as being *in* that folder.
+    pub fn plan_rows_scoped(
+        &self,
+        family: Option<i64>,
+        folder_prefix: Option<&str>,
+    ) -> Result<Vec<PlanRow>> {
         let mut st = self.conn.prepare(
             "SELECT fm.family_id, fm.file_id, fm.role, f.path, f.size, f.width, f.height,
                     f.mtime, f.inode, f.dev, f.disk, f.pixel_hash,
@@ -779,10 +796,15 @@ impl Db {
                JOIN files f    ON f.id = fm.file_id
                JOIN families fa ON fa.id = fm.family_id
               WHERE f.state = 'present'
+                AND (?1 IS NULL OR fm.family_id = ?1)
+                AND (?2 IS NULL OR fm.family_id IN (
+                      SELECT x.family_id
+                        FROM family_members x JOIN files xf ON xf.id = x.file_id
+                       WHERE xf.state = 'present' AND xf.path LIKE ?2 || '%'))
               ORDER BY fm.family_id",
         )?;
         let rows = st
-            .query_map([], |r| {
+            .query_map(rusqlite::params![family, folder_prefix], |r| {
                 let file_id: i64 = r.get(1)?;
                 Ok(PlanRow {
                     family_id: r.get(0)?,

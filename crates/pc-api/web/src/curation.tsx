@@ -925,22 +925,28 @@ export function Families({
                         <code className="path" title={`${m.dir}/${m.name}`}>
                           {m.dir}
                         </code>
-                        <button
-                          className="link"
-                          disabled={disabled || busy}
-                          title={ui.preferFolderHelp}
-                          onClick={() => preferFolder(m.dir)}
-                        >
-                          {ui.preferFolder}
-                        </button>
-                        <button
-                          className="link"
-                          disabled={disabled || busy}
-                          title={ui.moveFolderHelp}
-                          onClick={() => prepareFolderMove(m.dir)}
-                        >
-                          {ui.moveFolder}
-                        </button>
+                        {/* Quiet, and under the path they act on: these are
+                            about the folder, not about this file, and they
+                            must not read as the main thing to press. */}
+                        <div className="folder-actions">
+                          <button
+                            className="link"
+                            disabled={disabled || busy}
+                            title={ui.preferFolderHelp}
+                            onClick={() => preferFolder(m.dir)}
+                          >
+                            {ui.preferFolder}
+                          </button>
+                          <span className="muted">·</span>
+                          <button
+                            className="link"
+                            disabled={disabled || busy}
+                            title={ui.moveFolderHelp}
+                            onClick={() => prepareFolderMove(m.dir)}
+                          >
+                            {ui.moveFolder}
+                          </button>
+                        </div>
                       </div>
                       <div className="muted">
                         {m.width} × {m.height} · {bytes(m.size)}

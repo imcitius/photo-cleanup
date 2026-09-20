@@ -151,7 +151,7 @@ mod predictor_tests {
 }
 
 /// Undo the EXIF orientation so stored pixels are upright.
-fn apply_orientation(img: DynamicImage, orientation: u16) -> DynamicImage {
+pub fn apply_orientation(img: DynamicImage, orientation: u16) -> DynamicImage {
     match orientation {
         2 => img.fliph(),
         3 => img.rotate180(),

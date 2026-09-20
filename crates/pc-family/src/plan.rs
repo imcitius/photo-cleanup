@@ -74,8 +74,22 @@ fn keeper_of(members: &[PlanRow]) -> Option<&PlanRow> {
         .or_else(|| members.iter().max_by_key(|m| m.width * m.height))
 }
 
+/// What the plan is being asked about: the whole archive, one group, or one
+/// folder. Acting on a group should cost what that group costs.
+#[derive(Debug, Default, Clone)]
+pub struct Scope {
+    pub family: Option<i64>,
+    /// Matched by prefix when the rows are fetched; the exact folder is the
+    /// caller's business.
+    pub folder: Option<String>,
+}
+
 pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
-    let rows = db.plan_rows()?;
+    compute_scoped(db, policy, &Scope::default())
+}
+
+pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
+    let rows = db.plan_rows_scoped(scope.family, scope.folder.as_deref())?;
     let protected = if policy.respect_lightroom {
         CurationIndex::build(db.lightroom_protected()?)
     } else {

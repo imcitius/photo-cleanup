@@ -1078,7 +1078,7 @@ const VIEW_SIDE: u32 = 2400;
 /// frame that was rendered wrong stays wrong for as long as the file sits
 /// untouched — which is exactly what happened to the TIFFs whose predictor
 /// tag we used to obey.
-const RENDER: &[u8] = b"v2-predictor";
+const RENDER: &[u8] = b"v3-orientation";
 
 /// Where a rendered view of this file is kept between looks.
 fn view_key(path: &str, md: &std::fs::Metadata, full: bool) -> String {
@@ -1103,12 +1103,16 @@ fn view_key(path: &str, md: &std::fs::Metadata, full: bool) -> String {
 ///
 /// Fitted to the screen unless the frame is being looked at pixel for pixel,
 /// where a downscale would make the 1:1 button a lie.
-fn render(image: &image::DynamicImage, full: bool) -> anyhow::Result<Vec<u8>> {
+fn render(image: &image::DynamicImage, full: bool, orientation: u16) -> anyhow::Result<Vec<u8>> {
     let scaled = if !full && image.width().max(image.height()) > VIEW_SIDE {
         image.resize(VIEW_SIDE, VIEW_SIDE, image::imageops::FilterType::Lanczos3)
     } else {
         image.clone()
     };
+    // The camera recorded which way up the frame is, and the thumbnail has
+    // already been turned that way. A view that ignores it shows the same
+    // photograph lying on its side, beside its own upright thumbnail.
+    let scaled = pc_image::thumb::apply_orientation(scaled, orientation);
     let rgb = scaled.to_rgb8();
     let mut bytes = Vec::new();
     let quality = if full { 92 } else { 82 };
@@ -1169,21 +1173,34 @@ pub async fn full_preview(
             return Ok(cached);
         }
         let read = pc_image::read_for_probe(p, md.len())?;
+        let orientation = pc_image::meta::read(&read.head, read.container).orientation;
         // A JPEG is already what the browser wants, and a raw file carries a
         // JPEG inside it. Neither is worth a second copy on disk — only the
         // frames that had to be decoded are kept, and only while they stay
         // small enough to be worth keeping.
+        // A JPEG carries its own orientation and every browser honours it,
+        // so the file goes out untouched. The preview lifted out of a raw
+        // container does not: the tag stays behind in the container, and the
+        // frame arrives lying on its side.
         if read.complete && read.container == pc_image::Container::Jpeg {
             return Ok(read.head);
         }
         if let Some(preview) = read.preview {
-            return Ok(preview);
+            if orientation <= 1 {
+                return Ok(preview);
+            }
+            let image = pc_image::thumb::decode(&preview)?;
+            let rendered = render(&image, full, orientation)?;
+            if rendered.len() <= 6 * 1024 * 1024 {
+                let _ = thumbs.put_at(&key, &rendered);
+            }
+            return Ok(rendered);
         }
         // Through our own decode: a TIFF that claims differencing it never
         // applied has to be read the same way here as in the thumbnails.
         let image =
             pc_image::thumb::decode(&read.head).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
-        let rendered = render(&image, full)?;
+        let rendered = render(&image, full, orientation)?;
         if rendered.len() <= 6 * 1024 * 1024 {
             let _ = thumbs.put_at(&key, &rendered);
         }
