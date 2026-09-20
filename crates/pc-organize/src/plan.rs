@@ -59,7 +59,7 @@ pub struct Move {
 
 impl Move {
     pub fn name(&self) -> &str {
-        self.dst.rsplit('/').next().unwrap_or(&self.dst)
+        pc_core::base_name(&self.dst)
     }
 }
 
@@ -154,7 +154,7 @@ fn join_name(stem: &str, ext: &str) -> String {
 }
 
 fn dir_of(path: &str) -> &str {
-    path.rsplit_once('/').map_or("", |(a, _)| a)
+    pc_core::dir_name(path)
 }
 
 /// Destination directory for a date the tool is not sure about.
@@ -298,7 +298,10 @@ pub fn compute(db: &Db, o: &Options) -> Result<Plan> {
         plan.moves.push(Move {
             file_id: row.id,
             src: row.path.clone(),
-            dst: format!("{dir_str}/{name}"),
+            // Joined rather than glued with a slash: a destination spelled
+            // differently from the paths around it is not recognised as the
+            // place a file already sits, and the next pass moves it again.
+            dst: Path::new(&dir_str).join(&name).to_string_lossy().into(),
             size: row.size,
             mtime: row.mtime,
             date: d,

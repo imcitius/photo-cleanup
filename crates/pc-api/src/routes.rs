@@ -799,7 +799,7 @@ pub async fn organize(State(st): State<Arc<AppState>>, Query(q): Query<OrganizeQ
     let root_str = opts.root.to_string_lossy().into_owned();
     let rel = |dst: &str| -> String {
         dst.strip_prefix(&root_str)
-            .map(|p| p.trim_start_matches('/').to_string())
+            .map(|p| pc_core::trim_leading_separators(p).to_string())
             .unwrap_or_else(|| dst.to_string())
     };
 

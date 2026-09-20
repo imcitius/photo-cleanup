@@ -170,7 +170,7 @@ fn event_time(comp: &str) -> Option<i64> {
 /// Deepest first: `.../2019/2019-07-14 Крым/` should answer with the day, not
 /// with the year two levels up.
 pub fn date_from_path(dir: &str) -> Option<(i64, Precision)> {
-    let comps: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    let comps = pc_core::path_parts(dir);
     for (i, comp) in comps.iter().enumerate().rev() {
         if let Some(ts) = pc_image::meta::date_from_name(comp) {
             return Some((ts + event_time(comp).unwrap_or(0), Precision::Day));
@@ -212,7 +212,7 @@ pub fn resolve(row: &OrganizeRow) -> Dated {
         };
     }
 
-    let dir = row.path.rsplit_once('/').map_or("", |(a, _)| a);
+    let dir = pc_core::dir_name(&row.path);
     if let Some((ts, precision)) = date_from_path(dir).filter(|(ts, _)| plausible(*ts)) {
         return Dated {
             ts,
@@ -236,7 +236,7 @@ mod tests {
         OrganizeRow {
             id: 1,
             path: path.into(),
-            name: path.rsplit('/').next().unwrap_or(path).into(),
+            name: pc_core::base_name(path).into(),
             mtime,
             taken_at: taken,
             date_source: source.map(str::to_string),

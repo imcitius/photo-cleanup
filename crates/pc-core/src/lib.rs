@@ -162,6 +162,12 @@ pub fn dir_name(path: &str) -> &str {
     split_path(path).0
 }
 
+/// A path with its leading separators removed, as after stripping a root off
+/// the front of one. Platform-aware for the same reason as `split_path`.
+pub fn trim_leading_separators(path: &str) -> &str {
+    path.trim_start_matches(SEPARATORS)
+}
+
 /// Path components, with empty ones dropped.
 pub fn path_parts(path: &str) -> Vec<&str> {
     path.split(SEPARATORS).filter(|s| !s.is_empty()).collect()

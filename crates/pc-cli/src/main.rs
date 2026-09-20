@@ -786,7 +786,7 @@ fn refuse_until_deduplicated(db: &Db) -> Result<()> {
 fn rel_to<'a>(path: &'a str, root: &std::path::Path) -> &'a str {
     let root = root.to_string_lossy();
     path.strip_prefix(root.as_ref())
-        .map(|p| p.trim_start_matches('/'))
+        .map(pc_core::trim_leading_separators)
         .unwrap_or(path)
 }
 
