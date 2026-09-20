@@ -322,6 +322,15 @@ export function Overview({
               {number(status.skipped)}
             </p>
           )}
+          {/* A frame with no thumbnail shows as a grey square, which reads as
+              a broken file. It is not: the picture was indexed and only its
+              thumbnail is missing, and indexing again makes it — such a file
+              no longer counts as done, so the run re-reads exactly those. */}
+          {!!status?.without_thumb && (
+            <Notice tone="warning">
+              {t("bez_miniatyur", number(status.without_thumb))}
+            </Notice>
+          )}
         </section>
       </div>
       <section className="panel">

@@ -114,6 +114,9 @@ pub struct IndexStats {
     pub total: i64,
     pub images: i64,
     pub skipped: i64,
+    /// Indexed frames with no thumbnail to show for them. Non-zero means a
+    /// grey square somewhere in the interface, and an index run repairs it.
+    pub without_thumb: i64,
 }
 
 impl Db {
@@ -125,9 +128,14 @@ impl Db {
         let found: Option<i64> = self
             .conn
             .query_row(
+                // A file counts as done only if it has a thumbnail to show,
+                // or a reason why it never will. Without that a frame whose
+                // thumbnail failed stays a grey square for good: every later
+                // run sees an indexed file and skips it.
                 "SELECT 1 FROM files
                   WHERE path = ?1 AND size = ?2 AND mtime = ?3 AND inode = ?4
-                    AND (phash IS NOT NULL OR skipped_reason IS NOT NULL)",
+                    AND ((phash IS NOT NULL AND thumb_key IS NOT NULL)
+                         OR skipped_reason IS NOT NULL)",
                 params![path, size, mtime, inode],
                 |r| r.get(0),
             )
@@ -253,7 +261,8 @@ impl Db {
         Ok(self.conn.query_row(
             "SELECT COUNT(*),
                     COALESCE(SUM(phash IS NOT NULL), 0),
-                    COALESCE(SUM(skipped_reason IS NOT NULL), 0)
+                    COALESCE(SUM(skipped_reason IS NOT NULL), 0),
+                    COALESCE(SUM(phash IS NOT NULL AND thumb_key IS NULL), 0)
                FROM files",
             [],
             |r| {
@@ -261,6 +270,7 @@ impl Db {
                     total: r.get(0)?,
                     images: r.get(1)?,
                     skipped: r.get(2)?,
+                    without_thumb: r.get(3)?,
                 })
             },
         )?)

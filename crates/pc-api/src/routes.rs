@@ -97,6 +97,8 @@ pub struct Status {
     files: i64,
     images: i64,
     skipped: i64,
+    /// Frames with no thumbnail: grey squares waiting for an index run.
+    without_thumb: i64,
     families: i64,
     families_multi: i64,
     /// Built series and classified files, so the overview can tell a stage
@@ -143,6 +145,7 @@ pub async fn status(State(st): State<Arc<AppState>>) -> Api<Status> {
 
     Ok(Json(Status {
         version: env!("CARGO_PKG_VERSION"),
+        without_thumb: idx.without_thumb,
         files: idx.total,
         images: idx.images,
         skipped: idx.skipped,
@@ -434,7 +437,7 @@ pub async fn thumb(State(st): State<Arc<AppState>>, AxPath(key): AxPath<String>)
         )
             .into_response();
     }
-    match st.thumbs.get(&key) {
+    match st.thumbs.get(&key).filter(|b| !b.is_empty()) {
         Some(bytes) => (
             [
                 (header::CONTENT_TYPE, "image/jpeg"),

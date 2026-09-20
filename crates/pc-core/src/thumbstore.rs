@@ -36,6 +36,16 @@ impl ThumbStore {
     /// Store the bytes and return their key. Writing the same thumbnail twice
     /// is a no-op.
     pub fn put(&self, jpeg: &[u8]) -> Result<String> {
+        // An encoder that gave up leaves an empty buffer. Stored, it becomes a
+        // key that resolves to nothing, and the interface shows a grey square
+        // where a photograph should be — which looks like a broken file
+        // rather than a missing thumbnail.
+        if jpeg.is_empty() {
+            anyhow::bail!(crate::tr!(
+                "пустая миниатюра",
+                "the thumbnail came out empty"
+            ));
+        }
         let key = hex32(&blake3_of(jpeg)[..16]);
         let path = self.path_for(&key);
         if path.exists() {

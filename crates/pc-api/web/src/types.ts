@@ -26,6 +26,7 @@ export interface Family {
 }
 export interface Status {
   version: string;
+  without_thumb: number;
   files: number;
   images: number;
   skipped: number;

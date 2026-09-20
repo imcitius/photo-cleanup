@@ -379,6 +379,8 @@ export const messages = {
   uzhe_v_karantine: "Already in quarantine",
   otkryt_karantin: "Open quarantine",
   propuscheno_pri_indeksatsii: "Skipped while indexing: ",
+  bez_miniatyur:
+    "Without thumbnails: {0}. These are not broken files — the thumbnail did not come out during indexing. Run indexing again: only those files are re-read.",
   poslednie_zadachi: "Recent jobs",
   zhurnal_operatsiy: "Operations journal →",
   zadacha_2: "Job #{0}",

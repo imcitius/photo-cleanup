@@ -1068,6 +1068,13 @@ fn cmd_status(db: &Db) -> Result<()> {
 
     let sum = |v: &[&&pc_db::Bundle]| -> u64 { v.iter().map(|b| b.size as u64).sum() };
 
+    let idx = db.index_stats()?;
+    if idx.without_thumb > 0 {
+        println!(
+            "Frames with no thumbnail: {} — run `index` again to make them",
+            idx.without_thumb
+        );
+    }
     println!("Bundles in the inventory: {}", all.len());
     println!(
         "  can be moved:          {:>4}  {}",

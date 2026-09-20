@@ -374,6 +374,8 @@ export const messages = {
   uzhe_v_karantine: "Уже в карантине",
   otkryt_karantin: "Открыть карантин",
   propuscheno_pri_indeksatsii: "Пропущено при индексации: ",
+  bez_miniatyur:
+    "Без миниатюр: {0}. Это не битые файлы — миниатюра не получилась при индексации. Запустите индексацию ещё раз: перечитаны будут только они.",
   poslednie_zadachi: "Последние задачи",
   zhurnal_operatsiy: "Журнал операций →",
   zadacha_2: "Задача №{0}",
