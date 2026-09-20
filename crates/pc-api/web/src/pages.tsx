@@ -140,6 +140,16 @@ export function Overview({
           <a href="#journal">{t("proverit_zhurnal")}</a>
         </Notice>
       )}
+      {/* A frame with no thumbnail shows as a grey square, which reads as a
+          broken file. It is not: the picture was indexed and only its
+          thumbnail is missing, and indexing again makes it — such a file no
+          longer counts as done, so the run re-reads exactly those. Said at
+          the top, where a thing to do is looked for. */}
+      {!!status?.without_thumb && (
+        <Notice tone="warning">
+          {t("bez_miniatyur", number(status.without_thumb))}
+        </Notice>
+      )}
       {locked.length > 0 && (
         <Notice tone="warning">
           {t("otkryt_lightroom")}
@@ -321,15 +331,6 @@ export function Overview({
               {t("propuscheno_pri_indeksatsii")}
               {number(status.skipped)}
             </p>
-          )}
-          {/* A frame with no thumbnail shows as a grey square, which reads as
-              a broken file. It is not: the picture was indexed and only its
-              thumbnail is missing, and indexing again makes it — such a file
-              no longer counts as done, so the run re-reads exactly those. */}
-          {!!status?.without_thumb && (
-            <Notice tone="warning">
-              {t("bez_miniatyur", number(status.without_thumb))}
-            </Notice>
           )}
         </section>
       </div>
