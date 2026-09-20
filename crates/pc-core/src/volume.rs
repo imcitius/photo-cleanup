@@ -80,11 +80,27 @@ pub fn entry_key(md: &Metadata, path: &Path) -> String {
 #[cfg(windows)]
 pub fn prefix_id(path: &Path) -> u64 {
     use std::hash::{Hash, Hasher};
-    let prefix = path
-        .components()
-        .next()
-        .map(|c| c.as_os_str().to_string_lossy().to_uppercase())
-        .unwrap_or_default();
+    use std::path::{Component, Prefix};
+    // `\\?\C:\foto` and `C:\foto` are the same drive, and the verbatim
+    // spelling is what `canonicalize` hands back, so the two do meet. Hashing
+    // the prefix as written would make a move within one drive look like a
+    // move between filesystems, and quarantine would refuse it.
+    let prefix = match path.components().next() {
+        Some(Component::Prefix(p)) => match p.kind() {
+            Prefix::Disk(d) | Prefix::VerbatimDisk(d) => {
+                (d as char).to_ascii_uppercase().to_string()
+            }
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => format!(
+                r"\\{}\{}",
+                server.to_string_lossy().to_uppercase(),
+                share.to_string_lossy().to_uppercase()
+            ),
+            Prefix::DeviceNS(s) | Prefix::Verbatim(s) => s.to_string_lossy().to_uppercase(),
+        },
+        other => other
+            .map(|c| c.as_os_str().to_string_lossy().to_uppercase())
+            .unwrap_or_default(),
+    };
     let mut h = std::collections::hash_map::DefaultHasher::new();
     prefix.hash(&mut h);
     // Zero is reserved for "unknown", so a prefix never produces it.
@@ -94,6 +110,21 @@ pub fn prefix_id(path: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn one_drive_spelled_two_ways_is_one_filesystem() {
+        // Quarantine compares the source with its destination, and the two
+        // reach the comparison spelled differently: one canonicalised, one as
+        // the operator typed it, one through an 8.3 short name.
+        assert_eq!(prefix_id(Path::new(r"\\?\C:\foto")), prefix_id(Path::new(r"C:\foto")));
+        assert_eq!(prefix_id(Path::new(r"c:\foto")), prefix_id(Path::new(r"C:\Other")));
+        assert_eq!(
+            prefix_id(Path::new(r"\\?\UNC\nas\photo\a")),
+            prefix_id(Path::new(r"\\nas\photo\b"))
+        );
+        assert_ne!(prefix_id(Path::new(r"C:\foto")), prefix_id(Path::new(r"D:\foto")));
+    }
 
     #[test]
     fn a_files_device_is_the_device_of_its_directory() {

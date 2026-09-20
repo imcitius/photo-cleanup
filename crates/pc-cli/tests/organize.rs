@@ -199,7 +199,7 @@ fn applying_moves_the_files_the_sidecars_and_the_index() {
     let owner = plan
         .moves
         .iter()
-        .find(|m| m.src.ends_with("сброс/DSC01234.JPG"))
+        .find(|m| m.src.replace('\\', "/").ends_with("сброс/DSC01234.JPG"))
         .unwrap();
     let side = Path::new(&owner.dst).with_extension("xmp");
     assert!(side.is_file(), "сайдкар потерялся: {}", side.display());

@@ -131,6 +131,13 @@ fn build_world() -> World {
     }
 }
 
+/// Paths are written with the platform's own separator, and these tests read
+/// them by their tail. Comparing on one spelling keeps the assertions about
+/// the archive rather than about the operating system.
+fn tail(path: &str, ending: &str) -> bool {
+    path.replace('\\', "/").ends_with(ending)
+}
+
 fn plan_with(w: &World, policy: &Policy) -> plan::Plan {
     plan::compute(&w.db, policy).unwrap()
 }
@@ -142,23 +149,23 @@ fn exact_copies_are_found_and_the_original_is_not_among_them() {
 
     let paths: Vec<&str> = p.candidates.iter().map(|c| c.path.as_str()).collect();
     assert!(
-        paths.iter().any(|x| x.ends_with("Telegram/DSC01234.JPG")),
+        paths.iter().any(|x| tail(x, "Telegram/DSC01234.JPG")),
         "копия в Telegram не найдена: {paths:?}"
     );
     assert!(
         paths
             .iter()
-            .any(|x| x.ends_with("Backup/2019/DSC01234.JPG")),
+            .any(|x| tail(x, "Backup/2019/DSC01234.JPG")),
         "копия в Backup не найдена: {paths:?}"
     );
     // The one in its proper place is what the others are measured against.
     assert!(
-        !paths.iter().any(|x| x.ends_with("foto/2019/DSC01234.JPG")),
+        !paths.iter().any(|x| tail(x, "foto/2019/DSC01234.JPG")),
         "предложен сам оригинал: {paths:?}"
     );
     for c in &p.candidates {
         assert!(
-            c.keeper_path.ends_with("foto/2019/DSC01234.JPG") || c.keeper_path.contains("DSC05555"),
+            tail(&c.keeper_path, "foto/2019/DSC01234.JPG") || c.keeper_path.contains("DSC05555"),
             "сохраняется не тот файл: {}",
             c.keeper_path
         );
@@ -179,9 +186,9 @@ fn a_backup_folder_never_wins_the_contest_against_the_working_copy() {
     let c = p
         .candidates
         .iter()
-        .find(|c| c.path.ends_with("Backup/2019/DSC01234.JPG"))
+        .find(|c| tail(&c.path, "Backup/2019/DSC01234.JPG"))
         .expect("копия в Backup не предложена");
-    assert!(c.keeper_path.ends_with("foto/2019/DSC01234.JPG"));
+    assert!(tail(&c.keeper_path, "foto/2019/DSC01234.JPG"));
 }
 
 #[test]

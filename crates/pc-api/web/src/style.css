@@ -1367,9 +1367,17 @@ details > summary:hover {
   overflow: hidden;
   min-height: 600px;
 }
-.family-list {
-  overflow: auto;
+/* The pane takes the row's full height; the list inside it is taken out of
+   flow so the thousands of rows it holds never stretch that row. */
+.family-list-pane {
+  position: relative;
+  overflow: hidden;
   border-right: 1px solid var(--line);
+}
+.family-list {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
 }
 .family-list-item {
   border: 0;
@@ -2209,8 +2217,8 @@ kbd {
   .family-workspace {
     grid-template-columns: 1fr;
   }
-  .family-list {
-    height: 280px !important;
+  .family-list-pane {
+    height: 280px;
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }

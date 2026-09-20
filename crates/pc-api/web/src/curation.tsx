@@ -293,8 +293,20 @@ export function Families({
     [focused, setFocused] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null),
     searchRef = useRef<HTMLInputElement>(null);
-  const height = 600,
-    rowHeight = 92;
+  // The list fills whatever height the group beside it takes, so it is
+  // measured rather than fixed: a short pane would otherwise leave the list
+  // ending in mid-air, and a tall one would cut the scrolling short.
+  const [height, setHeight] = useState(600);
+  const rowHeight = 92;
+  useEffect(() => {
+    const node = listRef.current;
+    if (!node) return;
+    const observer = new ResizeObserver(([entry]) =>
+      setHeight(entry.contentRect.height),
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
   const query = useDebounce(
     new URLSearchParams({
       search,
@@ -530,8 +542,12 @@ export function Families({
           onChange={(e) => setSort(e.target.value)}
         >
           <option value="space">{t("po_vozvraschaemomu_obyomu")}</option>
-          <option value="date">{t("po_date")}</option>
+          <option value="size">{t("po_obyomu_gruppy")}</option>
           <option value="count">{t("po_chislu_faylov")}</option>
+          <option value="biggest">{t("po_samomu_bolshomu_faylu")}</option>
+          <option value="date">{t("po_date")}</option>
+          <option value="date-asc">{t("po_date_staryye")}</option>
+          <option value="path">{t("po_papke")}</option>
         </select>
       </div>
       <div className="section-heading">
@@ -549,97 +565,102 @@ export function Families({
       </div>
       {error && <ErrorBox message={error} />}
       <div className="family-workspace">
-        <div
-          className="family-list"
-          ref={listRef}
-          style={{ height }}
-          onScroll={(e) => setScroll(e.currentTarget.scrollTop)}
-          aria-label={t("spisok_semeystv")}
-        >
-          {r.error ? (
-            <ErrorBox message={r.error} retry={r.reload} />
-          ) : !total ? (
-            r.loading ? (
-              <Loading />
-            ) : (
-              <Empty
-                title={ui.noResults}
-                action={
-                  <Button
-                    onClick={() => {
-                      setSearch("");
-                      setRole("");
-                      setDisk("");
-                      setMin("");
-                      setAll(true);
-                    }}
-                  >
-                    {ui.reset}
-                  </Button>
-                }
-              >
-                {t("postroyte_semeystva_ili_izmenite_filtry")}
-              </Empty>
-            )
-          ) : (
-            <div style={{ height: total * rowHeight, position: "relative" }}>
-              {Array.from(
-                {
-                  length: Math.max(
-                    0,
-                    Math.min(
-                      total,
-                      Math.ceil((scroll + height) / rowHeight) + 3,
-                    ) - first,
-                  ),
-                },
-                (_, n) => {
-                  const index = first + n,
-                    f = cache.get(index);
-                  return (
-                    <div
-                      key={index}
-                      style={{
-                        position: "absolute",
-                        top: index * rowHeight,
-                        left: 0,
-                        right: 0,
-                        height: rowHeight,
+        <div className="family-list-pane">
+          <div
+            className="family-list"
+            ref={listRef}
+            onScroll={(e) => setScroll(e.currentTarget.scrollTop)}
+            aria-label={t("spisok_semeystv")}
+          >
+            {r.error ? (
+              <ErrorBox message={r.error} retry={r.reload} />
+            ) : !total ? (
+              r.loading ? (
+                <Loading />
+              ) : (
+                <Empty
+                  title={ui.noResults}
+                  action={
+                    <Button
+                      onClick={() => {
+                        setSearch("");
+                        setRole("");
+                        setDisk("");
+                        setMin("");
+                        setAll(true);
                       }}
                     >
-                      {f ? (
-                        <button
-                          className={`family-list-item ${selected?.id === f.id ? "active" : ""}`}
-                          onClick={() => setSelected(f)}
-                        >
-                          <Thumb
-                            thumb={f.members[0]?.thumb}
-                            name={f.members[0]?.name || ""}
-                          />
-                          <span>
-                            <strong>{f.members[0]?.name || `#${f.id}`}</strong>
-                            <small>
-                              {when(f.taken_at).slice(0, 10)} ·{" "}
-                              {f.members.length} {t("faylov")}
-                            </small>
-                            <span
-                              className={f.removable_bytes ? "green" : "muted"}
-                            >
-                              {f.removable_bytes
-                                ? `${bytes(f.removable_bytes)} ${t("v_kopiyah")}`
-                                : ui.noExactCopies}
+                      {ui.reset}
+                    </Button>
+                  }
+                >
+                  {t("postroyte_semeystva_ili_izmenite_filtry")}
+                </Empty>
+              )
+            ) : (
+              <div style={{ height: total * rowHeight, position: "relative" }}>
+                {Array.from(
+                  {
+                    length: Math.max(
+                      0,
+                      Math.min(
+                        total,
+                        Math.ceil((scroll + height) / rowHeight) + 3,
+                      ) - first,
+                    ),
+                  },
+                  (_, n) => {
+                    const index = first + n,
+                      f = cache.get(index);
+                    return (
+                      <div
+                        key={index}
+                        style={{
+                          position: "absolute",
+                          top: index * rowHeight,
+                          left: 0,
+                          right: 0,
+                          height: rowHeight,
+                        }}
+                      >
+                        {f ? (
+                          <button
+                            className={`family-list-item ${selected?.id === f.id ? "active" : ""}`}
+                            onClick={() => setSelected(f)}
+                          >
+                            <Thumb
+                              thumb={f.members[0]?.thumb}
+                              name={f.members[0]?.name || ""}
+                            />
+                            <span>
+                              <strong>
+                                {f.members[0]?.name || `#${f.id}`}
+                              </strong>
+                              <small>
+                                {when(f.taken_at).slice(0, 10)} ·{" "}
+                                {f.members.length} {t("faylov")}
+                              </small>
+                              <span
+                                className={
+                                  f.removable_bytes ? "green" : "muted"
+                                }
+                              >
+                                {f.removable_bytes
+                                  ? `${bytes(f.removable_bytes)} ${t("v_kopiyah")}`
+                                  : ui.noExactCopies}
+                              </span>
                             </span>
-                          </span>
-                        </button>
-                      ) : (
-                        <div className="skeleton" />
-                      )}
-                    </div>
-                  );
-                },
-              )}
-            </div>
-          )}
+                          </button>
+                        ) : (
+                          <div className="skeleton" />
+                        )}
+                      </div>
+                    );
+                  },
+                )}
+              </div>
+            )}
+          </div>
         </div>
         <section className="family-detail">
           {selected ? (
