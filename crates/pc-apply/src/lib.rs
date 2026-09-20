@@ -43,8 +43,16 @@ impl Totals {
     pub fn summary(&self) -> String {
         format!(
             "{}, {}, {}",
-            pc_core::count_ru(self.bundles as i64, "объект", "объекта", "объектов"),
-            pc_core::count_ru(self.files as i64, "файл", "файла", "файлов"),
+            pc_core::count(
+                self.bundles as i64,
+                ["объект", "объекта", "объектов"],
+                ["object", "objects"]
+            ),
+            pc_core::count(
+                self.files as i64,
+                ["файл", "файла", "файлов"],
+                ["file", "files"]
+            ),
             fmt_bytes(self.bytes)
         )
     }
@@ -66,10 +74,20 @@ fn beside(src: &Path) -> Result<PathBuf> {
     let parent = src
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .with_context(|| format!("{} — у пути нет родительского каталога", src.display()))?;
-    let name = src
-        .file_name()
-        .with_context(|| format!("{} — у пути нет имени файла", src.display()))?;
+        .with_context(|| {
+            pc_core::tf!(
+                "{0} — у пути нет родительского каталога",
+                "{0} — the path has no parent directory",
+                src.display()
+            )
+        })?;
+    let name = src.file_name().with_context(|| {
+        pc_core::tf!(
+            "{0} — у пути нет имени файла",
+            "{0} — the path has no file name",
+            src.display()
+        )
+    })?;
     Ok(parent.join(pc_core::QUARANTINE_DIR).join(name))
 }
 
@@ -191,7 +209,14 @@ pub(crate) fn rename_with_parents(src: &Path, dst: &Path) -> Result<()> {
         })?;
     }
     if dst.exists() {
-        bail!("цель уже существует: {}", dst.display());
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "цель уже существует: {0}",
+                "the destination already exists: {0}",
+                dst.display()
+            )
+        );
     }
     fs::rename(src, dst).with_context(|| {
         format!(

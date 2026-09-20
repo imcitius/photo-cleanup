@@ -69,7 +69,7 @@ pub fn read_for_probe(path: &Path, size: u64) -> Result<Read1> {
 
     let container = sniff::sniff(&head);
     if !container.is_image() {
-        bail!("не изображение");
+        bail!("{}", pc_core::tr!("не изображение", "not an image"));
     }
 
     let complete_head = size <= HEAD_BYTES as u64;
@@ -102,7 +102,14 @@ pub fn read_for_probe(path: &Path, size: u64) -> Result<Read1> {
         (head, complete_head)
     } else {
         if size > MAX_FULL_READ {
-            bail!("файл слишком велик для полного чтения ({size} байт)");
+            bail!(
+                "{}",
+                pc_core::tf!(
+                    "файл слишком велик для полного чтения ({0} байт)",
+                    "too large to read whole ({0} bytes)",
+                    size
+                )
+            );
         }
         let all = read_at(&mut f, 0, size as usize)?;
         bytes_read += all.len().saturating_sub(head_len) as u64;

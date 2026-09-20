@@ -32,7 +32,7 @@ pub struct Progress {
     pub refusals: Vec<(String, String)>,
 }
 #[derive(Debug, thiserror::Error)]
-#[error("Остановлено пользователем на границе файла")]
+#[error("{}", crate::tr!("Остановлено пользователем на границе файла", "Stopped by the user at a file boundary"))]
 pub struct Cancelled;
 #[derive(Clone)]
 pub struct Control {

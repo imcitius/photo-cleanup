@@ -58,7 +58,7 @@ pub fn companions(path: &Path) -> Vec<PathBuf> {
 pub fn same_picture(a: &Path, b: &Path) -> Result<bool> {
     let hash = |p: &Path| -> Result<[u8; 32]> {
         let size = fs::metadata(p)
-            .with_context(|| format!("нет файла {}", p.display()))?
+            .with_context(|| pc_core::tf!("нет файла {0}", "no such file: {0}", p.display()))?
             .len();
         let r = pc_image::read_for_probe(p, size)?;
         let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -85,7 +85,10 @@ pub fn quarantine_file(
     let keeper = Path::new(&c.keeper_path);
 
     if !src.is_file() {
-        return Ok((FileOutcome::Refused, "файла уже нет".into()));
+        return Ok((
+            FileOutcome::Refused,
+            pc_core::tr!("файла уже нет", "the file is already gone").into(),
+        ));
     }
 
     // A candidate the tool picked has to prove itself: the file that makes it
@@ -96,11 +99,18 @@ pub fn quarantine_file(
         if !keeper.is_file() {
             return Ok((
                 FileOutcome::Refused,
-                format!("нет файла, ради которого удаляем: {}", c.keeper_path),
+                pc_core::tf!(
+                    "нет файла, ради которого удаляем: {0}",
+                    "the file this one is redundant to is missing: {0}",
+                    c.keeper_path
+                ),
             ));
         }
         if src == keeper {
-            return Ok((FileOutcome::Refused, "это и есть сохраняемый файл".into()));
+            return Ok((
+                FileOutcome::Refused,
+                pc_core::tr!("это и есть сохраняемый файл", "this is the file being kept").into(),
+            ));
         }
         // Re-read both and compare the pixels as they are right now.
         match same_picture(src, keeper) {
@@ -108,16 +118,29 @@ pub fn quarantine_file(
             Ok(false) => {
                 return Ok((
                     FileOutcome::Refused,
-                    "пиксели больше не совпадают с сохраняемым файлом".into(),
+                    pc_core::tr!(
+                        "пиксели больше не совпадают с сохраняемым файлом",
+                        "the pixels no longer match the file being kept"
+                    )
+                    .into(),
                 ))
             }
-            Err(e) => return Ok((FileOutcome::Refused, format!("проверка не удалась: {e}"))),
+            Err(e) => {
+                return Ok((
+                    FileOutcome::Refused,
+                    pc_core::tf!("проверка не удалась: {0}", "the check failed: {0}", e),
+                ))
+            }
         }
     }
 
-    let file = db
-        .file(c.file_id)?
-        .with_context(|| format!("файл {} исчез из индекса", c.file_id))?;
+    let file = db.file(c.file_id)?.with_context(|| {
+        pc_core::tf!(
+            "файл {0} исчез из индекса",
+            "file {0} vanished from the index",
+            c.file_id
+        )
+    })?;
     let dst = crate::quarantine_dest_for(&file.path, c.file_id, db, override_root)?;
 
     let dst_str = dst.to_string_lossy().into_owned();
@@ -145,7 +168,13 @@ pub fn quarantine_file(
                     moved_with += 1;
                 }
             }
-            let note = (moved_with > 0).then(|| format!("спутников перенесено: {moved_with}"));
+            let note = (moved_with > 0).then(|| {
+                pc_core::tf!(
+                    "спутников перенесено: {0}",
+                    "companions moved: {0}",
+                    moved_with
+                )
+            });
             db.journal_finish(jid, JournalStatus::Done, note.as_deref())?;
             // The row must stop claiming the file is still in the archive,
             // or the planner will offer the same work again forever.

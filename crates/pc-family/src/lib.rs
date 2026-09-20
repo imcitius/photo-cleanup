@@ -102,11 +102,22 @@ pub fn build_controlled(
     }
 
     // --- what they only look like ----------------------------------------
-    control.begin("Поиск похожих изображений", files.len() as u64, 0)?;
+    control.begin(
+        pc_core::tr!("Поиск похожих изображений", "Looking for similar images"),
+        files.len() as u64,
+        0,
+    )?;
     let cands = perceptual::candidates_controlled(&files, params, control);
     control.check()?;
     report.perceptual_candidates = cands.len();
-    control.begin("Проверка сходства по пикселям", cands.len() as u64, 0)?;
+    control.begin(
+        pc_core::tr!(
+            "Проверка сходства по пикселям",
+            "Checking similarity on pixels"
+        ),
+        cands.len() as u64,
+        0,
+    )?;
     let verdict = perceptual::verify_controlled(&files, &cands, store, params, control);
     control.check()?;
     report.rejected_by_ssim = verdict.rejected_by_ssim;
@@ -142,7 +153,11 @@ pub fn build_controlled(
     let curated = curation::CurationIndex::build(db.lightroom_protected()?);
 
     let groups = uf.groups();
-    control.begin("Сохранение семейств", groups.len() as u64, 0)?;
+    control.begin(
+        pc_core::tr!("Сохранение семейств", "Saving the groups"),
+        groups.len() as u64,
+        0,
+    )?;
     db.conn.execute_batch("BEGIN")?;
     db.clear_families()?;
     let run_id = db.latest_run()?.unwrap_or(0);

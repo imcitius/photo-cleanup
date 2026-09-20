@@ -38,8 +38,8 @@ impl SeriesKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Burst => "серия",
-            Self::Bracket => "брекетинг",
+            Self::Burst => pc_core::tr!("серия", "burst"),
+            Self::Bracket => pc_core::tr!("брекетинг", "bracketing"),
             Self::PixelShift => "pixel-shift",
         }
     }
@@ -96,20 +96,24 @@ fn rank(members: &[&FileInfo]) -> Vec<Ranked> {
             let mut parts: Vec<(String, f64)> = Vec::new();
 
             let sharp = f.sharpness.unwrap_or(0.0) / best_sharp;
-            parts.push(("резкость".into(), sharp * 60.0));
+            parts.push((pc_core::tr!("резкость", "sharpness").into(), sharp * 60.0));
 
             // Clipping is punished rather than rewarded: a frame with blown
             // highlights has thrown information away for good.
             let clipped = f.clip_high.unwrap_or(0.0) + f.clip_low.unwrap_or(0.0) * 0.5;
             if clipped > 0.005 {
                 parts.push((
-                    format!("потери в светах и тенях {:.1}%", clipped * 100.0),
+                    pc_core::tf!(
+                        "потери в светах и тенях {0:.1}%",
+                        "clipped highlights and shadows {0:.1}%",
+                        clipped * 100.0
+                    ),
                     -(clipped.min(0.25) * 80.0),
                 ));
             }
 
             let ent = f.entropy.unwrap_or(0.0) / best_entropy;
-            parts.push(("детализация".into(), ent * 20.0));
+            parts.push((pc_core::tr!("детализация", "detail").into(), ent * 20.0));
 
             let total: f64 = parts.iter().map(|(_, v)| v).sum();
             Ranked {
@@ -240,7 +244,11 @@ pub fn build_controlled(
     let run_id = db.latest_run()?.unwrap_or(0);
     let mut report = SeriesReport::default();
 
-    control.begin("Сохранение серий", found.len() as u64, 0)?;
+    control.begin(
+        pc_core::tr!("Сохранение серий", "Saving the bursts"),
+        found.len() as u64,
+        0,
+    )?;
     db.conn.execute_batch("BEGIN")?;
     db.clear_series()?;
     for s in &found {
@@ -317,7 +325,7 @@ mod tests {
         ];
         let s = detect(&files, 10);
         assert_eq!(s[0].best().unwrap().file_id, 2);
-        assert!(s[0].best().unwrap().breakdown.contains("резкость"));
+        assert!(s[0].best().unwrap().breakdown.contains("sharpness"));
     }
 
     #[test]
@@ -348,7 +356,7 @@ mod tests {
         files[0].clip_high = Some(0.20);
         let s = detect(&files, 10);
         assert_eq!(s[0].best().unwrap().file_id, 2, "выбран пересвеченный кадр");
-        assert!(s[0].members[1].breakdown.contains("потери"));
+        assert!(s[0].members[1].breakdown.contains("clipped"));
     }
 
     #[test]

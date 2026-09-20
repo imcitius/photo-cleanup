@@ -1,4 +1,4 @@
-import { t } from "./ru";
+import { t } from "./i18n";
 import { useEffect, useState } from "react";
 import { api, post, useResource } from "./api";
 import {
@@ -19,10 +19,11 @@ import {
   jobName,
   looksLikeArray,
   number,
-  ru,
+  ui,
   stateName,
   when,
-} from "./ru";
+} from "./i18n";
+import { LANGUAGES, setLanguage } from "./i18n";
 import { ImageViewer, type ImageRef } from "./curation";
 import { Review, type Start } from "./workflow";
 import type {
@@ -95,9 +96,9 @@ export function Overview({
   const first = !status?.images;
   const next = first
     ? {
-        text: ru.firstTitle,
-        desc: ru.firstText,
-        button: ru.chooseRoots,
+        text: ui.firstTitle,
+        desc: ui.firstText,
+        button: ui.chooseRoots,
         page: "setup" as Page,
       }
     : !status.families
@@ -148,14 +149,14 @@ export function Overview({
       )}
       <div className="parity-line">
         <Icon name="shield" size={16} />
-        <strong>{onArray ? ru.parity : ru.backup}</strong>
-        <span>{onArray ? ru.parityDetail : ru.backupDetail}</span>
+        <strong>{onArray ? ui.parity : ui.backup}</strong>
+        <span>{onArray ? ui.parityDetail : ui.backupDetail}</span>
       </div>
       <section className="next-step">
         <div>
           <div className="eyebrow">
             <span className="status-dot" />
-            {active ? ru.nowRunning : ru.nextStep}
+            {active ? ui.nowRunning : ui.nextStep}
           </div>
           {/* While something is running, "what next" is the wrong question:
               the answer is "wait, and here is what for". */}
@@ -169,7 +170,7 @@ export function Overview({
                 {!!active.progress.total &&
                   ` · ${number(active.progress.done || 0)} / ${number(active.progress.total)}`}
               </p>
-              <p className="muted">{ru.liveResume}</p>
+              <p className="muted">{ui.liveResume}</p>
             </>
           ) : (
             <>
@@ -203,8 +204,8 @@ export function Overview({
       <section className="panel pipeline-panel">
         <div className="section-heading">
           <div>
-            <h3>{ru.pipeline}</h3>
-            <p className="muted">{ru.pipelineText}</p>
+            <h3>{ui.pipeline}</h3>
+            <p className="muted">{ui.pipelineText}</p>
           </div>
           <span className="small-label">{t("text_7_stadiy")}</span>
         </div>
@@ -240,7 +241,7 @@ export function Overview({
       <div className="overview-grid">
         <section className="panel reclaim">
           <div className="section-heading">
-            <h3>{ru.recoverable}</h3>
+            <h3>{ui.recoverable}</h3>
             <span className="badge">{t("predvaritelnaya_otsenka")}</span>
           </div>
           <div className="big-number">
@@ -264,7 +265,7 @@ export function Overview({
           <button className="space-row" onClick={() => navigate("derived")}>
             <span>
               <i />
-              {ru.previews}
+              {ui.previews}
             </span>
             <strong>{bytes(derived)}</strong>
             <Icon name="arrow" size={16} />
@@ -272,7 +273,7 @@ export function Overview({
           <button className="space-row" onClick={() => navigate("plan")}>
             <span>
               <i className="copy-dot" />
-              {ru.copy}
+              {ui.copy}
             </span>
             <strong>{bytes(copies)}</strong>
             <Icon name="arrow" size={16} />
@@ -280,13 +281,13 @@ export function Overview({
           <button className="space-row" onClick={() => navigate("plan")}>
             <span>
               <i className="resize-dot" />
-              {ru.resize} <small>{t("po_vyboru")}</small>
+              {ui.resize} <small>{t("po_vyboru")}</small>
             </span>
             <strong>{bytes(resizes)}</strong>
             <Icon name="arrow" size={16} />
           </button>
           <p className="muted">
-            {ru.spaceNote} {t("zaschischyonnye_fayly_isklyuchayutsya_v_plane")}
+            {ui.spaceNote} {t("zaschischyonnye_fayly_isklyuchayutsya_v_plane")}
           </p>
         </section>
         <section className="panel archive-summary">
@@ -424,9 +425,9 @@ export function Setup({
         <span className="step-number">1</span>
         <div>
           <h2>{t("gde_hranyatsya_fotografii")}</h2>
-          <p className="muted">{ru.rootsHint}</p>
+          <p className="muted">{ui.rootsHint}</p>
           {looksLikeArray(roots) && (
-            <p className="muted">{ru.rootsHintArray}</p>
+            <p className="muted">{ui.rootsHintArray}</p>
           )}
           <div className="root-list">
             {roots.map((root) => (
@@ -466,14 +467,14 @@ export function Setup({
       <section className="panel setup-section highlight">
         <Icon name="arrow" size={22} />
         <div>
-          <h2>{ru.sdelatVsyo}</h2>
-          <p className="muted">{ru.sdelatVsyoOpisanie}</p>
+          <h2>{ui.sdelatVsyo}</h2>
+          <p className="muted">{ui.sdelatVsyoOpisanie}</p>
           <Button
             kind="primary"
             disabled={disabled || busy || !roots.length}
             onClick={() => run("all")}
           >
-            {ru.sdelatVsyo}
+            {ui.sdelatVsyo}
           </Button>
         </div>
       </section>
@@ -645,7 +646,7 @@ export function Policy({
     [allow, setAllow] = useState(false);
   return (
     <>
-      <Notice>{ru.quarantineExplained}</Notice>
+      <Notice>{ui.quarantineExplained}</Notice>
       <section className="panel">
         <h3>{t("kakie_versii_perenosit")}</h3>
         <p className="muted">
@@ -701,7 +702,7 @@ export function Policy({
           />
           {t("zaschischat_fayly_iz_katalogov_lightroom")}
         </label>
-        {allow && <Notice tone="warning">{ru.lrWarning}</Notice>}
+        {allow && <Notice tone="warning">{ui.lrWarning}</Notice>}
       </section>
       <Review
         kind="plan-apply"
@@ -819,7 +820,7 @@ export function Derived({
             disabled={!kinds.length}
             onClick={() => setReview(true)}
           >
-            {ru.preview}
+            {ui.preview}
           </Button>
         </div>
       )}
@@ -941,7 +942,7 @@ export function Quarantine({
                   </small>
                 </div>
                 <span>{bytes(j.size)}</span>
-                <Button onClick={() => setUndo(j.journal_id)}>{ru.undo}</Button>
+                <Button onClick={() => setUndo(j.journal_id)}>{ui.undo}</Button>
               </div>
             )}
           />
@@ -952,7 +953,7 @@ export function Quarantine({
           <h3>{t("okonchatelnoe_udalenie")}</h3>
           <Icon name="trash" />
         </div>
-        <p>{ru.purgeWarning}</p>
+        <p>{ui.purgeWarning}</p>
         <div className="toolbar">
           <label>
             {t("hranyatsya_ne_menee_dney")}
@@ -1047,7 +1048,7 @@ export function Organize({
           </div>
         </label>
         <p className="muted">
-          {looksLikeArray(settings.roots) ? ru.rootsHintArray : ru.rootsHint}{" "}
+          {looksLikeArray(settings.roots) ? ui.rootsHintArray : ui.rootsHint}{" "}
           {t("fayly_s_drugogo_diska_budut_perechisleny_v_otkazah")}
         </p>
         <label className="field">
@@ -1080,7 +1081,7 @@ export function Organize({
             {t("zaschischat_fayly_lightroom")}
           </label>
         </div>
-        {allow && <Notice tone="warning">{ru.lrWarning}</Notice>}
+        {allow && <Notice tone="warning">{ui.lrWarning}</Notice>}
         <details>
           <summary>{t("dopolnitelnoe_razreshenie")}</summary>
           <label className="check">
@@ -1139,7 +1140,7 @@ export function Organize({
           onClose={() => setEdit(null)}
         >
           <p>
-            {ru.manualHint}{" "}
+            {ui.manualHint}{" "}
             {t(
               "data_zapisyvaetsya_kak_ukazannoe_vremya_syomki_bez_sdviga_chasovo",
             )}
@@ -1170,7 +1171,7 @@ export function Organize({
                 }
               }}
             >
-              {ru.save}
+              {ui.save}
             </Button>
           </div>
         </Modal>
@@ -1213,6 +1214,7 @@ export function SettingsPage({
             method: "PUT",
             body: JSON.stringify(value),
           });
+          setLanguage(value.language);
           localStorage.setItem("pc-theme", value.theme);
           localStorage.setItem("pc-density", value.density);
           document.documentElement.dataset.theme = value.theme;
@@ -1245,7 +1247,7 @@ export function SettingsPage({
             }
           />
         </label>
-        <p className="muted">{ru.quarantineFolderHelp}</p>
+        <p className="muted">{ui.quarantineFolderHelp}</p>
         <p className="muted">
           {t(
             "vybrannaya_papka_dolzhna_suschestvovat_perenos_na_drugoy_disk_bud",
@@ -1277,12 +1279,30 @@ export function SettingsPage({
           </label>
         </div>
         <p className="muted">
-          {t("yader_dostupno", settings.cores)} {ru.workersHint}
+          {t("yader_dostupno", settings.cores)} {ui.workersHint}
         </p>
       </section>
       <section className="panel">
         <h3>{t("vneshniy_vid")}</h3>
         <div className="form-grid">
+          <label className="field">
+            {ui.language}
+            <select
+              value={value.language}
+              onChange={(e) =>
+                setValue({
+                  ...value,
+                  language: e.target.value as Settings["language"],
+                })
+              }
+            >
+              {LANGUAGES.map((code) => (
+                <option key={code} value={code}>
+                  {ui.languageNames[code]}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="field">
             {t("tema")}
             <select
@@ -1319,11 +1339,11 @@ export function SettingsPage({
       {error && <ErrorBox message={error} />}
       <div className="inline">
         <Button type="submit" kind="primary" disabled={disabled}>
-          {ru.save}
+          {ui.save}
         </Button>
         {saved && (
           <span className="green" role="status">
-            ✓ {ru.saved}
+            ✓ {ui.saved}
           </span>
         )}
       </div>
@@ -1346,14 +1366,14 @@ function ResetIndex({
     [error, setError] = useState("");
   return (
     <section className="panel danger-panel">
-      <h3>{ru.resetTitle}</h3>
-      <p className="muted">{ru.resetText}</p>
+      <h3>{ui.resetTitle}</h3>
+      <p className="muted">{ui.resetText}</p>
       <div className="inline">
         <label className="field">
-          {ru.resetPrompt}
+          {ui.resetPrompt}
           <input
             value={word}
-            placeholder={ru.resetWord}
+            placeholder={ui.resetWord}
             onChange={(e) => {
               setWord(e.target.value);
               setDone(false);
@@ -1363,7 +1383,7 @@ function ResetIndex({
         <Button
           kind="danger"
           type="button"
-          disabled={disabled || busy || word !== ru.resetWord}
+          disabled={disabled || busy || word !== ui.resetWord}
           onClick={async () => {
             setBusy(true);
             setError("");
@@ -1379,11 +1399,11 @@ function ResetIndex({
             }
           }}
         >
-          {ru.resetAction}
+          {ui.resetAction}
         </Button>
         {done && (
           <span className="green" role="status">
-            ✓ {ru.resetDone}
+            ✓ {ui.resetDone}
           </span>
         )}
       </div>

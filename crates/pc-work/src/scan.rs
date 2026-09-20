@@ -15,9 +15,13 @@ const PREVIEWS_PER_SECOND: i64 = 3;
 fn rebuild_hint(file_count: i64) -> String {
     let minutes = (file_count / PREVIEWS_PER_SECOND / 60).max(1);
     if minutes < 60 {
-        format!("~{minutes} мин пересборки")
+        pc_core::tf!("~{0} мин пересборки", "~{0} min to rebuild", minutes)
     } else {
-        format!("~{:.1} ч пересборки", minutes as f64 / 60.0)
+        pc_core::tf!(
+            "~{0:.1} ч пересборки",
+            "~{0:.1} h to rebuild",
+            minutes as f64 / 60.0
+        )
     }
 }
 
@@ -56,7 +60,7 @@ pub fn run_controlled(
     // ---- catalogs ---------------------------------------------------------
     let mut catalogs: HashMap<String, CatalogInfo> = HashMap::new();
     control.begin(
-        "Чтение каталогов Lightroom",
+        pc_core::tr!("Чтение каталогов Lightroom", "Reading Lightroom catalogues"),
         result.catalogs.len() as u64,
         0,
     )?;
@@ -112,7 +116,11 @@ pub fn run_controlled(
     }
 
     // ---- bundles and gates ------------------------------------------------
-    control.begin("Опись производных данных", result.bundles.len() as u64, 0)?;
+    control.begin(
+        pc_core::tr!("Опись производных данных", "Taking stock of derived data"),
+        result.bundles.len() as u64,
+        0,
+    )?;
     for b in &result.bundles {
         control.current(&b.path.display().to_string())?;
         control.advance(b.size, Some(&b.disk.label));
@@ -140,7 +148,10 @@ pub fn run_controlled(
     }
 
     for e in &result.errors {
-        control.refuse(e, "Ошибка доступа при обходе");
+        control.refuse(
+            e,
+            pc_core::tr!("Ошибка доступа при обходе", "Access error during the walk"),
+        );
     }
     db.finish_run(run_id)?;
     report(db)?;
@@ -168,7 +179,16 @@ fn evaluate(
     // Orphaned previews: the catalog they belong to is gone, so they can never
     // be used again by anything.
     if info.is_none() && !owner_exists {
-        return (None, Some("каталог не найден — сирота".to_string()));
+        return (
+            None,
+            Some(
+                pc_core::tr!(
+                    "каталог не найден — сирота",
+                    "catalogue not found — orphaned"
+                )
+                .to_string(),
+            ),
+        );
     }
 
     if let Some(info) = info {
@@ -181,9 +201,14 @@ fn evaluate(
             // reachable; with the originals offline they are the only editable
             // copy that exists.
             return match pc_lightroom::check_originals(Path::new(owner)) {
-                Ok(c) if c.all_present() => {
-                    (None, Some(format!("{} оригиналов на месте", c.total)))
-                }
+                Ok(c) if c.all_present() => (
+                    None,
+                    Some(pc_core::tf!(
+                        "{0} оригиналов на месте",
+                        "{0} originals all present",
+                        c.total
+                    )),
+                ),
                 Ok(c) => (
                     Some(BlockReason::OriginalsMissing {
                         missing: c.missing,
@@ -263,7 +288,7 @@ mod tests {
         m.insert("/x/Family.lrcat".to_string(), cat(false, Some(9000)));
         let (block, hint) = evaluate(DerivedKind::LrPreviews, Some("/x/Family.lrcat"), &m);
         assert!(block.is_none());
-        assert_eq!(hint.as_deref(), Some("~50 мин пересборки"));
+        assert_eq!(hint.as_deref(), Some("~50 min to rebuild"));
     }
 
     #[test]
@@ -274,13 +299,13 @@ mod tests {
             &HashMap::new(),
         );
         assert!(block.is_none());
-        assert!(hint.unwrap().contains("сирота"));
+        assert!(hint.unwrap().contains("orphaned"));
     }
 
     #[test]
     fn rebuild_hint_scales_to_hours() {
-        assert_eq!(rebuild_hint(180), "~1 мин пересборки");
-        assert_eq!(rebuild_hint(9000), "~50 мин пересборки");
-        assert!(rebuild_hint(100_000).contains("ч пересборки"));
+        assert_eq!(rebuild_hint(180), "~1 min to rebuild");
+        assert_eq!(rebuild_hint(9000), "~50 min to rebuild");
+        assert!(rebuild_hint(100_000).contains("h to rebuild"));
     }
 }

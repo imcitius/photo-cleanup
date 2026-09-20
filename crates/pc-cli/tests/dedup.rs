@@ -198,7 +198,7 @@ fn a_frame_a_lightroom_catalog_curates_is_refused() {
         .unwrap_or_else(|| panic!("защита Lightroom не сработала: {:?}", p.refusals));
     assert!(refused.why.contains("Lightroom"), "{}", refused.why);
     assert!(
-        refused.why.contains("звёзд"),
+        refused.why.contains("stars"),
         "рейтинг не попал в причину: {}",
         refused.why
     );
@@ -302,7 +302,7 @@ fn a_file_edited_since_the_scan_is_refused_at_the_last_moment() {
     .unwrap();
     assert_eq!(report.totals.files, 0, "перенесён изменившийся файл");
     assert!(
-        report.refused[0].1.contains("пиксели"),
+        report.refused[0].1.contains("pixels"),
         "{:?}",
         report.refused
     );

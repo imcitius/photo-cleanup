@@ -71,6 +71,13 @@ pub async fn serve(
     bind: SocketAddr,
 ) -> Result<()> {
     let mut state = AppState::new(db_path, thumbs, quarantine)?;
+    {
+        // Before the first request, so an error during start-up is already in
+        // the language the operator chose.
+        let db = state.db.lock().unwrap();
+        let settings = crate::service::settings_value(&state, &db)?;
+        crate::service::apply_language(&settings);
+    }
     state.network = !bind.ip().is_loopback();
     let state = Arc::new(state);
     let listener = tokio::net::TcpListener::bind(bind)

@@ -156,8 +156,19 @@ pub async fn fs(
     })())
 }
 
+/// Put the process into the language the settings ask for.
+///
+/// The server renders stage names, refusal reasons and the like, and they
+/// have to match the interface around them. One process serves one archive
+/// and one person, so a process-wide setting is the honest model.
+pub fn apply_language(settings: &Value) {
+    pc_core::lang::set(pc_core::lang::Lang::parse(
+        settings["language"].as_str().unwrap_or("en"),
+    ));
+}
+
 pub fn settings_value(st: &AppState, db: &Db) -> Result<Value> {
-    let mut v = json!({"db_path":st.db_path,"thumbs_path":st.thumbs.root(),"quarantine":st.quarantine,"phash_max":10,"ssim_min":0.9,"min_size":102400,"series_gap_secs":3,"event_gap_secs":21600,"theme":"system","density":"comfortable","network":st.network,"roots":[],"workers":0,"cores":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1)});
+    let mut v = json!({"db_path":st.db_path,"thumbs_path":st.thumbs.root(),"quarantine":st.quarantine,"phash_max":10,"ssim_min":0.9,"min_size":102400,"series_gap_secs":3,"event_gap_secs":21600,"theme":"system","density":"comfortable","language":"en","network":st.network,"roots":[],"workers":0,"cores":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1)});
     for row in jobs::rows(db, "SELECT key,value FROM settings", &[])? {
         if let Some(k) = row["key"].as_str() {
             v[k] = serde_json::from_str(row["value"].as_str().unwrap_or("null"))?;
@@ -191,6 +202,11 @@ pub async fn save_settings(State(st): State<Arc<AppState>>, Json(v): Json<Value>
                 bail!("Неизвестная плотность");
             }
         }
+        if let Some(s) = v.get("language") {
+            if !matches!(s.as_str(), Some("ru" | "en")) {
+                bail!("Неизвестный язык");
+            }
+        }
         // Zero means "decide for me"; anything above the core count would
         // only make the threads fight each other.
         if let Some(n) = v.get("workers") {
@@ -221,6 +237,7 @@ pub async fn save_settings(State(st): State<Arc<AppState>>, Json(v): Json<Value>
             "series_gap_secs",
             "event_gap_secs",
             "workers",
+            "language",
             "theme",
             "density",
             "quarantine",
@@ -230,7 +247,9 @@ pub async fn save_settings(State(st): State<Arc<AppState>>, Json(v): Json<Value>
             }
         }
         tx.commit()?;
-        settings_value(&st, &db)
+        let updated = settings_value(&st, &db)?;
+        apply_language(&updated);
+        Ok(updated)
     })())
 }
 /// Everything the index knows about one file.

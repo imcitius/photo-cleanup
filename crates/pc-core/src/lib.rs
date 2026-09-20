@@ -2,6 +2,7 @@
 
 pub mod bytes;
 pub mod disk;
+pub mod lang;
 pub mod thumbstore;
 pub mod time;
 
@@ -68,12 +69,14 @@ impl DerivedKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::LrPreviews => "Превью Lightroom",
-            Self::LrSmartPreviews => "Smart Previews Lightroom",
-            Self::LrHelper => "Helper-данные Lightroom",
-            Self::LrDataOther => "Прочие бандлы .lrdata",
-            Self::LrCatalogData => "Данные каталога Lightroom",
-            Self::SystemJunk => "Системный мусор",
+            Self::LrPreviews => crate::tr!("Превью Lightroom", "Lightroom previews"),
+            Self::LrSmartPreviews => "Lightroom Smart Previews",
+            Self::LrHelper => crate::tr!("Helper-данные Lightroom", "Lightroom helper data"),
+            Self::LrDataOther => crate::tr!("Прочие бандлы .lrdata", "Other .lrdata bundles"),
+            Self::LrCatalogData => {
+                crate::tr!("Данные каталога Lightroom", "Lightroom catalogue data")
+            }
+            Self::SystemJunk => crate::tr!("Системный мусор", "System junk"),
         }
     }
 }
@@ -103,12 +106,27 @@ impl BlockReason {
 
     pub fn describe(&self) -> String {
         match self {
-            Self::NotRegenerable => "регенерации нет, удаление необратимо".into(),
-            Self::CatalogOpen => "каталог открыт в Lightroom".into(),
-            Self::OriginalsMissing { missing, total } => {
-                format!("оригиналы не найдены: {missing} из {total}")
-            }
-            Self::OwnerUnreadable { detail } => format!("каталог не прочитан: {detail}"),
+            Self::NotRegenerable => crate::tr!(
+                "регенерации нет, удаление необратимо",
+                "nothing regenerates this; removal is permanent"
+            )
+            .into(),
+            Self::CatalogOpen => crate::tr!(
+                "каталог открыт в Lightroom",
+                "the catalogue is open in Lightroom"
+            )
+            .into(),
+            Self::OriginalsMissing { missing, total } => crate::tf!(
+                "оригиналы не найдены: {0} из {1}",
+                "originals missing: {0} of {1}",
+                missing,
+                total
+            ),
+            Self::OwnerUnreadable { detail } => crate::tf!(
+                "каталог не прочитан: {0}",
+                "the catalogue could not be read: {0}",
+                detail
+            ),
         }
     }
 }
@@ -205,6 +223,17 @@ pub fn plural_ru(n: i64, one: &'static str, few: &'static str, many: &'static st
 /// `5 файлов` — count and correctly agreeing noun.
 pub fn count_ru(n: i64, one: &'static str, few: &'static str, many: &'static str) -> String {
     format!("{n} {}", plural_ru(n, one, few, many))
+}
+
+/// A counted noun in whichever language is running.
+///
+/// Russian needs three forms and English two, so they are passed as arrays
+/// rather than flattened into five arguments nobody could read at a glance.
+pub fn count(n: i64, ru: [&'static str; 3], en: [&'static str; 2]) -> String {
+    match lang::current() {
+        lang::Lang::Ru => count_ru(n, ru[0], ru[1], ru[2]),
+        lang::Lang::En => format!("{n} {}", if n == 1 { en[0] } else { en[1] }),
+    }
 }
 
 #[cfg(test)]

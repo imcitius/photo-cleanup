@@ -1,4 +1,4 @@
-import { t } from "./ru";
+import { t } from "./i18n";
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { post, useResource } from "./api";
@@ -14,7 +14,7 @@ import {
   SettingsPage,
 } from "./pages";
 import { JobProgress, JobResult, JournalPage, useJobs } from "./workflow";
-import { jobName, ru } from "./ru";
+import { jobName, setLanguage, ui } from "./i18n";
 import type { Page, Settings, Status } from "./types";
 import "./style.css";
 const navigation: { section: string; items: [Page, string][] }[] = [
@@ -47,7 +47,7 @@ const navigation: { section: string; items: [Page, string][] }[] = [
 ];
 const initial = () => {
   const page = location.hash.slice(1) as Page;
-  return page in ru.pages ? page : "overview";
+  return page in ui.pages ? page : "overview";
 };
 function App() {
   const [page, setPage] = useState<Page>(initial),
@@ -83,6 +83,12 @@ function App() {
     };
   }, []);
   useEffect(() => {
+    // The language belongs to the archive, not to the browser: a machine
+    // opening this for the first time should speak what the operator chose.
+    // After that the two agree and this does nothing.
+    if (settings.data && !localStorage.getItem("pc-lang")) {
+      setLanguage(settings.data.language);
+    }
     const theme =
       localStorage.getItem("pc-theme") || settings.data?.theme || "system";
     document.documentElement.dataset.theme = theme;
@@ -211,7 +217,7 @@ function App() {
         </a>
         <div className="workspace-label">
           <span className="workspace-dot" />
-          {ru.local}
+          {ui.local}
         </div>
         <nav aria-label={t("osnovnaya_navigatsiya")}>
           {navigation.map((group) => (
@@ -225,7 +231,7 @@ function App() {
                   aria-current={page === key ? "page" : undefined}
                 >
                   <Icon name={icon} size={19} />
-                  <span>{ru.pages[key]}</span>
+                  <span>{ui.pages[key]}</span>
                   {key === "quarantine" && !!status.data?.quarantined_bytes && (
                     <span className="nav-dot" />
                   )}
@@ -239,7 +245,7 @@ function App() {
             <Icon name="shield" size={18} />
             <span>
               {t("vash_arhiv_ostayotsya_u_vas")}
-              <small>{ru.noInternet}</small>
+              <small>{ui.noInternet}</small>
             </span>
           </div>
           <span className="version">
@@ -250,9 +256,9 @@ function App() {
       <div className="workspace">
         <header className="topbar">
           <div className="breadcrumb">
-            {ru.archive}
+            {ui.archive}
             <span>/</span>
-            <strong>{ru.pages[page]}</strong>
+            <strong>{ui.pages[page]}</strong>
           </div>
           <div className="inline">
             {/* What the server is doing, on every page and at every scroll
@@ -310,7 +316,7 @@ function App() {
             <Button
               kind="icon-button"
               onClick={() => setHelp(true)}
-              aria-label={ru.keyboard}
+              aria-label={ui.keyboard}
             >
               ?
             </Button>
@@ -322,8 +328,8 @@ function App() {
               <div className="eyebrow">
                 {t("fotografii_poryadok_spokoystvie")}
               </div>
-              <h1>{ru.pages[page]}</h1>
-              <p>{ru.subtitles[page]}</p>
+              <h1>{ui.pages[page]}</h1>
+              <p>{ui.subtitles[page]}</p>
             </div>
             <Button
               icon="clock"
@@ -332,7 +338,7 @@ function App() {
                 status.reload();
               }}
             >
-              {ru.refresh}
+              {ui.refresh}
             </Button>
           </div>
           {jobs.error && <Notice tone="warning">{jobs.error}</Notice>}
@@ -368,7 +374,7 @@ function App() {
         </main>
       </div>
       {help && (
-        <Modal title={ru.keyboard} onClose={() => setHelp(false)}>
+        <Modal title={ui.keyboard} onClose={() => setHelp(false)}>
           <dl className="keyboard-help">
             <div>
               <dt>

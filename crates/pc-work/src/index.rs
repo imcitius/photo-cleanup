@@ -269,13 +269,17 @@ pub fn run_controlled(
     }
 
     control.begin(
-        "Чтение изображений",
+        pc_core::tr!("Чтение изображений", "Reading images"),
         todo.len() as u64,
         todo.iter().map(|f| f.size).sum(),
     )?;
     {
         let mut p = control.progress.lock().unwrap();
-        p.note = "RAW читаются через встроенное превью".into();
+        p.note = pc_core::tr!(
+            "RAW читаются через встроенное превью",
+            "Raw files are read through their embedded preview"
+        )
+        .into();
         let mut disks = std::collections::BTreeMap::<String, u64>::new();
         for f in &todo {
             *disks.entry(f.disk.label.clone()).or_default() += 1;

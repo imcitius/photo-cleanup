@@ -82,7 +82,10 @@ pub fn probe_parts(
 ) -> Result<Probe> {
     let container = sniff::sniff(head);
     if !container.is_image() {
-        bail!("не изображение: {}", path.display());
+        bail!(
+            "{}",
+            pc_core::tf!("не изображение: {0}", "not an image: {0}", path.display())
+        );
     }
     let extension_lied = sniff::hint_from_extension(name_hint).is_some_and(|h| h != container);
     let meta = meta::read(head, container);

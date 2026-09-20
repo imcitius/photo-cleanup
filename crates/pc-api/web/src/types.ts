@@ -147,6 +147,7 @@ export interface Settings {
   workers: number;
   /** Cores this server can see, for the upper bound on `workers`. */
   cores: number;
+  language: "ru" | "en";
   theme: "light" | "dark" | "system";
   density: "comfortable" | "compact";
   network: boolean;

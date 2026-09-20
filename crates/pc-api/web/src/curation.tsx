@@ -1,4 +1,4 @@
-import { t } from "./ru";
+import { t } from "./i18n";
 import { useEffect, useRef, useState } from "react";
 import { api, post, useDebounce, useResource } from "./api";
 import {
@@ -14,7 +14,7 @@ import {
   Thumb,
   VirtualList,
 } from "./components";
-import { basename, bytes, number, ru, when } from "./ru";
+import { basename, bytes, number, ui, when } from "./i18n";
 import type { Category, Family, Member, Series } from "./types";
 import type { Start } from "./workflow";
 export interface ImageRef {
@@ -75,13 +75,13 @@ export function ImageViewer({
   const shown = pinned === null ? [current] : [images[pinned], current];
   const comparing = shown.length === 2;
   return (
-    <Modal title={comparing ? ru.compare : current.name} wide onClose={onClose}>
+    <Modal title={comparing ? ui.compare : current.name} wide onClose={onClose}>
       <div className="toolbar">
         {images.length > 1 && (
           <div className="inline frame-nav">
             <Button
               icon="arrow-left"
-              aria-label={ru.previousFrame}
+              aria-label={ui.previousFrame}
               disabled={at === 0}
               onClick={() => step(-1)}
             />
@@ -90,7 +90,7 @@ export function ImageViewer({
             </span>
             <Button
               icon="arrow"
-              aria-label={ru.nextFrame}
+              aria-label={ui.nextFrame}
               disabled={at === last}
               onClick={() => step(1)}
             />
@@ -100,7 +100,7 @@ export function ImageViewer({
           kind={pinned !== null ? "selected" : ""}
           onClick={() => setPinned(pinned === null ? at : null)}
         >
-          {pinned === null ? ru.pinForCompare : ru.unpin}
+          {pinned === null ? ui.pinForCompare : ui.unpin}
         </Button>
         {comparing && (
           <>
@@ -149,7 +149,7 @@ export function ImageViewer({
           </label>
         )}
       </div>
-      <p className="muted">{ru.viewerHelp}</p>
+      <p className="muted">{ui.viewerHelp}</p>
       {error && <ErrorBox message={error} />}
       <div
         className={`image-viewer ${overlay && comparing ? "overlay" : ""} ${one ? "one-to-one" : ""}`}
@@ -199,7 +199,7 @@ export function ImageViewer({
             />
             <figcaption>
               {image.name}
-              {comparing && i === 0 ? ` · ${ru.pinnedFrame}` : ""}
+              {comparing && i === 0 ? ` · ${ui.pinnedFrame}` : ""}
             </figcaption>
           </figure>
         ))}
@@ -405,8 +405,8 @@ export function Families({
           <Icon name="search" size={17} />
           <input
             ref={searchRef}
-            placeholder={ru.search}
-            aria-label={ru.search}
+            placeholder={ui.search}
+            aria-label={ui.search}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -487,7 +487,7 @@ export function Families({
               <Loading />
             ) : (
               <Empty
-                title={ru.noResults}
+                title={ui.noResults}
                 action={
                   <Button
                     onClick={() => {
@@ -498,7 +498,7 @@ export function Families({
                       setAll(true);
                     }}
                   >
-                    {ru.reset}
+                    {ui.reset}
                   </Button>
                 }
               >
@@ -551,7 +551,7 @@ export function Families({
                             >
                               {f.removable_bytes
                                 ? `${bytes(f.removable_bytes)} ${t("v_kopiyah")}`
-                                : ru.noExactCopies}
+                                : ui.noExactCopies}
                             </span>
                           </span>
                         </button>
@@ -577,7 +577,7 @@ export function Families({
                   <h2>{selected.members[0]?.name.replace(/\.[^.]+$/, "")}</h2>
                   <p className="muted">
                     {when(selected.taken_at)} ·{" "}
-                    {selected.camera || ru.unknownCamera}
+                    {selected.camera || ui.unknownCamera}
                   </p>
                 </div>
                 <div className="align-right">
@@ -587,7 +587,7 @@ export function Families({
                   </span>
                 </div>
               </div>
-              <p className="muted">{ru.familyActionsHelp}</p>
+              <p className="muted">{ui.familyActionsHelp}</p>
               <div className="section-heading">
                 <span className="muted">{t("versii_snimka")}</span>
                 <Button
@@ -601,7 +601,7 @@ export function Families({
                     })
                   }
                 >
-                  {ru.compare}{" "}
+                  {ui.compare}{" "}
                   {selection.length ? `(${selection.length}/2)` : ""}
                 </Button>
               </div>
@@ -648,7 +648,7 @@ export function Families({
                           {m.role === "unknown" ? "?" : m.role.toUpperCase()}
                         </span>
                         {m.is_keeper && (
-                          <span className="keeper">★ {ru.keeper}</span>
+                          <span className="keeper">★ {ui.keeper}</span>
                         )}
                       </div>
                       <strong>{m.name}</strong>
@@ -684,19 +684,19 @@ export function Families({
                       <div className="member-actions">
                         <Button
                           disabled={disabled || busy || m.is_keeper}
-                          title={ru.setKeeperHelp}
+                          title={ui.setKeeperHelp}
                           onClick={() => keeper(m.file_id)}
                         >
-                          {ru.setKeeper}
+                          {ui.setKeeper}
                         </Button>
                         <Button
                           disabled={
                             disabled || busy || selected.members.length < 2
                           }
-                          title={ru.splitHelp}
+                          title={ui.splitHelp}
                           onClick={() => split(m)}
                         >
-                          {ru.split}
+                          {ui.split}
                         </Button>
                       </div>
                     </div>
@@ -754,8 +754,8 @@ export function SeriesPage({
   };
   return (
     <>
-      <Notice>{ru.seriesNote}</Notice>
-      <Notice>{ru.seriesPickHelp}</Notice>
+      <Notice>{ui.seriesNote}</Notice>
+      <Notice>{ui.seriesPickHelp}</Notice>
       {error && <ErrorBox message={error} />}
       <Resource r={r}>
         {!r.data?.series.length ? (
@@ -770,7 +770,7 @@ export function SeriesPage({
                   {s.label} · {when(s.started_at)}
                 </h3>
                 <span className="muted">
-                  {s.camera || ru.unknownCamera} · {s.members.length}{" "}
+                  {s.camera || ui.unknownCamera} · {s.members.length}{" "}
                   {t("kadrov")}
                   {s.members.some((m) => m.is_rejected) &&
                     ` · ${t("otklonено_n", s.members.filter((m) => m.is_rejected).length)}`}
@@ -780,10 +780,10 @@ export function SeriesPage({
                 <div className="inline">
                   <Button
                     disabled={disabled || busy}
-                    title={ru.rejectRestHelp}
+                    title={ui.rejectRestHelp}
                     onClick={() => act(`/series/${s.id}/reject-rest`)}
                   >
-                    {ru.rejectRest}
+                    {ui.rejectRest}
                   </Button>
                   <Button
                     disabled={
@@ -791,12 +791,12 @@ export function SeriesPage({
                     }
                     onClick={() => act(`/series/${s.id}/keep-all`)}
                   >
-                    {ru.keepAll}
+                    {ui.keepAll}
                   </Button>
                 </div>
               )}
               {s.protected && (
-                <Notice tone="warning">{ru.protectedSeries}</Notice>
+                <Notice tone="warning">{ui.protectedSeries}</Notice>
               )}
               <div className="filmstrip">
                 {s.members.map((m, i) => (
@@ -836,13 +836,13 @@ export function SeriesPage({
                           act(`/series/${s.id}/best`, { file_id: m.file_id })
                         }
                       >
-                        {m.is_best ? `★ ${ru.best}` : ru.setBest}
+                        {m.is_best ? `★ ${ui.best}` : ui.setBest}
                       </Button>
                       <Button
                         disabled={disabled || busy}
                         kind={m.is_rejected ? "danger-outline" : ""}
                         title={
-                          m.is_rejected ? ru.keepFrameHelp : ru.rejectFrameHelp
+                          m.is_rejected ? ui.keepFrameHelp : ui.rejectFrameHelp
                         }
                         onClick={() =>
                           act(`/files/${m.file_id}/reject`, {
@@ -850,7 +850,7 @@ export function SeriesPage({
                           })
                         }
                       >
-                        {m.is_rejected ? ru.keepFrame : ru.rejectFrame}
+                        {m.is_rejected ? ui.keepFrame : ui.rejectFrame}
                       </Button>
                     </div>
                   </article>
@@ -865,7 +865,7 @@ export function SeriesPage({
               disabled={!offset}
               onClick={() => setOffset(Math.max(0, offset - 20))}
             >
-              {ru.back}
+              {ui.back}
             </Button>
             <span>
               {offset + 1}–{Math.min(offset + 20, r.data!.total)} /{" "}
@@ -875,7 +875,7 @@ export function SeriesPage({
               disabled={offset + 20 >= r.data!.total}
               onClick={() => setOffset(offset + 20)}
             >
-              {ru.next}
+              {ui.next}
             </Button>
           </div>
         )}
@@ -951,7 +951,7 @@ export function Categories({
           </button>
         ))}
       </div>
-      {onlyPhotos && <Notice>{ru.onlyPhotos}</Notice>}
+      {onlyPhotos && <Notice>{ui.onlyPhotos}</Notice>}
       <div className="inline">
         <Button
           disabled={disabled}
@@ -964,16 +964,16 @@ export function Categories({
             }
           }}
         >
-          {ru.rebuildCategories}
+          {ui.rebuildCategories}
         </Button>
-        <span className="muted">{ru.rebuildCategoriesHelp}</span>
+        <span className="muted">{ui.rebuildCategoriesHelp}</span>
       </div>
       <div className="toolbar">
         <div className="search">
           <Icon name="search" size={16} />
           <input
-            placeholder={ru.search}
-            aria-label={ru.search}
+            placeholder={ui.search}
+            aria-label={ui.search}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -1038,7 +1038,7 @@ export function Categories({
                     title={f.evidence}
                   >
                     {f.manual
-                      ? `✓ ${ru.manual}`
+                      ? `✓ ${ui.manual}`
                       : t("uverennost", Math.round(f.confidence * 100))}
                   </span>
                 </article>

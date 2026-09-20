@@ -53,7 +53,7 @@ fn container_rank(f: &FileInfo) -> (f64, &'static str) {
         "heif" => (10.0, "HEIF"),
         "jpeg" => (8.0, "JPEG"),
         "webp" => (5.0, "WebP"),
-        _ => (2.0, "прочее"),
+        _ => (2.0, pc_core::tr!("прочее", "other")),
     }
 }
 
@@ -90,48 +90,71 @@ pub fn score(f: &FileInfo, best_pixels: i64, curation: Curation) -> Score {
     } else {
         0.0
     };
-    parts.push((format!("разрешение {}×{}", f.width, f.height), rel * 40.0));
+    parts.push((
+        pc_core::tf!(
+            "разрешение {0}×{1}",
+            "resolution {0}×{1}",
+            f.width,
+            f.height
+        ),
+        rel * 40.0,
+    ));
 
     let (rank, label) = container_rank(f);
-    parts.push((format!("формат {label}"), rank));
+    parts.push((pc_core::tf!("формат {0}", "format {0}", label), rank));
 
     if f.camera_model.is_some() {
-        parts.push(("метаданные камеры".into(), 10.0));
+        parts.push((
+            pc_core::tr!("метаданные камеры", "camera metadata").into(),
+            10.0,
+        ));
     }
     if f.taken_at.is_some() {
-        parts.push(("дата съёмки".into(), 4.0));
+        parts.push((pc_core::tr!("дата съёмки", "shooting date").into(), 4.0));
     }
 
     // Bytes per pixel, as a rough stand-in for encoding quality. Capped so a
     // bloated re-save cannot outrank a better original.
     if f.pixels() > 0 {
         let bpp = f.size as f64 / f.pixels() as f64;
-        parts.push(("плотность данных".into(), (bpp * 4.0).clamp(0.0, 8.0)));
+        parts.push((
+            pc_core::tr!("плотность данных", "data density").into(),
+            (bpp * 4.0).clamp(0.0, 8.0),
+        ));
     }
 
     let path = f.path.to_lowercase();
     let name = f.name.to_lowercase();
     if let Some(hit) = LOW_VALUE_PATH.iter().find(|m| path.contains(**m)) {
-        parts.push((format!("путь «{hit}»"), -15.0));
+        parts.push((pc_core::tf!("путь «{0}»", "path “{0}”", hit), -15.0));
     }
     if let Some(hit) = LOW_VALUE_NAME.iter().find(|m| name.contains(**m)) {
-        parts.push((format!("имя «{hit}»"), -10.0));
+        parts.push((pc_core::tf!("имя «{0}»", "name “{0}”", hit), -10.0));
     }
     if let Some(hit) = PREFERRED_PATH.iter().find(|m| path.contains(**m)) {
-        parts.push((format!("путь «{hit}»"), 8.0));
+        parts.push((pc_core::tf!("путь «{0}»", "path “{0}”", hit), 8.0));
     }
     // "IMG_1234 (1).jpg" and "DSC01234 2.jpg" are what a copy looks like.
     if name.contains(" (") || name.contains(" 2.") || name.contains("(1)") {
-        parts.push(("след копирования в имени".into(), -8.0));
+        parts.push((
+            pc_core::tr!("след копирования в имени", "a copy marker in the name").into(),
+            -8.0,
+        ));
     }
 
     // The photographer already judged this frame worth cataloguing, and in
     // some cases worth stars. No heuristic here outranks that.
     if curation.in_catalog {
-        parts.push(("в каталоге Lightroom".into(), 25.0));
+        parts.push((
+            pc_core::tr!("в каталоге Lightroom", "in a Lightroom catalogue").into(),
+            25.0,
+        ));
     }
     if let Some(stars) = curation.rating.filter(|r| *r > 0) {
-        parts.push((format!("{stars} звёзд"), stars as f64 * 3.0));
+        parts.push((
+            pc_core::tf!("{0} звёзд", "{0} stars", stars),
+            stars as f64 * 3.0,
+        ));
     }
 
     let total = parts.iter().map(|(_, v)| v).sum();
@@ -184,7 +207,7 @@ mod tests {
         let s = score(&tg, 24_000_000, Curation::default());
         let text = s.explain();
         assert!(text.contains("telegram"), "{text}");
-        assert!(text.contains("след копирования"), "{text}");
+        assert!(text.contains("a copy marker"), "{text}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
-import { t } from "./ru";
+import { t } from "./i18n";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { dateSourceName, ru, bytes, number, when } from "./ru";
+import { dateSourceName, ui, bytes, number, when } from "./i18n";
 import { useResource } from "./api";
 import type { FileDetails as FileDetailsRow } from "./types";
 export function Icon({
@@ -168,7 +168,7 @@ export function Notice({
   );
 }
 export function Empty({
-  title = ru.empty,
+  title = ui.empty,
   children,
   icon = "folder",
   action,
@@ -193,7 +193,7 @@ export function Loading() {
   return (
     <div className="loading" role="status">
       <span className="spinner" />
-      {ru.loading}
+      {ui.loading}
     </div>
   );
 }
@@ -207,7 +207,7 @@ export function ErrorBox({
   return (
     <div role="alert">
       <Notice tone="error">{message}</Notice>
-      {retry && <Button onClick={retry}>{ru.retry}</Button>}
+      {retry && <Button onClick={retry}>{ui.retry}</Button>}
     </div>
   );
 }
@@ -345,7 +345,7 @@ export function FileDetails({ fileId }: { fileId: number }) {
         ? d.categories
             .map(
               (c) =>
-                `${c.category}${c.manual ? ` (${ru.manual})` : ""} · ${Math.round(c.confidence * 100)}%`,
+                `${c.category}${c.manual ? ` (${ui.manual})` : ""} · ${Math.round(c.confidence * 100)}%`,
             )
             .join(", ")
         : null,
@@ -413,7 +413,7 @@ export function Modal({
     >
       <header>
         <h2 id={id}>{title}</h2>
-        <Button onClick={onClose} aria-label={ru.close} icon="close" />
+        <Button onClick={onClose} aria-label={ui.close} icon="close" />
       </header>
       <div className="modal-body">{children}</div>
     </dialog>
@@ -437,7 +437,7 @@ export function FolderPicker({
   }>(`/fs?path=${encodeURIComponent(path)}`);
   return (
     <Modal title={t("vybrat_papku_na_servere")} onClose={onClose}>
-      <p className="muted">{ru.rootsHint}</p>
+      <p className="muted">{ui.rootsHint}</p>
       <form
         className="inline"
         onSubmit={(e) => {
@@ -501,7 +501,7 @@ export function VirtualList<T>({
   rowHeight = 100,
   height = 560,
   render,
-  empty = ru.noResults,
+  empty = ui.noResults,
 }: {
   items: T[];
   rowHeight?: number;

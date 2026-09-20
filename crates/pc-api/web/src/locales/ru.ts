@@ -1,6 +1,25 @@
-// User-facing vocabulary lives here; data-provided explanations stay on the server.
-export const ru = {
+// Русский интерфейс. Английский — в ./en.ts, той же формы.
+//
+// Строки, которые рисует сервер (названия стадий, причины отказов, подписи
+// ролей и видов), сюда не попадают: их переводит он сам, по языку из настроек.
+export const ui = {
   app: "photo-cleanup",
+  title: "photo-cleanup — фотоархив",
+  // Formatting vocabulary. Numbers and dates use the locale tag; these are
+  // the words around them.
+  units: ["Б", "КиБ", "МиБ", "ГиБ", "ТиБ"],
+  secondsShort: "с",
+  minutesShort: "мин",
+  hoursShort: "ч",
+  dateSources: {
+    exif: "EXIF, из камеры",
+    xmp: "XMP, из каталога",
+    filename: "Разобрано из имени файла",
+    filesystem: "Время файла на диске",
+    none: "Неизвестно",
+  },
+  language: "Язык",
+  languageNames: { ru: "Русский", en: "English" },
   archive: "Рабочее пространство",
   local: "Локальный фотоархив",
   pages: {
@@ -202,70 +221,9 @@ export const ru = {
   stopNote:
     "Остановка на границе файла. Уже выполненные переносы останутся в журнале.",
 } as const;
-export const jobName = (kind: string) =>
-  ru.jobs[kind as keyof typeof ru.jobs] || kind;
-export const stateName = (state: string) =>
-  ru.states[state as keyof typeof ru.states] || state;
-export const number = (n: number) => n.toLocaleString("ru-RU");
-export function bytes(n: number) {
-  const units = ["Б", "КиБ", "МиБ", "ГиБ", "ТиБ"];
-  let i = 0;
-  while (n >= 1024 && i < 4) {
-    n /= 1024;
-    i++;
-  }
-  return `${n.toLocaleString("ru-RU", { maximumFractionDigits: i ? 1 : 0 })} ${units[i]}`;
-}
-export const when = (n: number | null | undefined) =>
-  n == null
-    ? ru.unknownDate
-    : new Date(n * 1000).toLocaleString("ru-RU", {
-        timeZone: "UTC",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-export const basename = (p: string) => p.split("/").pop() || p;
-/** Seconds as a person says them: "47 с", "3 мин 20 с", "1 ч 12 мин". */
-export function duration(seconds: number) {
-  const s = Math.max(0, Math.round(seconds));
-  if (s < 60) return `${s} с`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} мин ${s % 60} с`;
-  return `${Math.floor(m / 60)} ч ${m % 60} мин`;
-}
-/** Colour for a finished job's badge. */
-export const jobTone = (state: string) =>
-  state === "failed" || state === "interrupted"
-    ? "warning"
-    : state === "cancelled"
-      ? "muted"
-      : "";
-/** Where a shot's date came from, in words rather than a column value. */
-export const dateSourceName = (source: string) =>
-  ({
-    exif: "EXIF, из камеры",
-    xmp: "XMP, из каталога",
-    filename: "Разобрано из имени файла",
-    filesystem: "Время файла на диске",
-    none: "Неизвестно",
-  })[source] || source;
-/**
- * True when the chosen folders look like an Unraid array: separate disks
- * mounted side by side, with a union view over them.
- *
- * The advice that follows from that — pick /mnt/diskN so a move stays on one
- * spindle, and the warning that a lost disk is a lost disk — is real, and
- * wrong to show to everyone else. Nobody indexing a laptop's Pictures folder
- * needs to read about somebody's NAS.
- */
-export const looksLikeArray = (roots: string[] | undefined) =>
-  !!roots?.some((r) => /^\/mnt\/(disk\d+|user|cache)\b/.test(r));
 
 // Screen text and parameterized messages. Keep all translations in this file.
-const messages = {
+export const messages = {
   net_prevyu: "Нет превью",
   otkryt: "Открыть {0}",
   vybrat_papku_na_servere: "Выбрать папку на сервере",
@@ -584,8 +542,3 @@ const messages = {
   potokov_dekodirovaniya: "Потоков декодирования",
   yader_dostupno: "Ядер доступно: {0}.",
 } as const;
-export function t(key: keyof typeof messages, ...values: unknown[]): string {
-  return messages[key].replace(/\{(\d+)\}/g, (_, n) =>
-    String(values[Number(n)] ?? ""),
-  );
-}

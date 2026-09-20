@@ -1,4 +1,4 @@
-import { t } from "./ru";
+import { t } from "./i18n";
 import { useEffect, useState } from "react";
 import { api, post, useDebounce, useResource } from "./api";
 import {
@@ -21,10 +21,10 @@ import {
   jobName,
   jobTone,
   number,
-  ru,
+  ui,
   stateName,
   when,
-} from "./ru";
+} from "./i18n";
 import type { Job, Journal, PlanItem, Preview, RecentFile, Run } from "./types";
 export type Start = (
   kind: string,
@@ -161,8 +161,8 @@ function LiveIndex({ job }: { job: Job }) {
   return (
     <div className="live-index">
       <div className="section-heading">
-        <strong>{ru.liveTitle}</strong>
-        <span className="muted">{ru.liveHint}</span>
+        <strong>{ui.liveTitle}</strong>
+        <span className="muted">{ui.liveHint}</span>
       </div>
       <div className="live-strip">
         {files.map((f) => (
@@ -220,7 +220,7 @@ export function JobProgress({
             });
           }}
         >
-          {stopping ? ru.stopping : ru.stop}
+          {stopping ? ui.stopping : ui.stop}
         </Button>
       </div>
       <div
@@ -268,10 +268,10 @@ export function JobProgress({
         </div>
       )}
       <p className="muted">
-        {stopping ? ru.stopNote : ru.jobNote} {p.note}
+        {stopping ? ui.stopNote : ui.jobNote} {p.note}
       </p>
       {["index", "scan", "all"].includes(job.kind) && (
-        <p className="muted">{ru.liveResume}</p>
+        <p className="muted">{ui.liveResume}</p>
       )}
       {["index", "all"].includes(job.kind) && <LiveIndex job={job} />}
       {error && <ErrorBox message={error} />}
@@ -318,7 +318,7 @@ export function JobResult({
       </div>
       {!!refusals.length && (
         <>
-          <p className="muted">{ru.skippedNote}</p>
+          <p className="muted">{ui.skippedNote}</p>
           {byReason.map(([why, rows]) => (
             <details key={why}>
               <summary>
@@ -394,7 +394,7 @@ export function PlanRows({
                   }`}
                 >
                   {item.manual
-                    ? ru.markedByHand
+                    ? ui.markedByHand
                     : item.source ||
                       item.role?.toUpperCase() ||
                       bytes(item.size)}
@@ -425,7 +425,7 @@ export function PlanRows({
                     name={basename(item.keeper_path)}
                   />
                   <div>
-                    <span className="green">✓ {ru.willStay}</span>
+                    <span className="green">✓ {ui.willStay}</span>
                     <code className="path">{item.keeper_path}</code>
                   </div>
                 </div>
@@ -540,7 +540,7 @@ export function Review({
           <>
             <section className="review-summary">
               <div>
-                <div className="eyebrow">{ru.preview}</div>
+                <div className="eyebrow">{ui.preview}</div>
                 <Totals files={plan.total_files} size={plan.total_bytes} />
                 <p className="muted">
                   {purge
@@ -573,19 +573,19 @@ export function Review({
                 icon={purge ? "trash" : "arrow"}
               >
                 {purge
-                  ? ru.purge
+                  ? ui.purge
                   : kind.includes("undo")
-                    ? ru.undo
+                    ? ui.undo
                     : organize
                       ? t("razlozhit_po_datam")
-                      : ru.move}
+                      : ui.move}
               </Button>
             </section>
             {plan.items.length > 0 && (
-              <p className="muted">{ru.planColumnsHelp}</p>
+              <p className="muted">{ui.planColumnsHelp}</p>
             )}
             {plan.items.length === 0 ? (
-              <Empty title={ru.noCandidates}>
+              <Empty title={ui.noCandidates}>
                 {t("izmenite_parametry_ili_proverte_prichiny_otkazov_nizhe")}
               </Empty>
             ) : organize ? (
@@ -614,7 +614,7 @@ export function Review({
               <PlanRows items={plan.items} />
             )}
             <div className="section-heading">
-              <h3>{ru.refusals}</h3>
+              <h3>{ui.refusals}</h3>
               <span className="muted">{number(plan.refusals.length)}</span>
             </div>
             {plan.refusals.length ? (
@@ -631,7 +631,7 @@ export function Review({
         <Modal
           title={
             purge
-              ? ru.purge
+              ? ui.purge
               : kind.includes("undo")
                 ? t("vosstanovit_fayly")
                 : t("vypolnit_pokazannyy_plan")
@@ -651,7 +651,7 @@ export function Review({
           </p>
           {purge ? (
             <>
-              <Notice tone="error">{ru.purgeWarning}</Notice>
+              <Notice tone="error">{ui.purgeWarning}</Notice>
               <label className="check">
                 <input
                   type="checkbox"
@@ -664,7 +664,7 @@ export function Review({
               </label>
               <label className="field">
                 {t("vvedite")}
-                {ru.purgeWord}
+                {ui.purgeWord}
                 <input
                   autoComplete="off"
                   value={word}
@@ -681,18 +681,18 @@ export function Review({
           )}
           <div className="modal-actions">
             <Button onClick={() => setConfirm(false)} disabled={sending}>
-              {ru.cancel}
+              {ui.cancel}
             </Button>
             <Button
               kind={purge ? "danger" : "primary"}
               disabled={
                 sending ||
                 disabled ||
-                (purge && (!accepted || word !== ru.purgeWord))
+                (purge && (!accepted || word !== ui.purgeWord))
               }
               onClick={apply}
             >
-              {sending ? t("zapuskaem") : purge ? ru.purge : ru.apply}
+              {sending ? t("zapuskaem") : purge ? ui.purge : ui.apply}
             </Button>
           </div>
         </Modal>
@@ -759,12 +759,12 @@ export function JournalPage({
       </div>
       <Resource r={r}>
         {r.data?.some((x) => x.status === "pending") && (
-          <Notice tone="warning">{ru.pendingNote}</Notice>
+          <Notice tone="warning">{ui.pendingNote}</Notice>
         )}
         {/* An empty journal after a long evening of indexing looks like a bug.
             It is not: nothing was moved, so there is nothing to record. */}
         {!r.data?.length && (
-          <Notice tone="info">{ru.journalEmptyExplained}</Notice>
+          <Notice tone="info">{ui.journalEmptyExplained}</Notice>
         )}
         <VirtualList
           items={r.data || []}
@@ -804,7 +804,7 @@ export function JournalPage({
                       })
                     }
                   >
-                    {ru.undo}
+                    {ui.undo}
                   </Button>
                 )}
               </div>
@@ -812,7 +812,7 @@ export function JournalPage({
           )}
         />
       </Resource>
-      <h3>{ru.doneSoFar}</h3>
+      <h3>{ui.doneSoFar}</h3>
       <Resource r={history}>
         <VirtualList
           items={history.data || []}
@@ -829,7 +829,7 @@ export function JournalPage({
               <span>{when(j.started_at)}</span>
               <span>
                 {j.finished_at
-                  ? `${ru.duration}: ${duration(j.finished_at - j.started_at)}`
+                  ? `${ui.duration}: ${duration(j.finished_at - j.started_at)}`
                   : ""}
               </span>
               <span className="muted">
@@ -865,7 +865,7 @@ export function JournalPage({
                     })
                   }
                 >
-                  {ru.undoRun}
+                  {ui.undoRun}
                 </Button>
               )}
             </div>
@@ -873,7 +873,7 @@ export function JournalPage({
         />
       </Resource>
       {review && (
-        <Modal title={ru.preview} wide onClose={() => setReview(null)}>
+        <Modal title={ui.preview} wide onClose={() => setReview(null)}>
           <Review {...review} start={start} disabled={disabled} />
         </Modal>
       )}

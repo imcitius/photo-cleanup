@@ -107,7 +107,11 @@ pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
             if members.len() < 2 {
                 plan.refusals.push(Refusal {
                     path: m.path.clone(),
-                    why: "единственный файл в семействе".into(),
+                    why: pc_core::tr!(
+                        "единственный файл в семействе",
+                        "the only file in its group"
+                    )
+                    .into(),
                 });
                 continue;
             }
@@ -118,16 +122,21 @@ pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
                 let stars = c
                     .rating
                     .filter(|r| *r > 0)
-                    .map(|r| format!(", {r} звёзд"))
+                    .map(|r| pc_core::tf!(", {0} звёзд", ", {0} stars", r))
                     .unwrap_or_default();
                 let how = if c.exact {
                     ""
                 } else {
-                    " (совпадение по пути)"
+                    pc_core::tr!(" (совпадение по пути)", " (matched by path)")
                 };
                 plan.refusals.push(Refusal {
                     path: m.path.clone(),
-                    why: format!("файл в каталоге Lightroom{stars}{how}"),
+                    why: pc_core::tf!(
+                        "файл в каталоге Lightroom{0}{1}",
+                        "the file is in a Lightroom catalogue{0}{1}",
+                        stars,
+                        how
+                    ),
                 });
                 continue;
             }
@@ -151,13 +160,25 @@ pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
                     // they did not mean to.
                     match role {
                         Role::Copy => {
-                            format!("точная копия, те же пиксели сохранены в {name}")
+                            pc_core::tf!(
+                                "точная копия, те же пиксели сохранены в {0}",
+                                "an exact copy; the same pixels are kept in {0}",
+                                name
+                            )
                         }
-                        Role::Resize => format!(
-                            "уменьшенная версия {}×{}, полный кадр остаётся в {name}",
-                            m.width, m.height
+                        Role::Resize => pc_core::tf!(
+                            "уменьшенная версия {0}×{1}, полный кадр остаётся в {2}",
+                            "a {0}×{1} reduction; the full frame stays in {2}",
+                            m.width,
+                            m.height,
+                            name
                         ),
-                        other => format!("{} — в семействе остаётся {name}", other.label()),
+                        other => pc_core::tf!(
+                            "{0} — в семействе остаётся {1}",
+                            "{0} — {1} stays in the group",
+                            other.label(),
+                            name
+                        ),
                     }
                 },
                 manual: false,
@@ -179,11 +200,15 @@ pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
             let stars = c
                 .rating
                 .filter(|r| *r > 0)
-                .map(|r| format!(", {r} звёзд"))
+                .map(|r| pc_core::tf!(", {0} звёзд", ", {0} stars", r))
                 .unwrap_or_default();
             plan.refusals.push(Refusal {
                 path: m.path.clone(),
-                why: format!("отклонён вручную, но файл в каталоге Lightroom{stars}"),
+                why: pc_core::tf!(
+                    "отклонён вручную, но файл в каталоге Lightroom{0}",
+                    "rejected by hand, but the file is in a Lightroom catalogue{0}",
+                    stars
+                ),
             });
             continue;
         }
@@ -195,7 +220,11 @@ pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
             role: Role::Unknown,
             keeper_id: 0,
             keeper_path: String::new(),
-            reason: "отклонён вручную при разборе серии".into(),
+            reason: pc_core::tr!(
+                "отклонён вручную при разборе серии",
+                "rejected by hand while sorting a burst"
+            )
+            .into(),
             manual: true,
         });
     }

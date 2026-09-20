@@ -75,7 +75,11 @@ pub fn detect(files: &[FileInfo]) -> Vec<Link> {
                 a: w[0],
                 b: w[1],
                 kind: LinkKind::SameBytes,
-                detail: "совпали размер и оба конца файла".into(),
+                detail: pc_core::tr!(
+                    "совпали размер и оба конца файла",
+                    "same size and the same bytes at both ends"
+                )
+                .into(),
             });
         }
     }
@@ -85,7 +89,11 @@ pub fn detect(files: &[FileInfo]) -> Vec<Link> {
                 a: w[0],
                 b: w[1],
                 kind: LinkKind::SamePixels,
-                detail: "одинаковые пиксели после нормализации поворота".into(),
+                detail: pc_core::tr!(
+                    "одинаковые пиксели после нормализации поворота",
+                    "identical pixels once rotation is normalised"
+                )
+                .into(),
             });
         }
     }
@@ -155,7 +163,11 @@ pub fn detect(files: &[FileInfo]) -> Vec<Link> {
                 a: w[0],
                 b: w[1],
                 kind: LinkKind::XmpSibling,
-                detail: format!("общий OriginalDocumentID = {id}"),
+                detail: pc_core::tf!(
+                    "общий OriginalDocumentID = {0}",
+                    "shared OriginalDocumentID = {0}",
+                    id
+                ),
             });
         }
     }
@@ -180,7 +192,11 @@ pub fn detect(files: &[FileInfo]) -> Vec<Link> {
                         a: i,
                         b: j,
                         kind: LinkKind::RawJpegPair,
-                        detail: format!("одно имя {} и один момент съёмки", a.stem()),
+                        detail: pc_core::tf!(
+                            "одно имя {0} и один момент съёмки",
+                            "same name {0} and the same moment",
+                            a.stem()
+                        ),
                     });
                 }
             }

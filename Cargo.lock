@@ -905,6 +905,7 @@ dependencies = [
  "blake3",
  "image",
  "kamadak-exif",
+ "pc-core",
  "quick-xml",
  "serde",
  "tempfile",

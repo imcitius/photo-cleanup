@@ -244,6 +244,7 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
     db.conn
         .execute("UPDATE jobs SET state='running' WHERE id=?1", [id])?;
     let settings = service::settings_value(st, &db)?;
+    service::apply_language(&settings);
     let roots: Vec<std::path::PathBuf> = req.params["roots"]
         .as_array()
         .map(|a| {

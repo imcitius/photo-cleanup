@@ -143,7 +143,7 @@ fn gates_classify_every_bundle_correctly() {
 
     let smart = by_name(&bundles, "Work Smart Previews.lrdata");
     assert_eq!(smart.blocked_code.as_deref(), Some("originals-missing"));
-    assert!(smart.blocked_detail.as_ref().unwrap().contains("1 из 2"));
+    assert!(smart.blocked_detail.as_ref().unwrap().contains("1 of 2"));
 
     let orphan = by_name(&bundles, "Gone Previews.lrdata");
     assert!(orphan.removable(), "сирота подлежит переносу");
@@ -154,7 +154,7 @@ fn gates_classify_every_bundle_correctly() {
         .rebuild_cost_hint
         .as_ref()
         .unwrap()
-        .contains("пересборки"));
+        .contains("to rebuild"));
 }
 
 #[test]

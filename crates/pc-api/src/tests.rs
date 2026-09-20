@@ -582,7 +582,8 @@ async fn rejected_frames_reach_the_plan_and_can_be_taken_back() {
         .filter(|i| i["file_id"] == first)
         .collect();
     assert_eq!(rejected.len(), 1, "{plan}");
-    assert!(rejected[0]["reason"].as_str().unwrap().contains("вручную"));
+    // The tests run in the default language, which is English.
+    assert!(rejected[0]["reason"].as_str().unwrap().contains("by hand"));
 
     // Taking the mark back takes the file out of the plan again.
     let (s, _) = f

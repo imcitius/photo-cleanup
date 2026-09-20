@@ -40,11 +40,11 @@ impl Category {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Document => "Документы и сканы",
-            Self::Screenshot => "Скриншоты",
-            Self::Blank => "Пустые кадры",
-            Self::Monochrome => "Чёрно-белое",
-            Self::Photo => "Фотографии",
+            Self::Document => pc_core::tr!("Документы и сканы", "Documents and scans"),
+            Self::Screenshot => pc_core::tr!("Скриншоты", "Screenshots"),
+            Self::Blank => pc_core::tr!("Пустые кадры", "Empty frames"),
+            Self::Monochrome => pc_core::tr!("Чёрно-белое", "Monochrome"),
+            Self::Photo => pc_core::tr!("Фотографии", "Photographs"),
         }
     }
 
@@ -125,7 +125,12 @@ pub fn classify(f: &FileInfo) -> Verdict {
         return Verdict {
             category: Category::Blank,
             confidence: 0.9,
-            evidence: vec![format!("энтропия {entropy:.1}, контраст {contrast:.0}")],
+            evidence: vec![pc_core::tf!(
+                "энтропия {0:.1}, контраст {1:.0}",
+                "entropy {0:.1}, contrast {1:.0}",
+                entropy,
+                contrast
+            )],
         };
     }
 
@@ -136,12 +141,20 @@ pub fn classify(f: &FileInfo) -> Verdict {
     let screen_sized = matches_screen(f.width, f.height);
 
     if named_shot {
-        evidence.push("имя файла говорит о снимке экрана".into());
+        evidence.push(
+            pc_core::tr!(
+                "имя файла говорит о снимке экрана",
+                "the file name says screenshot"
+            )
+            .into(),
+        );
     }
     if screen_sized && no_camera {
-        evidence.push(format!(
-            "размер экрана {}×{}, камеры нет",
-            f.width, f.height
+        evidence.push(pc_core::tf!(
+            "размер экрана {0}×{1}, камеры нет",
+            "screen-sized {0}×{1}, no camera",
+            f.width,
+            f.height
         ));
     }
     if named_shot || (screen_sized && no_camera) {
@@ -184,11 +197,23 @@ pub fn classify(f: &FileInfo) -> Verdict {
         };
         let a4 = (ratio - 1.414).abs() < 0.06 || (ratio - 0.707).abs() < 0.03;
 
-        evidence.push(format!("строчная структура {text:.3}"));
-        evidence.push(format!("промежутки между строками {:.0}%", banding * 100.0));
-        evidence.push(format!("бумага: белого {:.0}%, ровный свет", white * 100.0));
+        evidence.push(pc_core::tf!(
+            "строчная структура {0:.3}",
+            "line structure {0:.3}",
+            text
+        ));
+        evidence.push(pc_core::tf!(
+            "промежутки между строками {0:.0}%",
+            "gaps between lines {0:.0}%",
+            banding * 100.0
+        ));
+        evidence.push(pc_core::tf!(
+            "бумага: белого {0:.0}%, ровный свет",
+            "paper: {0:.0}% white, flat light",
+            white * 100.0
+        ));
         if a4 {
-            evidence.push("пропорции листа A4".into());
+            evidence.push(pc_core::tr!("пропорции листа A4", "A4 page proportions").into());
         }
         let confidence = 0.70 + if a4 { 0.12 } else { 0.0 } + text.min(0.04) * 3.0;
         return Verdict {
@@ -203,7 +228,11 @@ pub fn classify(f: &FileInfo) -> Verdict {
         return Verdict {
             category: Category::Monochrome,
             confidence: 0.7,
-            evidence: vec![format!("насыщенность {saturation:.3}")],
+            evidence: vec![pc_core::tf!(
+                "насыщенность {0:.3}",
+                "saturation {0:.3}",
+                saturation
+            )],
         };
     }
 
@@ -269,7 +298,7 @@ mod tests {
             "{:?}",
             v.evidence
         );
-        assert!(v.evidence.iter().any(|e| e.contains("строчная")));
+        assert!(v.evidence.iter().any(|e| e.contains("line structure")));
     }
 
     #[test]
@@ -425,7 +454,11 @@ pub fn build(db: &Db) -> Result<CategorizeReport> {
 pub fn build_controlled(db: &Db, control: &pc_core::work::Control) -> Result<CategorizeReport> {
     let files = db.all_indexed()?;
     let mut report = CategorizeReport::default();
-    control.begin("Определение видов", files.len() as u64, 0)?;
+    control.begin(
+        pc_core::tr!("Определение видов", "Working out the kinds"),
+        files.len() as u64,
+        0,
+    )?;
     db.conn.execute_batch("BEGIN")?;
     for f in &files {
         control.check()?;
