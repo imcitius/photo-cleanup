@@ -1,4 +1,4 @@
-import { t } from "./i18n";
+import { day, t } from "./i18n";
 import { useEffect, useRef, useState } from "react";
 import { api, post, useDebounce, useResource } from "./api";
 import {
@@ -14,7 +14,7 @@ import {
   Thumb,
   VirtualList,
 } from "./components";
-import { basename, bytes, number, ui, when } from "./i18n";
+import { basename, bytes, number, roleHelp, ui, when } from "./i18n";
 import type { Category, Family, Member, Preview, Series } from "./types";
 import type { Start } from "./workflow";
 export interface ImageRef {
@@ -640,8 +640,8 @@ export function Families({
                                 {f.members[0]?.name || `#${f.id}`}
                               </strong>
                               <small>
-                                {when(f.taken_at).slice(0, 10)} ·{" "}
-                                {f.members.length} {t("faylov")}
+                                {day(f.taken_at)} · {f.members.length}{" "}
+                                {t("faylov")}
                               </small>
                               <span
                                 className={
@@ -706,6 +706,30 @@ export function Families({
                   <span className="muted">{ui.groupApplyHelp}</span>
                 </div>
               )}
+              {/* The labels are the whole argument for what gets moved, so
+                  they are explained where they are read rather than in
+                  documentation nobody opens. */}
+              <details className="role-legend">
+                <summary>{ui.roleLegend}</summary>
+                <dl>
+                  {[
+                    "original",
+                    "camera-jpg",
+                    "converted",
+                    "export",
+                    "resize",
+                    "copy",
+                    "unknown",
+                  ].map((role) => (
+                    <div key={role}>
+                      <dt className={`role ${role}`}>
+                        {role === "unknown" ? "?" : role.toUpperCase()}
+                      </dt>
+                      <dd>{roleHelp(role)}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </details>
               <div className="section-heading">
                 <span className="muted">{t("versii_snimka")}</span>
                 <Button
@@ -762,7 +786,10 @@ export function Families({
                     />
                     <div className="member-info">
                       <div className="inline">
-                        <span className={`role ${m.role}`}>
+                        <span
+                          className={`role ${m.role}`}
+                          title={roleHelp(m.role)}
+                        >
                           {m.role === "unknown" ? "?" : m.role.toUpperCase()}
                         </span>
                         {m.is_keeper && (

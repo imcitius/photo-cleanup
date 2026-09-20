@@ -60,6 +60,10 @@ export function t(key: MessageKey, ...values: unknown[]): string {
   return text.replace(/\{(\d+)\}/g, (_, n) => String(values[Number(n)] ?? ""));
 }
 
+/** What a role means, in one sentence. The badge alone says too little. */
+export const roleHelp = (role: string) =>
+  ui.roleHelp[role as keyof typeof ui.roleHelp] || "";
+
 export const jobName = (kind: string) =>
   ui.jobs[kind as keyof typeof ui.jobs] || kind;
 export const stateName = (state: string) =>
@@ -88,6 +92,17 @@ export const when = (n: number | null | undefined) =>
         day: "2-digit",
         hour: "2-digit",
         minute: "2-digit",
+      });
+
+/** The date alone, for places where the time would only take up room. */
+export const day = (n: number | null | undefined) =>
+  n == null
+    ? ui.unknownDate
+    : new Date(n * 1000).toLocaleDateString(tag, {
+        timeZone: "UTC",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
       });
 
 /** Seconds as a person says them: "3 мин 20 с", "1 h 12 min". */

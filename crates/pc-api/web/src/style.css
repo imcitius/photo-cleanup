@@ -484,6 +484,30 @@ main {
   overflow-wrap: anywhere;
 }
 
+/* What the role labels mean, next to where they are read. */
+.role-legend {
+  margin: 4px 0 18px;
+}
+.role-legend dl {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+}
+.role-legend dl > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.role-legend dt {
+  justify-self: start;
+}
+.role-legend dd {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* Acting on one group, where the group is already on screen. */
 .group-apply {
   display: flex;

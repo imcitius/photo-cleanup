@@ -16,6 +16,21 @@ export const ui = {
   secondsShort: "s",
   minutesShort: "min",
   hoursShort: "h",
+  roleHelp: {
+    original:
+      "Where the photograph starts: a raw frame, or one with camera data that names no source of its own.",
+    "camera-jpg":
+      "The JPEG the camera wrote beside the raw frame of the same shot.",
+    converted:
+      "A conversion of the original — a DNG, say, that names the raw it came from.",
+    export:
+      "The same shot saved by an editor: a separate file, usually smaller and edited.",
+    resize: "A smaller version of the same shot.",
+    copy: "The same bytes as the kept file: the only thing moved by default.",
+    unknown:
+      "The kind is not established: no camera data, and nothing points at a source. Nothing is moved on this basis.",
+  },
+  roleLegend: "What these labels mean",
   dateSources: {
     exif: "EXIF, from the camera",
     xmp: "XMP, from a catalogue",
