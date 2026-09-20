@@ -1068,6 +1068,15 @@ pub async fn categories(State(st): State<Arc<AppState>>) -> Api<Vec<CategoryGrou
 /// press, decoded and re-encoded every time.
 const VIEW_SIDE: u32 = 2400;
 
+/// Changes whenever decoding does.
+///
+/// A rendered view is kept under a key made of the file's path, size and
+/// time, none of which move when the *reader* is fixed. Without this marker a
+/// frame that was rendered wrong stays wrong for as long as the file sits
+/// untouched — which is exactly what happened to the TIFFs whose predictor
+/// tag we used to obey.
+const RENDER: &[u8] = b"v2-predictor";
+
 /// Where a rendered view of this file is kept between looks.
 fn view_key(path: &str, md: &std::fs::Metadata, full: bool) -> String {
     let stamp = md
@@ -1077,11 +1086,8 @@ fn view_key(path: &str, md: &std::fs::Metadata, full: bool) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let mut hasher = blake3::Hasher::new();
-    hasher.update(if full {
-        b"view-full-v1"
-    } else {
-        b"view-2400-v1"
-    });
+    hasher.update(if full { b"view-full" } else { b"view-2400" });
+    hasher.update(RENDER);
     hasher.update(path.as_bytes());
     hasher.update(&stamp.to_le_bytes());
     hasher.update(&md.len().to_le_bytes());
