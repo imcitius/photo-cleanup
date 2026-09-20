@@ -1,17 +1,17 @@
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 const tabs = [
-  "Обзор архива",
-  "Опись и индекс",
-  "Дубликаты и версии",
-  "Серии",
-  "Виды",
-  "План и перенос",
-  "Раскладка по датам",
-  "Превью и кэши",
-  "Карантин",
-  "Журнал и прогоны",
-  "Настройки",
+  "Archive overview",
+  "Inventory and index",
+  "Duplicates and versions",
+  "Bursts",
+  "Kinds",
+  "Plan and move",
+  "Sort by date",
+  "Previews and caches",
+  "Quarantine",
+  "Journal and runs",
+  "Settings",
 ];
 const empty = {
   files: 0,
@@ -37,7 +37,7 @@ test("production page renders and every screen is clickable without an invisible
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: "Начнём с вашего архива" }),
+    page.getByRole("heading", { name: "Let's start with your archive" }),
   ).toBeVisible();
   for (const name of tabs) {
     await page
@@ -62,9 +62,9 @@ test("keyboard modal restores focus; themes and tablet layouts stay accessible",
   await page.setViewportSize({ width: 1024, height: 900 });
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: "Начнём с вашего архива" }),
+    page.getByRole("heading", { name: "Let's start with your archive" }),
   ).toBeVisible();
-  const help = page.getByRole("button", { name: "Клавиши", exact: true });
+  const help = page.getByRole("button", { name: "Keys", exact: true });
   await help.click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.keyboard.press("Escape");
@@ -100,15 +100,15 @@ test("server errors are readable and retryable", async ({ page }) => {
   await page.route("**/api/status", (r) =>
     r.fulfill({
       status: bad ? 500 : 200,
-      json: bad ? { error: "/mnt/disk3/foto: отказано в доступе" } : empty,
+      json: bad ? { error: "/mnt/disk3/foto: permission denied" } : empty,
     }),
   );
   await page.goto("/");
   await expect(page.getByRole("alert")).toContainText("/mnt/disk3/foto");
   bad = false;
-  await page.getByRole("button", { name: "Повторить", exact: true }).click();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "Начнём с вашего архива" }),
+    page.getByRole("heading", { name: "Let's start with your archive" }),
   ).toBeVisible();
 });
 test("a running job survives tab reload and requests cooperative cancellation", async ({
@@ -125,7 +125,7 @@ test("a running job survives tab reload and requests cooperative cancellation", 
     finished_at: null,
     error: null,
     progress: {
-      phase: "Чтение изображений",
+      phase: "Reading images",
       done,
       total: 100,
       current: "/mnt/disk3/foto/DSC001.ARW",
@@ -148,16 +148,16 @@ test("a running job survives tab reload and requests cooperative cancellation", 
   });
   await page.goto("/");
   await expect(
-    page.getByRole("progressbar", { name: "Индексация", exact: true }),
+    page.getByRole("progressbar", { name: "Indexing", exact: true }),
   ).toHaveAttribute("aria-valuenow", "24");
   done = 42;
   await page.reload();
   await expect(
-    page.getByRole("progressbar", { name: "Индексация", exact: true }),
+    page.getByRole("progressbar", { name: "Indexing", exact: true }),
   ).toHaveAttribute("aria-valuenow", "42");
-  await page.getByRole("button", { name: "Остановить", exact: true }).click();
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
   await expect(
-    page.getByRole("progressbar", { name: "Индексация", exact: true }),
+    page.getByRole("progressbar", { name: "Indexing", exact: true }),
   ).toHaveCount(0);
   expect(cancelled).toBe(true);
 });
@@ -174,15 +174,15 @@ test("interrupted work stays visible and leads to the journal", async ({
           state: "interrupted",
           progress: {},
           started_at: 1700000000,
-          error: "Сервер перезапущен",
+          error: "The server restarted",
         },
       ],
     }),
   );
   await page.goto("/");
-  await expect(page.getByText("Есть незавершённая работа")).toBeVisible();
-  await page.getByRole("link", { name: "Проверить журнал →" }).click();
-  await expect(page.locator("h1")).toHaveText("Журнал и прогоны");
+  await expect(page.getByText("There is unfinished work")).toBeVisible();
+  await page.getByRole("link", { name: "Check the journal →" }).click();
+  await expect(page.locator("h1")).toHaveText("Journal and runs");
 });
 test("50,000 families use a bounded DOM, filters and optimistic rollback", async ({
   page,
@@ -197,7 +197,7 @@ test("50,000 families use a bounded DOM, filters and optimistic rollback", async
     width: 6000,
     height: 4000,
     quality: 87,
-    breakdown: "резкость +20; детализация +15",
+    breakdown: "sharpness +20; detail +15",
     evidence: null,
     thumb: null,
     is_keeper: keeper,
@@ -226,25 +226,25 @@ test("50,000 families use a bounded DOM, filters and optimistic rollback", async
     });
   });
   await page.route("**/api/families/*/keeper", (r) =>
-    r.fulfill({ status: 500, json: { error: "/mnt/disk3: недоступно" } }),
+    r.fulfill({ status: 500, json: { error: "/mnt/disk3: unreachable" } }),
   );
   await page.goto("/#families");
-  await expect(page.getByText("50 000 групп")).toBeVisible();
+  await expect(page.getByText("50,000 groups")).toBeVisible();
   expect(await page.locator(".family-list-item").count()).toBeLessThan(20);
   await page.locator(".family-list").evaluate((el) => (el.scrollTop = 92000));
   await expect(page.locator(".family-list-item").first()).toBeVisible();
   expect(await page.locator(".family-list-item").count()).toBeLessThan(20);
   await page
-    .getByRole("button", { name: "Оставить именно этот", exact: true })
+    .getByRole("button", { name: "Keep this one", exact: true })
     .last()
     .click();
   await expect(page.getByRole("alert")).toContainText("/mnt/disk3");
   await expect(page.locator(".keeper")).toHaveCount(1);
   await page
-    .getByRole("textbox", { name: "Поиск по имени или пути" })
-    .fill("нет такого кадра");
+    .getByRole("textbox", { name: "Search by name or path" })
+    .fill("no such frame");
   await expect(
-    page.getByRole("heading", { name: "Ничего не найдено" }),
+    page.getByRole("heading", { name: "Nothing found" }),
   ).toBeVisible();
 });
 test("purge needs a reviewed plan, a checkbox and the exact confirmation word", async ({
@@ -262,7 +262,7 @@ test("purge needs a reviewed plan, a checkbox and the exact confirmation word", 
           size: 100,
           file_count: 3,
           applied_at: 1,
-          kind: "производные данные",
+          kind: "derived data",
           thumb: null,
         },
       ],
@@ -277,7 +277,7 @@ test("purge needs a reviewed plan, a checkbox and the exact confirmation word", 
         items: [
           {
             path: "/mnt/disk3/.pc-quarantine/Previews.lrdata",
-            dst: "Окончательное удаление",
+            dst: "Permanent deletion",
             size: 100,
             file_count: 3,
           },
@@ -292,7 +292,7 @@ test("purge needs a reviewed plan, a checkbox and the exact confirmation word", 
   await page.route("**/api/jobs", (r) => {
     if (r.request().method() === "POST") {
       const body = r.request().postDataJSON();
-      expect(body.confirmation).toBe("УДАЛИТЬ");
+      expect(body.confirmation).toBe("DELETE");
       expect(body.plan_token).toBe("reviewed");
       submitted = true;
       return r.fulfill({ json: { job_id: 9 } });
@@ -300,18 +300,18 @@ test("purge needs a reviewed plan, a checkbox and the exact confirmation word", 
     return r.fulfill({ json: [] });
   });
   await page.goto("/#quarantine");
-  await page.getByRole("button", { name: "Проверить перед удалением" }).click();
+  await page.getByRole("button", { name: "Check before deleting" }).click();
   await page
-    .getByRole("button", { name: "Удалить навсегда", exact: true })
+    .getByRole("button", { name: "Delete for good", exact: true })
     .click();
   const dialog = page.getByRole("dialog");
   await expect(
-    dialog.getByRole("button", { name: "Удалить навсегда", exact: true }),
+    dialog.getByRole("button", { name: "Delete for good", exact: true }),
   ).toBeDisabled();
   await dialog.getByRole("checkbox").check();
-  await dialog.getByRole("textbox").fill("УДАЛИТЬ");
+  await dialog.getByRole("textbox").fill("DELETE");
   await dialog
-    .getByRole("button", { name: "Удалить навсегда", exact: true })
+    .getByRole("button", { name: "Delete for good", exact: true })
     .click();
   expect(submitted).toBe(true);
 });

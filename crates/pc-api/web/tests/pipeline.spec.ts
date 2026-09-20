@@ -45,9 +45,9 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
   await request.put("/api/settings", { data: { roots: [], min_size: 0 } });
   await page.reload();
   await page
-    .getByRole("textbox", { name: "Корень архива", exact: true })
+    .getByRole("textbox", { name: "Archive root", exact: true })
     .fill(archive);
-  await page.getByRole("button", { name: "Добавить", exact: true }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
   const run = async (label: string) => {
     await Promise.all([
       page.waitForResponse(
@@ -66,15 +66,15 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
       .toBe("done");
     await page.reload();
   };
-  await run("Начать опись");
+  await run("Start the inventory");
   await page
-    .getByRole("spinbutton", { name: "Минимальный размер, байт" })
+    .getByRole("spinbutton", { name: "Smallest file, bytes" })
     .fill("0");
-  await run("Начать индексацию");
-  await run("Построить всё");
+  await run("Start indexing");
+  await run("Build everything");
   await page
     .getByRole("navigation")
-    .getByRole("link", { name: "Дубликаты и версии", exact: true })
+    .getByRole("link", { name: "Duplicates and versions", exact: true })
     .click();
   await expect(page.locator(".member")).toHaveCount(2);
   await page.screenshot({
@@ -83,16 +83,16 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
   });
   await page
     .getByRole("navigation")
-    .getByRole("link", { name: "План и перенос", exact: true })
+    .getByRole("link", { name: "Plan and move", exact: true })
     .click();
   await expect(page.locator(".plan-row")).toHaveCount(1);
   expect(existsSync(join(archive, "Backup", "20190714_183200.jpg"))).toBe(true);
   await page
-    .getByRole("button", { name: "Перенести в карантин", exact: true })
+    .getByRole("button", { name: "Move to quarantine", exact: true })
     .click();
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "Выполнить план", exact: true })
+    .getByRole("button", { name: "Run the plan", exact: true })
     .click();
   await expect
     .poll(() => existsSync(join(archive, "Backup", "20190714_183200.jpg")))
@@ -105,20 +105,20 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .toBe("done");
   await page
     .getByRole("navigation")
-    .getByRole("link", { name: "Карантин", exact: true })
+    .getByRole("link", { name: "Quarantine", exact: true })
     .click();
   await page
-    .getByRole("button", { name: "Восстановить", exact: true })
+    .getByRole("button", { name: "Restore", exact: true })
     .first()
     .click();
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "Восстановить", exact: true })
+    .getByRole("button", { name: "Restore", exact: true })
     .click();
   await page
     .getByRole("dialog")
     .last()
-    .getByRole("button", { name: "Выполнить план", exact: true })
+    .getByRole("button", { name: "Run the plan", exact: true })
     .click();
   await expect
     .poll(() => existsSync(join(archive, "Backup", "20190714_183200.jpg")))
@@ -132,27 +132,25 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .toBe("done");
   await page
     .getByRole("navigation")
-    .getByRole("link", { name: "Раскладка по датам", exact: true })
+    .getByRole("link", { name: "Sort by date", exact: true })
     .click();
-  await page.getByPlaceholder("Например, /home/имя/Фотографии").fill(out);
+  await page.getByPlaceholder("For example, /home/name/Pictures").fill(out);
   await expect(page.getByRole("alert")).toContainText(
-    "Сначала разберите точные копии",
+    "Resolve the exact copies",
   );
-  await page.getByText("Дополнительное разрешение", { exact: true }).click();
+  await page.getByText("Extra permission", { exact: true }).click();
   await page
     .getByRole("checkbox", {
-      name: "Разрешить раскладку неразобранных дубликатов",
+      name: "Allow sorting with duplicates still unresolved",
     })
     .check();
   await expect(
-    page.getByRole("button", { name: "Разложить по датам", exact: true }),
+    page.getByRole("button", { name: "Sort by date", exact: true }),
   ).toBeEnabled();
-  await page
-    .getByRole("button", { name: "Разложить по датам", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Sort by date", exact: true }).click();
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "Выполнить план", exact: true })
+    .getByRole("button", { name: "Run the plan", exact: true })
     .click();
   await expect
     .poll(async () => {
@@ -162,20 +160,20 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .toBe("done");
   await page
     .getByRole("navigation")
-    .getByRole("link", { name: "Журнал и прогоны", exact: true })
+    .getByRole("link", { name: "Journal and runs", exact: true })
     .click();
   await page
-    .getByRole("button", { name: "Откатить прогон", exact: true })
+    .getByRole("button", { name: "Undo the run", exact: true })
     .first()
     .click();
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "Восстановить", exact: true })
+    .getByRole("button", { name: "Restore", exact: true })
     .click();
   await page
     .getByRole("dialog")
     .last()
-    .getByRole("button", { name: "Выполнить план", exact: true })
+    .getByRole("button", { name: "Run the plan", exact: true })
     .click();
   await expect
     .poll(() => existsSync(join(archive, "20190714_183200.jpg")))
@@ -188,34 +186,32 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
   await page.reload();
   await page
     .getByRole("navigation")
-    .getByRole("link", { name: "План и перенос", exact: true })
+    .getByRole("link", { name: "Plan and move", exact: true })
     .click();
   await expect(
-    page.getByRole("button", { name: "Спутники · 1", exact: true }),
+    page.getByRole("button", { name: "Companions · 1", exact: true }),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: "Перенести в карантин", exact: true })
+    .getByRole("button", { name: "Move to quarantine", exact: true })
     .click();
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "Выполнить план", exact: true })
+    .getByRole("button", { name: "Run the plan", exact: true })
     .click();
   await expect
     .poll(async () => (await (await request.get("/api/jobs")).json())[0]?.state)
     .toBe("done");
   await page
     .getByRole("navigation")
-    .getByRole("link", { name: "Превью и кэши", exact: true })
+    .getByRole("link", { name: "Previews and caches", exact: true })
     .click();
+  await page.getByRole("button", { name: "Plan preview", exact: true }).click();
   await page
-    .getByRole("button", { name: "Предпросмотр плана", exact: true })
-    .click();
-  await page
-    .getByRole("button", { name: "Перенести в карантин", exact: true })
+    .getByRole("button", { name: "Move to quarantine", exact: true })
     .click();
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "Выполнить план", exact: true })
+    .getByRole("button", { name: "Run the plan", exact: true })
     .click();
   await expect
     .poll(async () => (await (await request.get("/api/jobs")).json())[0]?.state)
@@ -238,22 +234,22 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .map((j) => j.dst);
   await page
     .getByRole("navigation")
-    .getByRole("link", { name: "Карантин", exact: true })
+    .getByRole("link", { name: "Quarantine", exact: true })
     .click();
   await page
-    .getByRole("spinbutton", { name: "Хранятся не менее, дней" })
+    .getByRole("spinbutton", { name: "Held for at least, days" })
     .fill("0");
   await page
-    .getByRole("button", { name: "Проверить перед удалением", exact: true })
+    .getByRole("button", { name: "Check before deleting", exact: true })
     .click();
   await page
-    .getByRole("button", { name: "Удалить навсегда", exact: true })
+    .getByRole("button", { name: "Delete for good", exact: true })
     .click();
   const purge = page.getByRole("dialog");
   await purge.getByRole("checkbox").check();
-  await purge.getByRole("textbox").fill("УДАЛИТЬ");
+  await purge.getByRole("textbox").fill("DELETE");
   await purge
-    .getByRole("button", { name: "Удалить навсегда", exact: true })
+    .getByRole("button", { name: "Delete for good", exact: true })
     .click();
   await expect
     .poll(async () => (await (await request.get("/api/jobs")).json())[0]?.state)

@@ -43,7 +43,10 @@ pub struct Thumbnail {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<DynamicImage> {
-    image::load_from_memory(bytes).context("не декодировать изображение")
+    image::load_from_memory(bytes).context(pc_core::tr!(
+        "не декодировать изображение",
+        "cannot decode the image"
+    ))
 }
 
 /// Undo the EXIF orientation so stored pixels are upright.

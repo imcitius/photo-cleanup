@@ -40,8 +40,12 @@ impl ThumbStore {
         if path.exists() {
             return Ok(key);
         }
-        let parent = path.parent().context("нет родительского каталога")?;
-        fs::create_dir_all(parent).with_context(|| format!("не создать {}", parent.display()))?;
+        let parent = path.parent().context(crate::tr!(
+            "нет родительского каталога",
+            "no parent directory"
+        ))?;
+        fs::create_dir_all(parent)
+            .with_context(|| crate::tf!("не создать {0}", "cannot create {0}", parent.display()))?;
         // Write beside the target and rename, so a crash never leaves a
         // half-written thumbnail that later looks valid.
         // Several identical files may be indexed concurrently. A shared
@@ -80,7 +84,12 @@ impl ThumbStore {
             Ok(e) => e,
             // Never created, or already gone: nothing to clear either way.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e).context("не прочитать кэш превью"),
+            Err(e) => {
+                return Err(e).context(crate::tr!(
+                    "не прочитать кэш превью",
+                    "cannot read the thumbnail cache"
+                ))
+            }
         };
         for entry in entries.flatten() {
             let path = entry.path();
@@ -91,7 +100,9 @@ impl ThumbStore {
             } else {
                 fs::remove_file(&path)
             };
-            result.with_context(|| format!("не удалить {}", path.display()))?;
+            result.with_context(|| {
+                crate::tf!("не удалить {0}", "cannot remove {0}", path.display())
+            })?;
             removed += count;
         }
         Ok(removed)

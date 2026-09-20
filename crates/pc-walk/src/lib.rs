@@ -263,14 +263,22 @@ pub fn scan_controlled(
     opts: &Options,
     control: &pc_core::work::Control,
 ) -> Result<ScanResult> {
-    control.begin("Обход каталогов", 0, 0)?;
+    control.begin(
+        pc_core::tr!("Обход каталогов", "Walking the directories"),
+        0,
+        0,
+    )?;
     let mut map = DiskMap::new();
     let mut by_disk: BTreeMap<u64, (Disk, Vec<PathBuf>)> = BTreeMap::new();
 
     for root in roots {
-        let canonical = root
-            .canonicalize()
-            .with_context(|| format!("корень недоступен: {}", root.display()))?;
+        let canonical = root.canonicalize().with_context(|| {
+            pc_core::tf!(
+                "корень недоступен: {0}",
+                "root not reachable: {0}",
+                root.display()
+            )
+        })?;
         let disk = map.resolve(&canonical)?;
         by_disk
             .entry(disk.dev)

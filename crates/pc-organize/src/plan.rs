@@ -208,7 +208,11 @@ pub fn compute(db: &Db, o: &Options) -> Result<Plan> {
         if o.skip_uncertain && d.uncertain() {
             plan.refusals.push(Refusal {
                 path: row.path.clone(),
-                why: format!("дата ненадёжна, источник — {}", d.source.label()),
+                why: pc_core::tf!(
+                    "дата ненадёжна, источник — {0}",
+                    "the date is unreliable; it came from {0}",
+                    d.source.label()
+                ),
             });
             continue;
         }
@@ -216,11 +220,15 @@ pub fn compute(db: &Db, o: &Options) -> Result<Plan> {
             let stars = c
                 .rating
                 .filter(|r| *r > 0)
-                .map(|r| format!(", {r} звёзд"))
+                .map(|r| pc_core::tf!(", {0} звёзд", ", {0} stars", r))
                 .unwrap_or_default();
             plan.refusals.push(Refusal {
                 path: row.path.clone(),
-                why: format!("файл в каталоге Lightroom{stars} — перенос разорвал бы ссылку"),
+                why: pc_core::tf!(
+                    "файл в каталоге Lightroom{0} — перенос разорвал бы ссылку",
+                    "the file is in a Lightroom catalogue{0} — moving would break the link",
+                    stars
+                ),
             });
             continue;
         }

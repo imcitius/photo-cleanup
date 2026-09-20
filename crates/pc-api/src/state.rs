@@ -24,7 +24,17 @@ impl AppState {
         let thumbs = std::path::absolute(thumbs)?;
         let quarantine = quarantine.map(std::path::absolute).transpose()?;
         let db = Db::open(&db_path)?;
-        db.conn.execute("UPDATE jobs SET state='interrupted', finished_at=?1, error='Сервер перезапущен. Проверьте журнал перед новым запуском.' WHERE state IN ('queued','running')",[pc_core::time::now_unix()])?;
+        db.conn.execute(
+            "UPDATE jobs SET state='interrupted', finished_at=?1, error=?2
+              WHERE state IN ('queued','running')",
+            rusqlite::params![
+                pc_core::time::now_unix(),
+                pc_core::tr!(
+                    "Сервер перезапущен. Проверьте журнал перед новым запуском.",
+                    "The server restarted. Check the journal before starting again."
+                )
+            ],
+        )?;
         Ok(Self {
             jobs: Default::default(),
             mutation: Mutex::new(()),

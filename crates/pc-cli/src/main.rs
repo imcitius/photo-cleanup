@@ -14,10 +14,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[command(
     name = "photo-cleanup",
     version = VERSION,
-    about = "Разбор фотоархива: дубликаты, серии, регенерируемые данные"
+    about = "Sort out a photo archive: duplicates, bursts, regenerable data"
 )]
 struct Cli {
-    /// Путь к базе. По умолчанию ./photo-cleanup.db
+    /// Path to the database. Defaults to ./photo-cleanup.db
     #[arg(long, global = true, default_value = "photo-cleanup.db")]
     db: PathBuf,
 
@@ -30,56 +30,56 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Обойти корни и составить опись производных данных
+    /// Walk the roots and take stock of derived data
     Scan(ScanArgs),
-    /// Прочитать изображения и построить индекс
+    /// Read the images and build the index
     Index(IndexArgs),
-    /// Регенерируемые данные: превью Lightroom, кэши, системный мусор
+    /// Regenerable data: Lightroom previews, caches, system junk
     #[command(subcommand)]
     Derived(DerivedCmd),
-    /// Семейства: один кадр — несколько представлений
+    /// Groups: one photograph in several renditions
     #[command(subcommand)]
     Families(FamiliesCmd),
-    /// Разложить по видам: документы, скриншоты, пустые кадры
+    /// Sort by kind: documents, screenshots, empty frames
     #[command(subcommand)]
     Categories(CategoriesCmd),
-    /// Серии: несколько кадров одного момента и лучший из них
+    /// Bursts: several frames of one moment, and the best of them
     #[command(subcommand)]
     Series(SeriesCmd),
-    /// Что будет перенесено при текущей политике
+    /// What the current policy would move
     Plan(PolicyArgs),
-    /// Перенести в карантин по плану
+    /// Move to quarantine, following the plan
     Apply(ApplyArgs),
-    /// Разложить архив по датам: YYYY/YYYY-MM-DD_событие
+    /// Sort the archive by date: YYYY/YYYY-MM-DD_event
     #[command(subcommand)]
     Organize(OrganizeCmd),
-    /// Запустить веб-интерфейс
+    /// Start the web interface
     Serve(ServeArgs),
-    /// Сводка по базе
+    /// Summary of the database
     Status,
-    /// Найденные каталоги Lightroom
+    /// Lightroom catalogues that were found
     Catalogs,
 }
 
 #[derive(Args)]
 struct ScanArgs {
-    /// Корень обхода. Указывать /mnt/diskN/..., не /mnt/user/...
+    /// Root to walk. Use /mnt/diskN/..., not /mnt/user/...
     #[arg(long = "root", required = true)]
     roots: Vec<PathBuf>,
 }
 
 #[derive(Args)]
 struct PolicyArgs {
-    /// Роль к удалению; можно повторять. По умолчанию только copy.
+    /// Role to remove; repeatable. Only `copy` by default.
     #[arg(long = "role")]
     roles: Vec<String>,
-    /// Роль resize удаляется, только если кадр меньше этого
+    /// A `resize` is removed only when the frame is smaller than this
     #[arg(long, default_value = "2M", value_parser = format::parse_size)]
     resize_below: i64,
-    /// Снять защиту с файлов, на которые ссылаются каталоги Lightroom
+    /// Lift the protection on files a Lightroom catalogue references
     #[arg(long)]
     allow_lightroom: bool,
-    /// Показать все отказы, а не первые несколько
+    /// Show every refusal, not just the first few
     #[arg(long)]
     show_refusals: bool,
 }
@@ -96,34 +96,34 @@ struct ApplyArgs {
 
 #[derive(Subcommand)]
 enum OrganizeCmd {
-    /// Показать, что и куда переедет
+    /// Show what moves, and where
     Plan(OrganizeArgs),
-    /// Выполнить переносы
+    /// Carry out the moves
     Apply(OrganizeApplyArgs),
-    /// Вернуть файлы прогона туда, откуда их взяли
+    /// Put the files of a run back where they came from
     Undo(OrganizeUndoArgs),
-    /// Прогоны, которые что-то переносили
+    /// Runs that moved something
     Runs,
 }
 
 #[derive(Args)]
 struct OrganizeArgs {
-    /// Корень нового дерева. Обязан быть на том же диске, что и файлы.
+    /// Root of the new tree. Has to be on the same disk as the files.
     #[arg(long)]
     root: PathBuf,
-    /// Разрыв между съёмками, после которого начинается новое событие
+    /// Gap between shoots that starts a new event
     #[arg(long, default_value = "6h", value_parser = format::parse_duration)]
     gap: i64,
-    /// Переносить и файлы, на которые ссылаются каталоги Lightroom
+    /// Move files a Lightroom catalogue references as well
     #[arg(long)]
     allow_lightroom: bool,
-    /// Не трогать файлы, дата которых — догадка (путь или mtime)
+    /// Leave files whose date is a guess (from the path or mtime)
     #[arg(long)]
     skip_uncertain: bool,
-    /// Разложить, не дожидаясь разбора дубликатов
+    /// Sort without waiting for the duplicates to be resolved
     #[arg(long)]
     allow_duplicates: bool,
-    /// Сколько переносов показать
+    /// How many moves to print
     #[arg(long, default_value_t = 20)]
     limit: usize,
 }
@@ -138,7 +138,7 @@ struct OrganizeApplyArgs {
 
 #[derive(Args)]
 struct OrganizeUndoArgs {
-    /// Номер прогона; по умолчанию последний, который что-то переносил
+    /// Run number; defaults to the last one that moved anything
     #[arg(long)]
     run: Option<i64>,
     #[arg(long)]
@@ -147,11 +147,11 @@ struct OrganizeUndoArgs {
 
 #[derive(Subcommand)]
 enum CategoriesCmd {
-    /// Классифицировать всё, что в индексе
+    /// Classify everything in the index
     Build,
-    /// Сводка по видам
+    /// Summary by kind
     List,
-    /// Показать файлы одного вида
+    /// Show the files of one kind
     Show(CategoryShowArgs),
 }
 
@@ -165,15 +165,15 @@ struct CategoryShowArgs {
 
 #[derive(Subcommand)]
 enum SeriesCmd {
-    /// Найти серии и отранжировать кадры
+    /// Find bursts and rank their frames
     Build(SeriesBuildArgs),
-    /// Показать серии
+    /// Show the bursts
     List(SeriesListArgs),
 }
 
 #[derive(Args)]
 struct SeriesBuildArgs {
-    /// Максимальный разрыв между кадрами одной серии, секунд
+    /// Largest gap between frames of one burst, in seconds
     #[arg(long, default_value_t = 10)]
     gap: i64,
 }
@@ -190,12 +190,12 @@ struct SeriesListArgs {
 
 #[derive(Args)]
 struct ServeArgs {
-    /// Адрес. 0.0.0.0 чтобы открыть с других машин в сети.
+    /// Address. 0.0.0.0 to reach it from other machines.
     #[arg(long, default_value = "127.0.0.1:8080")]
     bind: String,
     #[arg(long)]
     thumbs: Option<PathBuf>,
-    /// Куда складывать перенесённое, если корень диска недоступен на запись
+    /// Where moved files go when the disk root is not writable
     #[arg(long)]
     quarantine: Option<PathBuf>,
 }
@@ -204,28 +204,28 @@ struct ServeArgs {
 struct IndexArgs {
     #[arg(long = "root", required = true)]
     roots: Vec<PathBuf>,
-    /// Каталог кэша тамбнейлов. По умолчанию рядом с базой.
+    /// Thumbnail cache directory. Next to the database by default.
     #[arg(long)]
     thumbs: Option<PathBuf>,
-    /// Минимальный размер файла; меньше — иконки и ассеты, не фотографии
+    /// Smallest file to consider; below this are icons and assets
     #[arg(long, default_value = "100K", value_parser = format::parse_size)]
     min_size: i64,
-    /// Читателей на физический диск. Больше двух на HDD только вредит.
+    /// Readers per physical disk. More than two hurts on a spinning disk.
     #[arg(long, default_value_t = 2)]
     readers_per_disk: usize,
-    /// Перечитать даже то, что уже в индексе
+    /// Re-read even what is already indexed
     #[arg(long)]
     reindex: bool,
-    /// Потоков декодирования. 0 — по числу ядер, минус одно для остальной машины.
+    /// Decoding threads. 0 means one per core, less one for the rest of the machine.
     #[arg(long, default_value_t = 0)]
     workers: usize,
 }
 
 #[derive(Subcommand)]
 enum FamiliesCmd {
-    /// Построить семейства по связям и по сходству
+    /// Build the groups from links and from similarity
     Build(BuildArgs),
-    /// Показать семейства
+    /// Show the groups
     List(FamListArgs),
 }
 
@@ -233,10 +233,10 @@ enum FamiliesCmd {
 struct BuildArgs {
     #[arg(long)]
     thumbs: Option<PathBuf>,
-    /// Порог расстояния pHash для кандидатов
+    /// pHash distance threshold for candidates
     #[arg(long, default_value_t = 10)]
     phash_max: u32,
-    /// Минимальный SSIM, при котором пара считается одним кадром
+    /// Smallest SSIM at which a pair counts as one photograph
     #[arg(long, default_value_t = 0.90)]
     ssim_min: f64,
 }
@@ -247,23 +247,23 @@ struct FamListArgs {
     limit: i64,
     #[arg(long, default_value_t = 0)]
     offset: i64,
-    /// Показывать и одиночные кадры
+    /// Show single frames too
     #[arg(long)]
     all: bool,
-    /// Пути, связи и разбор оценки
+    /// Paths, links and the score breakdown
     #[arg(long, short)]
     verbose: bool,
 }
 
 #[derive(Subcommand)]
 enum DerivedCmd {
-    /// Показать найденные бандлы
+    /// Show the bundles that were found
     List(ListArgs),
-    /// Перенести в карантин
+    /// Move to quarantine
     Clean(CleanArgs),
-    /// Удалить из карантина навсегда
+    /// Delete from quarantine, for good
     Purge(PurgeArgs),
-    /// Вернуть из карантина по записи журнала
+    /// Bring back from quarantine by journal entry
     Undo(UndoArgs),
 }
 
@@ -271,36 +271,36 @@ enum DerivedCmd {
 struct ListArgs {
     #[arg(long)]
     kind: Option<String>,
-    /// Минимальный размер, например 100M
+    /// Smallest size, for example 100M
     #[arg(long, value_parser = format::parse_size)]
     min_size: Option<i64>,
-    /// Показывать и заблокированные, и уже перенесённые
+    /// Show blocked and already-moved bundles too
     #[arg(long)]
     all: bool,
 }
 
 #[derive(Args)]
 struct CleanArgs {
-    /// Вид данных; можно повторять. По умолчанию lr-previews
+    /// Kind of data; repeatable. lr-previews by default
     #[arg(long = "kind")]
     kinds: Vec<String>,
     #[arg(long, value_parser = format::parse_size)]
     min_size: Option<i64>,
-    /// Только показать, что будет сделано
+    /// Only show what would be done
     #[arg(long)]
     dry_run: bool,
-    /// Подтверждение выполнения
+    /// Confirm and carry it out
     #[arg(long)]
     yes: bool,
-    /// Куда складывать карантин. По умолчанию <точка монтирования>/.photo-cleanup-quarantine.
-    /// Путь обязан быть на той же файловой системе, что и данные.
+    /// Where quarantine goes. By default, beside each file.
+    /// The path has to be on the same filesystem as the data.
     #[arg(long)]
     quarantine: Option<PathBuf>,
 }
 
 #[derive(Args)]
 struct PurgeArgs {
-    /// Удержание, например 7d
+    /// Holding period, for example 7d
     #[arg(long, default_value = "7d", value_parser = format::parse_duration)]
     older_than: i64,
     #[arg(long)]
@@ -350,7 +350,7 @@ fn main() -> Result<()> {
         Command::Derived(DerivedCmd::Purge(a)) => cmd_purge(&db, a),
         Command::Derived(DerivedCmd::Undo(a)) => {
             pc_apply::undo(&db, a.journal)?;
-            println!("Запись {} откачена.", a.journal);
+            println!("Entry {} rolled back.", a.journal);
             Ok(())
         }
         Command::Families(FamiliesCmd::Build(a)) => {
@@ -381,7 +381,7 @@ fn main() -> Result<()> {
         Command::Families(FamiliesCmd::List(a)) => {
             let fams = db.families(!a.all, a.limit, a.offset)?;
             if fams.is_empty() {
-                println!("Нечего показать. Сначала `families build`.");
+                println!("Nothing to show. Run `families build` first.");
                 return Ok(());
             }
             for f in &fams {
@@ -395,7 +395,7 @@ fn main() -> Result<()> {
             let addr: std::net::SocketAddr = a
                 .bind
                 .parse()
-                .with_context(|| format!("не разобрать адрес «{}»", a.bind))?;
+                .with_context(|| format!("cannot parse the address “{}”", a.bind))?;
             // The database is reopened inside the server, so release ours.
             drop(db);
             let rt = tokio::runtime::Runtime::new()?;
@@ -403,7 +403,7 @@ fn main() -> Result<()> {
         }
         Command::Categories(CategoriesCmd::Build) => {
             let r = pc_family::categories::build(&db)?;
-            println!("Классифицировано: {}", r.classified);
+            println!("Classified: {}", r.classified);
             for (label, n) in &r.by_category {
                 println!("  {label}: {n}");
             }
@@ -416,17 +416,17 @@ fn main() -> Result<()> {
         Command::Categories(CategoriesCmd::List) => {
             let rows = db.category_counts()?;
             if rows.is_empty() {
-                println!("Ничего не классифицировано. Сначала `categories build`.");
+                println!("Nothing classified. Run `categories build` first.");
                 return Ok(());
             }
             for c in rows {
                 let label = pc_family::categories::Category::parse(&c.category)
                     .map(|x| x.label())
-                    .unwrap_or("прочее");
+                    .unwrap_or("other");
                 println!(
                     "  {:<22} {:>8}  {:>10}",
                     label,
-                    pc_core::count_ru(c.count, "файл", "файла", "файлов"),
+                    pc_core::count_en(c.count, "file", "files"),
                     fmt_bytes(c.bytes as u64)
                 );
             }
@@ -435,7 +435,7 @@ fn main() -> Result<()> {
         Command::Categories(CategoriesCmd::Show(a)) => {
             let rows = db.files_in_category(&a.category, a.limit)?;
             if rows.is_empty() {
-                println!("В виде «{}» ничего нет.", a.category);
+                println!("Nothing of kind “{}”.", a.category);
                 return Ok(());
             }
             for f in rows {
@@ -454,7 +454,7 @@ fn main() -> Result<()> {
         }
         Command::Series(SeriesCmd::Build(a)) => {
             let r = pc_family::series::build(&db, a.gap)?;
-            println!("Серий: {}, кадров в них: {}.", r.series, r.frames);
+            println!("Bursts: {}, frames in them: {}.", r.series, r.frames);
             for (kind, n) in &r.by_kind {
                 println!("  {kind}: {n}");
             }
@@ -470,13 +470,13 @@ fn main() -> Result<()> {
         Command::Series(SeriesCmd::List(a)) => {
             let rows = db.series_list(a.limit, a.offset)?;
             if rows.is_empty() {
-                println!("Серий нет. Сначала `photo-cleanup series build`.");
+                println!("No bursts. Run `photo-cleanup series build` first.");
                 return Ok(());
             }
             for s in &rows {
                 pc_cli::families::print_series(s, a.verbose);
             }
-            println!("\nВсего серий: {}", db.series_count()?);
+            println!("\nBursts in total: {}", db.series_count()?);
             Ok(())
         }
         Command::Plan(a) => cmd_plan(&db, &a, None, false),
@@ -521,7 +521,7 @@ fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {
     };
     let bundles = db.list_bundles(&filter)?;
     if bundles.is_empty() {
-        println!("Ничего не найдено. Сначала выполните `photo-cleanup scan --root ...`.");
+        println!("Nothing found. Run `photo-cleanup scan --root ...` first.");
         return Ok(());
     }
     format::print_grouped(&bundles);
@@ -541,7 +541,7 @@ fn cmd_clean(db: &Db, a: CleanArgs) -> Result<()> {
     for k in &kinds {
         if !k.regenerable() {
             bail!(
-                "вид «{}» ({}) не подлежит удалению: регенерации нет",
+                "kind “{}” ({}) is never removed: nothing regenerates it",
                 k.as_str(),
                 k.label()
             );
@@ -560,37 +560,35 @@ fn cmd_clean(db: &Db, a: CleanArgs) -> Result<()> {
     }
 
     if selected.is_empty() {
-        println!("Под условия ничего не подходит.");
+        println!("Nothing matches those conditions.");
         return Ok(());
     }
 
     let files: i64 = selected.iter().map(|b| b.file_count).sum();
     let bytes: i64 = selected.iter().map(|b| b.size).sum();
     println!(
-        "К переносу в карантин: {}, {}, {}\n",
-        pc_core::count_ru(selected.len() as i64, "бандл", "бандла", "бандлов"),
-        pc_core::count_ru(files, "файл", "файла", "файлов"),
+        "To move to quarantine: {}, {}, {}\n",
+        pc_core::count_en(selected.len() as i64, "bundle", "bundles"),
+        pc_core::count_en(files, "file", "files"),
         fmt_bytes(bytes as u64)
     );
     format::print_grouped_opts(&selected, false);
 
     if a.dry_run {
-        println!("\n--dry-run: ничего не изменено.");
+        println!("\n--dry-run: nothing changed.");
         return Ok(());
     }
     if !a.yes {
-        println!("\nДля выполнения добавьте --yes.");
+        println!("\nAdd --yes to carry it out.");
         return Ok(());
     }
 
-    let run_id = db
-        .latest_run()?
-        .context("нет ни одного прогона, сначала выполните scan")?;
+    let run_id = db.latest_run()?.context("no runs yet; run scan first")?;
     let totals = pc_apply::quarantine_many(db, run_id, &selected, a.quarantine.as_deref())?;
 
-    println!("\nПеренесено: {}", totals.summary());
+    println!("\nMoved: {}", totals.summary());
     for s in &totals.skipped {
-        println!("  пропущено: {s}");
+        println!("  skipped: {s}");
     }
     println!(
         "\nМесто пока не освободилось — данные лежат в карантине.\n\
@@ -602,33 +600,33 @@ fn cmd_clean(db: &Db, a: CleanArgs) -> Result<()> {
 fn cmd_purge(db: &Db, a: PurgeArgs) -> Result<()> {
     let pending = db.journal_quarantined(Some(pc_core::time::now_unix() - a.older_than))?;
     if pending.is_empty() {
-        println!("Нечего удалять: в карантине нет записей старше указанного срока.");
+        println!("Nothing to delete: no quarantine entry is older than that.");
         return Ok(());
     }
     let files: i64 = pending.iter().map(|e| e.file_count).sum();
     let bytes: i64 = pending.iter().map(|e| e.size).sum();
 
     println!(
-        "Будет удалено безвозвратно: {}, {}, {}",
-        pc_core::count_ru(pending.len() as i64, "объект", "объекта", "объектов"),
-        pc_core::count_ru(files, "файл", "файла", "файлов"),
+        "Will be deleted irreversibly: {}, {}, {}",
+        pc_core::count_en(pending.len() as i64, "object", "objects"),
+        pc_core::count_en(files, "file", "files"),
         fmt_bytes(bytes as u64)
     );
     for e in pending.iter().take(10) {
         println!("  {}", e.dst.as_deref().unwrap_or(&e.src));
     }
     if pending.len() > 10 {
-        println!("  … и ещё {}", pending.len() - 10);
+        println!("  … and {} more", pending.len() - 10);
     }
 
     if !a.yes {
-        println!("\nЭто необратимо. Для выполнения добавьте --yes.");
+        println!("\nThis cannot be undone. Add --yes to carry it out.");
         return Ok(());
     }
     let totals = pc_apply::purge(db, a.older_than)?;
-    println!("\nУдалено: {}", totals.summary());
+    println!("\nDeleted: {}", totals.summary());
     for s in &totals.skipped {
-        println!("  пропущено: {s}");
+        println!("  skipped: {s}");
     }
     Ok(())
 }
@@ -638,20 +636,20 @@ fn print_index_breakdown(db: &Db) -> Result<()> {
     if rows.is_empty() {
         return Ok(());
     }
-    println!("\nПо контейнерам:");
+    println!("\nBy container:");
     for (name, count, bytes) in rows {
         println!(
             "  {:<16} {:>8}  {:>10}",
             name,
-            pc_core::count_ru(count, "файл", "файла", "файлов"),
+            pc_core::count_en(count, "file", "files"),
             fmt_bytes(bytes as u64)
         );
     }
     let lied = db.mislabelled_count()?;
     if lied > 0 {
         println!(
-            "\n{} — расширение не совпало с содержимым.",
-            pc_core::count_ru(lied, "файл", "файла", "файлов")
+            "\n{} — the extension disagreed with the contents.",
+            pc_core::count_en(lied, "file", "files")
         );
     }
     Ok(())
@@ -678,7 +676,7 @@ fn build_policy(a: &PolicyArgs) -> Result<pc_family::Policy> {
             .collect::<Result<_>>()?;
     }
     if p.remove_roles.contains(&pc_family::Role::Original) {
-        bail!("роль original удалять нельзя: это сам снимок");
+        bail!("the original role is never removed: it is the photograph itself");
     }
     Ok(p)
 }
@@ -694,21 +692,21 @@ fn cmd_plan(
 
     let roles: Vec<&str> = policy.remove_roles.iter().map(|r| r.as_str()).collect();
     println!(
-        "Политика: удаляются роли [{}]{}\n",
+        "Policy: removing roles [{}]{}\n",
         roles.join(", "),
         if policy.respect_lightroom {
-            ", файлы из каталогов Lightroom защищены"
+            ", files in Lightroom catalogues are protected"
         } else {
-            ", ЗАЩИТА LIGHTROOM СНЯТА"
+            ", LIGHTROOM PROTECTION LIFTED"
         }
     );
 
     if plan.candidates.is_empty() {
-        println!("Под политику ничего не подпадает.");
+        println!("Nothing falls under that policy.");
     } else {
         println!(
-            "К переносу: {}, {}\n",
-            pc_core::count_ru(plan.candidates.len() as i64, "файл", "файла", "файлов"),
+            "To move: {}, {}\n",
+            pc_core::count_en(plan.candidates.len() as i64, "file", "files"),
             fmt_bytes(plan.bytes() as u64)
         );
         for c in plan.candidates.iter().take(15) {
@@ -716,14 +714,14 @@ fn cmd_plan(
             println!("              {}", c.reason);
         }
         if plan.candidates.len() > 15 {
-            println!("  … и ещё {}", plan.candidates.len() - 15);
+            println!("  … and {} more", plan.candidates.len() - 15);
         }
     }
 
     if !plan.refusals.is_empty() {
         println!(
-            "\nЗащищено от переноса: {}",
-            pc_core::count_ru(plan.refusals.len() as i64, "файл", "файла", "файлов")
+            "\nProtected from moving: {}",
+            pc_core::count_en(plan.refusals.len() as i64, "file", "files")
         );
         let show = if args.show_refusals {
             plan.refusals.len()
@@ -734,25 +732,28 @@ fn cmd_plan(
             println!("  {} — {}", r.path, r.why);
         }
         if plan.refusals.len() > show {
-            println!("  … и ещё {} (--show-refusals)", plan.refusals.len() - show);
+            println!(
+                "  … and {} more (--show-refusals)",
+                plan.refusals.len() - show
+            );
         }
     }
 
     if !execute {
         if !plan.candidates.is_empty() {
-            println!("\nДля выполнения: photo-cleanup apply --yes");
+            println!("\nTo carry it out: photo-cleanup apply --yes");
         }
         return Ok(());
     }
 
     let run_id = db
         .latest_run()?
-        .context("нет ни одного прогона, сначала выполните scan или index")?;
-    println!("\nПроверяю каждый файл перед переносом…");
+        .context("no runs yet; run scan or index first")?;
+    println!("\nChecking every file before it moves…");
     let report = pc_apply::apply(db, run_id, &plan.candidates, quarantine)?;
-    println!("Перенесено: {}", report.totals.summary());
+    println!("Moved: {}", report.totals.summary());
     for (path, why) in &report.refused {
-        println!("  отказано: {path} — {why}");
+        println!("  refused: {path} — {why}");
     }
     println!(
         "\nМесто пока не освободилось — файлы в карантине.\n\
@@ -774,7 +775,7 @@ fn refuse_until_deduplicated(db: &Db) -> Result<()> {
          Реорганизация до дедупа разложит по новому дереву и копии тоже.\n\
          Выполните `photo-cleanup plan`, затем `apply --yes` — либо, если так и задумано, \
          добавьте --allow-duplicates.",
-        pc_core::count_ru(dup.candidates.len() as i64, "файл", "файла", "файлов"),
+        pc_core::count_en(dup.candidates.len() as i64, "file", "files"),
         fmt_bytes(dup.bytes() as u64)
     )
 }
@@ -800,22 +801,22 @@ fn cmd_organize(db: &Db, a: &OrganizeArgs, execute: bool) -> Result<()> {
     let plan = pc_organize::compute(db, &opts)?;
 
     println!(
-        "Дерево: {}\nСобытие — разрыв съёмки больше {} ч.{}\n",
+        "Tree: {}\nAn event is a gap of more than {} h.{}\n",
         a.root.display(),
         a.gap as f64 / 3600.0,
         if opts.respect_lightroom {
-            " Файлы из каталогов Lightroom не трогаем."
+            " Files in Lightroom catalogues are left alone."
         } else {
-            " ЗАЩИТА LIGHTROOM СНЯТА: ссылки в каталогах разорвутся."
+            " LIGHTROOM PROTECTION LIFTED: catalogue links will break."
         }
     );
 
     if plan.moves.is_empty() {
-        println!("Переносить нечего.");
+        println!("Nothing to move.");
         if plan.already_placed > 0 {
             println!(
-                "  {} уже лежат там, где нужно.",
-                pc_core::count_ru(plan.already_placed as i64, "файл", "файла", "файлов")
+                "  {} are already where they belong.",
+                pc_core::count_en(plan.already_placed as i64, "file", "files")
             );
         }
         print_refusals(&plan);
@@ -823,23 +824,23 @@ fn cmd_organize(db: &Db, a: &OrganizeArgs, execute: bool) -> Result<()> {
     }
 
     println!(
-        "К переносу: {}, {}\nСобытий: {}{}{}",
-        pc_core::count_ru(plan.moves.len() as i64, "файл", "файла", "файлов"),
+        "To move: {}, {}\nEvents: {}{}{}",
+        pc_core::count_en(plan.moves.len() as i64, "file", "files"),
         fmt_bytes(plan.bytes() as u64),
         plan.events,
         if plan.already_placed > 0 {
-            format!("; уже на месте: {}", plan.already_placed)
+            format!("; already in place: {}", plan.already_placed)
         } else {
             String::new()
         },
         if plan.renamed > 0 {
-            format!("; переименований из-за совпадения имён: {}", plan.renamed)
+            format!("; renamed because of name clashes: {}", plan.renamed)
         } else {
             String::new()
         }
     );
 
-    println!("\nОткуда взята дата:");
+    println!("\nWhere the date came from:");
     for (source, n) in &plan.by_source {
         println!("  {:<18} {:>8}", source.label(), n);
     }
@@ -848,57 +849,55 @@ fn cmd_organize(db: &Db, a: &OrganizeArgs, execute: bool) -> Result<()> {
             "\n{} датированы не по съёмке: имя файла, путь или mtime.\n\
              Те, чья дата известна лишь до месяца или года, лежат отдельной папкой,\n\
              а не притворяются конкретным днём. Исключить их совсем: --skip-uncertain",
-            pc_core::count_ru(plan.uncertain as i64, "файл", "файла", "файлов")
+            pc_core::count_en(plan.uncertain as i64, "file", "files")
         );
     }
 
-    println!("\nПримеры переносов:");
+    println!("\nExample moves:");
     for m in plan.moves.iter().take(a.limit) {
         println!("  {:<44} ← {}", rel_to(&m.dst, &a.root), m.src);
         if let Some(old) = &m.renamed_from {
-            println!("      имя занято, было {old}");
+            println!("      name taken, was {old}");
         }
     }
     if plan.moves.len() > a.limit {
-        println!("  … и ещё {}", plan.moves.len() - a.limit);
+        println!("  … and {} more", plan.moves.len() - a.limit);
     }
     print_refusals(&plan);
 
     if !execute {
         println!(
-            "\nНичего не изменено. Для выполнения: \n  photo-cleanup organize apply --root {} --yes",
+            "\nNothing changed. To carry it out: \n  photo-cleanup organize apply --root {} --yes",
             a.root.display()
         );
         return Ok(());
     }
 
-    let run_id = db
-        .latest_run()?
-        .context("нет ни одного прогона, сначала выполните scan")?;
+    let run_id = db.latest_run()?.context("no runs yet; run scan first")?;
     let report = pc_apply::organize(db, run_id, &plan.moves)?;
 
     println!(
-        "\nПеренесено: {}, {}{}{}",
-        pc_core::count_ru(report.moved as i64, "файл", "файла", "файлов"),
+        "\nMoved: {}, {}{}{}",
+        pc_core::count_en(report.moved as i64, "file", "files"),
         fmt_bytes(report.bytes),
         if report.sidecars > 0 {
-            format!(", спутников {}", report.sidecars)
+            format!(", companions {}", report.sidecars)
         } else {
             String::new()
         },
         if report.pruned_dirs > 0 {
-            format!(", опустевших каталогов убрано {}", report.pruned_dirs)
+            format!(", emptied directories removed {}", report.pruned_dirs)
         } else {
             String::new()
         }
     );
     for (path, why) in report.refused.iter().take(10) {
-        println!("  не перенесён {path} — {why}");
+        println!("  not moved: {path} — {why}");
     }
     if report.refused.len() > 10 {
-        println!("  … и ещё {}", report.refused.len() - 10);
+        println!("  … and {} more", report.refused.len() - 10);
     }
-    println!("\nВернуть всё обратно: photo-cleanup organize undo --run {run_id} --yes");
+    println!("\nTo put it all back: photo-cleanup organize undo --run {run_id} --yes");
     Ok(())
 }
 
@@ -907,8 +906,8 @@ fn print_refusals(plan: &pc_organize::Plan) {
         return;
     }
     println!(
-        "\nНе трогаем {}:",
-        pc_core::count_ru(plan.refusals.len() as i64, "файл", "файла", "файлов")
+        "\nLeaving {} alone:",
+        pc_core::count_en(plan.refusals.len() as i64, "file", "files")
     );
     let mut by_reason: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for r in &plan.refusals {
@@ -929,7 +928,7 @@ fn cmd_organize_undo(db: &Db, a: &OrganizeUndoArgs) -> Result<()> {
         None => runs
             .first()
             .map(|(id, ..)| *id)
-            .context("ни один прогон ничего не раскладывал")?,
+            .context("no run has sorted anything")?,
     };
     let moved = runs
         .iter()
@@ -938,20 +937,20 @@ fn cmd_organize_undo(db: &Db, a: &OrganizeUndoArgs) -> Result<()> {
         .unwrap_or(0);
 
     println!(
-        "Прогон {run_id}: {} вернутся туда, откуда были взяты.",
-        pc_core::count_ru(moved, "файл", "файла", "файлов")
+        "Run {run_id}: {} will go back where they came from.",
+        pc_core::count_en(moved, "file", "files")
     );
     if !a.yes {
-        println!("Для выполнения добавьте --yes.");
+        println!("Add --yes to carry it out.");
         return Ok(());
     }
     let (back, failed) = pc_apply::undo_run(db, run_id)?;
-    println!("Возвращено: {back}.");
+    println!("Restored: {back}.");
     for f in failed.iter().take(10) {
-        println!("  не удалось: {f}");
+        println!("  failed: {f}");
     }
     if failed.len() > 10 {
-        println!("  … и ещё {}", failed.len() - 10);
+        println!("  … and {} more", failed.len() - 10);
     }
     Ok(())
 }
@@ -959,13 +958,13 @@ fn cmd_organize_undo(db: &Db, a: &OrganizeUndoArgs) -> Result<()> {
 fn cmd_organize_runs(db: &Db) -> Result<()> {
     let runs = db.organize_runs()?;
     if runs.is_empty() {
-        println!("Ничего ещё не раскладывалось.");
+        println!("Nothing has been sorted yet.");
         return Ok(());
     }
     for (id, n, at) in runs {
         println!(
-            "  прогон {id:<4} {:>8}  {}",
-            pc_core::count_ru(n, "файл", "файла", "файлов"),
+            "  run {id:<4} {:>8}  {}",
+            pc_core::count_en(n, "file", "files"),
             pc_core::time::fmt_datetime_ru(at)
         );
     }
@@ -983,14 +982,14 @@ fn cmd_status(db: &Db) -> Result<()> {
 
     let sum = |v: &[&&pc_db::Bundle]| -> u64 { v.iter().map(|b| b.size as u64).sum() };
 
-    println!("Бандлов в описи:     {}", all.len());
+    println!("Bundles in the inventory: {}", all.len());
     println!(
-        "  можно перенести:   {:>4}  {}",
+        "  can be moved:          {:>4}  {}",
         removable.len(),
         fmt_bytes(sum(&removable))
     );
     println!(
-        "  заблокировано:     {:>4}  {}",
+        "  blocked:               {:>4}  {}",
         blocked.len(),
         fmt_bytes(sum(&blocked))
     );
@@ -998,17 +997,17 @@ fn cmd_status(db: &Db) -> Result<()> {
     let idx = db.index_stats()?;
     if idx.total > 0 {
         println!(
-            "\nВ индексе файлов:    {}\n  изображений:       {:>4}\n  пропущено:         {:>4}",
+            "\nFiles in the index:      {}\n  images:                {:>4}\n  skipped:               {:>4}",
             idx.total, idx.images, idx.skipped
         );
     }
 
     let q = pc_apply::quarantined_totals(db)?;
-    println!("\nВ карантине:         {}", q.summary());
+    println!("\nIn quarantine:           {}", q.summary());
     let pend = db.journal_pending()?;
     if !pend.is_empty() {
         println!(
-            "\nВНИМАНИЕ: {} незавершённых записей журнала — прогон был прерван.",
+            "\nWARNING: {} unfinished journal entries — a run was interrupted.",
             pend.len()
         );
         for e in pend.iter().take(5) {
@@ -1021,22 +1020,22 @@ fn cmd_status(db: &Db) -> Result<()> {
 fn cmd_catalogs(db: &Db) -> Result<()> {
     let cats = db.all_catalogs()?;
     if cats.is_empty() {
-        println!("Каталоги Lightroom не найдены.");
+        println!("No Lightroom catalogues found.");
         return Ok(());
     }
     for c in &cats {
         let mut tags = Vec::new();
         if c.is_backup {
-            tags.push("бэкап".to_string());
+            tags.push("backup".to_string());
         }
         if c.is_locked {
-            tags.push("ОТКРЫТ В LIGHTROOM".to_string());
+            tags.push("OPEN IN LIGHTROOM".to_string());
         }
         if let Some(n) = c.image_count {
-            tags.push(pc_core::count_ru(n, "файл", "файла", "файлов"));
+            tags.push(pc_core::count_en(n, "file", "files"));
         }
         if let Some(e) = &c.read_error {
-            tags.push(format!("ошибка чтения: {e}"));
+            tags.push(format!("read error: {e}"));
         }
         let suffix = if tags.is_empty() {
             String::new()

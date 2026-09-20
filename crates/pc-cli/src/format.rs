@@ -15,9 +15,9 @@ pub fn parse_size(s: &str) -> Result<i64> {
     let v: f64 = num
         .trim()
         .parse()
-        .map_err(|_| anyhow::anyhow!("не разобрать размер «{s}» (примеры: 100M, 1.5G, 4096)"))?;
+        .map_err(|_| anyhow::anyhow!("cannot parse the size “{s}” (examples: 100M, 1.5G, 4096)"))?;
     if v < 0.0 {
-        bail!("размер не может быть отрицательным");
+        bail!("a size cannot be negative");
     }
     Ok((v * mult as f64) as i64)
 }
@@ -34,7 +34,7 @@ pub fn parse_duration(s: &str) -> Result<i64> {
     let v: f64 = num
         .trim()
         .parse()
-        .map_err(|_| anyhow::anyhow!("не разобрать срок «{s}» (примеры: 7d, 24h, 30m)"))?;
+        .map_err(|_| anyhow::anyhow!("cannot parse the period “{s}” (examples: 7d, 24h, 30m)"))?;
     Ok((v * mult as f64) as i64)
 }
 
@@ -77,9 +77,9 @@ pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
         grand_removable += removable;
 
         let header = if kind.regenerable() {
-            format!("{}  —  вернётся {}", kind.label(), fmt_bytes(removable))
+            format!("{}  —  returns {}", kind.label(), fmt_bytes(removable))
         } else {
-            format!("{}  —  НЕ УДАЛЯЕТСЯ", kind.label())
+            format!("{}  —  NEVER REMOVED", kind.label())
         };
         println!(
             "\n{}\n{}",
@@ -93,7 +93,7 @@ pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
             let size: i64 = items.iter().map(|b| b.size).sum();
             println!(
                 "  {:>16}   {:>10}   .DS_Store, ._*, Thumbs.db, @eaDir, .thumbnails",
-                pc_core::count_ru(files, "файл", "файла", "файлов"),
+                pc_core::count(files, ["файл", "файла", "файлов"], ["file", "files"]),
                 fmt_bytes(size as u64)
             );
             continue;
@@ -111,7 +111,7 @@ pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
             let line = format!(
                 "  {mark} {:<58} {:>13} {:>10}  {}",
                 truncate(&name, 58),
-                pc_core::count_ru(b.file_count, "файл", "файла", "файлов"),
+                pc_core::count(b.file_count, ["файл", "файла", "файлов"], ["file", "files"]),
                 fmt_bytes(b.size as u64),
                 b.rebuild_cost_hint.as_deref().unwrap_or("")
             );
@@ -120,7 +120,7 @@ pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
                 println!("      └─ {detail}");
             }
             if b.state == BundleState::Quarantined {
-                println!("      └─ в карантине");
+                println!("      └─ in quarantine");
             }
         }
     }
@@ -162,7 +162,7 @@ mod tests {
         assert_eq!(parse_size("4096").unwrap(), 4096);
         assert_eq!(parse_size("100M").unwrap(), 100 * 1024 * 1024);
         assert_eq!(parse_size("1.5G").unwrap(), (1.5 * 1073741824.0) as i64);
-        assert!(parse_size("сто").is_err());
+        assert!(parse_size("one hundred").is_err());
     }
 
     #[test]

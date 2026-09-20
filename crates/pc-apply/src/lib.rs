@@ -137,7 +137,7 @@ pub fn quarantine_dest_for(
     let disk = map.resolve(&src)?;
     let rel = disk.relative(&src);
     match override_root {
-        None => unreachable!("обработано выше"),
+        None => unreachable!("handled above"),
         Some(root) => {
             let dev = pc_core::dev_of_nearest_existing(root)?;
             if dev != disk.dev {
@@ -219,8 +219,9 @@ pub(crate) fn rename_with_parents(src: &Path, dst: &Path) -> Result<()> {
         );
     }
     fs::rename(src, dst).with_context(|| {
-        format!(
-            "не переместить {} -> {} (перенос обязан быть в пределах одного диска)",
+        pc_core::tf!(
+            "не переместить {0} -> {1} (перенос обязан быть в пределах одного диска)",
+            "cannot move {0} -> {1} (a move has to stay within one disk)",
             src.display(),
             dst.display()
         )
@@ -236,13 +237,20 @@ pub fn quarantine(
 ) -> Result<Outcome> {
     if !b.regenerable {
         bail!(
-            "{} относится к виду «{}», удаление запрещено",
-            b.path,
-            b.kind.label()
+            "{}",
+            pc_core::tf!(
+                "{0} относится к виду «{1}», удаление запрещено",
+                "{0} is of kind “{1}”, which is never removed",
+                b.path,
+                b.kind.label()
+            )
         );
     }
     if let Some(code) = &b.blocked_code {
-        bail!("{} заблокирован: {code}", b.path);
+        bail!(
+            "{}",
+            pc_core::tf!("{0} заблокирован: {1}", "{0} is blocked: {1}", b.path, code)
+        );
     }
     if b.state != BundleState::Present {
         return Ok(Outcome::Skipped);
@@ -290,9 +298,11 @@ pub fn quarantine_many(
                 t.files += b.file_count as u64;
                 t.bytes += b.size as u64;
             }
-            Ok(Outcome::Skipped) => t
-                .skipped
-                .push(format!("{} — изменился с момента сканирования", b.path)),
+            Ok(Outcome::Skipped) => t.skipped.push(pc_core::tf!(
+                "{0} — изменился с момента сканирования",
+                "{0} — changed since the scan",
+                b.path
+            )),
             Err(e) => t.skipped.push(format!("{} — {e}", b.path)),
         }
     }
@@ -301,16 +311,24 @@ pub fn quarantine_many(
 
 /// Move a quarantined bundle back where it came from.
 pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
-    let entry = db
-        .journal_entry(journal_id)?
-        .with_context(|| format!("нет записи журнала {journal_id}"))?;
+    let entry = db.journal_entry(journal_id)?.with_context(|| {
+        pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
+    })?;
     if entry.status != JournalStatus::Done {
         bail!(
-            "запись {journal_id} в состоянии «{}», откат невозможен",
-            entry.status.as_str()
+            "{}",
+            pc_core::tf!(
+                "запись {0} в состоянии «{1}», откат невозможен",
+                "entry {0} is “{1}”; it cannot be undone",
+                journal_id,
+                entry.status.as_str()
+            )
         );
     }
-    let dst = entry.dst.clone().context("в записи нет пути назначения")?;
+    let dst = entry.dst.clone().context(pc_core::tr!(
+        "в записи нет пути назначения",
+        "the entry has no destination path"
+    ))?;
     let dst_path = PathBuf::from(&dst);
     let src_path = PathBuf::from(&entry.src);
     let sidecars = files::companions(&dst_path);
@@ -382,12 +400,25 @@ pub fn purge_entry(db: &Db, id: i64) -> Result<()> {
 /// A partially purged entry is left pending: it must never be offered as
 /// intact, undoable quarantine after a cancellation or server restart.
 pub fn purge_entry_controlled(db: &Db, id: i64, control: &pc_core::work::Control) -> Result<()> {
-    let e = db.journal_entry(id)?.context("нет записи карантина")?;
+    let e = db.journal_entry(id)?.context(pc_core::tr!(
+        "нет записи карантина",
+        "no such quarantine entry"
+    ))?;
     if e.status != JournalStatus::Done || !matches!(e.op.as_str(), "quarantine" | "quarantine-file")
     {
-        bail!("запись {} не находится в карантине", id);
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "запись {0} не находится в карантине",
+                "entry {0} is not in quarantine",
+                id
+            )
+        );
     }
-    let dst = e.dst.as_deref().context("в записи нет пути назначения")?;
+    let dst = e.dst.as_deref().context(pc_core::tr!(
+        "в записи нет пути назначения",
+        "the entry has no destination path"
+    ))?;
     let path = Path::new(dst);
     control.check()?;
     db.journal_finish(
@@ -413,16 +444,23 @@ fn remove_controlled(path: &Path, control: &pc_core::work::Control) -> Result<()
     control.current(&path.display().to_string())?;
     match fs::symlink_metadata(path) {
         Ok(md) if md.is_dir() => {
-            for entry in
-                fs::read_dir(path).with_context(|| format!("не прочитать {}", path.display()))?
-            {
+            for entry in fs::read_dir(path).with_context(|| {
+                pc_core::tf!("не прочитать {0}", "cannot read {0}", path.display())
+            })? {
                 remove_controlled(&entry?.path(), control)?;
             }
-            fs::remove_dir(path).with_context(|| format!("не удалить {}", path.display()))?;
+            fs::remove_dir(path).with_context(|| {
+                pc_core::tf!("не удалить {0}", "cannot remove {0}", path.display())
+            })?;
         }
-        Ok(_) => fs::remove_file(path).with_context(|| format!("не удалить {}", path.display()))?,
+        Ok(_) => fs::remove_file(path)
+            .with_context(|| pc_core::tf!("не удалить {0}", "cannot remove {0}", path.display()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e).with_context(|| format!("не прочитать {}", path.display())),
+        Err(e) => {
+            return Err(e).with_context(|| {
+                pc_core::tf!("не прочитать {0}", "cannot read {0}", path.display())
+            })
+        }
     }
     Ok(())
 }

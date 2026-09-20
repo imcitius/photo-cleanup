@@ -94,7 +94,7 @@ impl Fixture {
         p
     }
     async fn apply(&self, p: &Value) -> Value {
-        let(s,v)=self.req("POST","/api/jobs",json!({"kind":p["kind"],"params":p["params"],"plan_token":p["token"],"confirmation":"УДАЛИТЬ"})).await;
+        let(s,v)=self.req("POST","/api/jobs",json!({"kind":p["kind"],"params":p["params"],"plan_token":p["token"],"confirmation":"DELETE"})).await;
         assert_eq!(s, 202, "{v}");
         self.wait(v["job_id"].as_i64().unwrap()).await
     }
@@ -171,7 +171,7 @@ async fn reviewed_derived_cycle_undo_and_purge_and_stale_plan() {
     f.scan().await;
     let j = f.apply(&old).await;
     assert_eq!(j["state"], "failed");
-    assert!(j["error"].as_str().unwrap().contains("План изменился"));
+    assert!(j["error"].as_str().unwrap().contains("plan has changed"));
     assert!(f.archive.join("First Previews.lrdata").exists());
     let plan = f.preview("derived-clean", params.clone()).await;
     assert_eq!(plan["items"].as_array().unwrap().len(), 2);
@@ -373,9 +373,9 @@ async fn a_reset_needs_the_word_and_leaves_the_archive_and_the_journal_alone() {
 
     let (s, v) = f.req("POST", "/api/reset", json!({})).await;
     assert_eq!(s, 400, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("СБРОСИТЬ"));
+    assert!(v["error"].as_str().unwrap().contains("RESET"));
     let (s, v) = f
-        .req("POST", "/api/reset", json!({"confirmation":"сбросить"}))
+        .req("POST", "/api/reset", json!({"confirmation":"reset"}))
         .await;
     assert_eq!(s, 400, "{v}");
 
@@ -383,7 +383,7 @@ async fn a_reset_needs_the_word_and_leaves_the_archive_and_the_journal_alone() {
     assert!(!before.as_array().unwrap().is_empty());
 
     let (s, v) = f
-        .req("POST", "/api/reset", json!({"confirmation":"СБРОСИТЬ"}))
+        .req("POST", "/api/reset", json!({"confirmation":"RESET"}))
         .await;
     assert_eq!(s, 200, "{v}");
 
@@ -407,7 +407,7 @@ async fn a_reset_is_refused_while_a_job_holds_the_writer() {
     let f = Fixture::new();
     *f.state.jobs.active.lock().unwrap() = Some((7, pc_core::work::Control::default()));
     let (s, v) = f
-        .req("POST", "/api/reset", json!({"confirmation":"СБРОСИТЬ"}))
+        .req("POST", "/api/reset", json!({"confirmation":"RESET"}))
         .await;
     assert_eq!(s, 409, "{v}");
     assert!(v["error"].as_str().unwrap().contains("7"));

@@ -917,6 +917,7 @@ name = "pc-lightroom"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pc-core",
  "rusqlite",
  "tempfile",
  "tracing",

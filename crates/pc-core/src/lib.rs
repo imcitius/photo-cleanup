@@ -225,6 +225,12 @@ pub fn count_ru(n: i64, one: &'static str, few: &'static str, many: &'static str
     format!("{n} {}", plural_ru(n, one, few, many))
 }
 
+/// `1 file` / `5 files` — for output that is English regardless, such as the
+/// command line.
+pub fn count_en(n: i64, one: &'static str, many: &'static str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// A counted noun in whichever language is running.
 ///
 /// Russian needs three forms and English two, so they are passed as arrays

@@ -31,16 +31,34 @@ fn table_exists(conn: &Connection, name: &str) -> bool {
 impl CatalogReader {
     pub fn open(catalog: &Path) -> Result<Self> {
         if !catalog.is_file() {
-            bail!("каталог не найден: {}", catalog.display());
+            bail!(
+                "{}",
+                pc_core::tf!(
+                    "каталог не найден: {0}",
+                    "catalogue not found: {0}",
+                    catalog.display()
+                )
+            );
         }
-        let tmp = tempfile::tempdir().context("не удалось создать временный каталог")?;
+        let tmp = tempfile::tempdir().context(pc_core::tr!(
+            "не удалось создать временный каталог",
+            "could not create a temporary directory"
+        ))?;
         let name = catalog
             .file_name()
-            .context("путь без имени файла")?
+            .context(pc_core::tr!(
+                "путь без имени файла",
+                "the path has no file name"
+            ))?
             .to_owned();
         let dst = tmp.path().join(&name);
-        std::fs::copy(catalog, &dst)
-            .with_context(|| format!("не удалось скопировать {}", catalog.display()))?;
+        std::fs::copy(catalog, &dst).with_context(|| {
+            pc_core::tf!(
+                "не удалось скопировать {0}",
+                "could not copy {0}",
+                catalog.display()
+            )
+        })?;
 
         // Copy the sidecars too when present, so the copy is self-consistent.
         for suffix in ["-wal", "-shm", "-journal"] {
@@ -54,8 +72,13 @@ impl CatalogReader {
             }
         }
 
-        let conn = Connection::open(&dst)
-            .with_context(|| format!("не удалось открыть копию каталога {}", dst.display()))?;
+        let conn = Connection::open(&dst).with_context(|| {
+            pc_core::tf!(
+                "не удалось открыть копию каталога {0}",
+                "could not open the catalogue copy {0}",
+                dst.display()
+            )
+        })?;
         Ok(Self { conn, _tmp: tmp })
     }
 
@@ -63,7 +86,13 @@ impl CatalogReader {
     /// rebuild-cost hint and as the denominator of the smart-preview gate.
     pub fn file_count(&self) -> Result<i64> {
         if !table_exists(&self.conn, "AgLibraryFile") {
-            bail!("нет таблицы AgLibraryFile (незнакомая версия схемы)");
+            bail!(
+                "{}",
+                pc_core::tr!(
+                    "нет таблицы AgLibraryFile (незнакомая версия схемы)",
+                    "no AgLibraryFile table (unfamiliar schema version)"
+                )
+            );
         }
         Ok(self
             .conn
@@ -79,7 +108,14 @@ impl CatalogReader {
     pub fn entries(&self) -> Result<Vec<CatalogEntry>> {
         for t in ["AgLibraryFile", "AgLibraryFolder", "AgLibraryRootFolder"] {
             if !table_exists(&self.conn, t) {
-                bail!("нет таблицы {t} (незнакомая версия схемы)");
+                bail!(
+                    "{}",
+                    pc_core::tf!(
+                        "нет таблицы {0} (незнакомая версия схемы)",
+                        "no {0} table (unfamiliar schema version)",
+                        t
+                    )
+                );
             }
         }
         // Ratings live in a table that has moved between versions, so the
@@ -119,7 +155,14 @@ impl CatalogReader {
     pub fn original_paths(&self) -> Result<Vec<String>> {
         for t in ["AgLibraryFile", "AgLibraryFolder", "AgLibraryRootFolder"] {
             if !table_exists(&self.conn, t) {
-                bail!("нет таблицы {t} (незнакомая версия схемы)");
+                bail!(
+                    "{}",
+                    pc_core::tf!(
+                        "нет таблицы {0} (незнакомая версия схемы)",
+                        "no {0} table (unfamiliar schema version)",
+                        t
+                    )
+                );
             }
         }
         let mut st = self.conn.prepare(

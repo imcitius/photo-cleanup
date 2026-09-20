@@ -62,27 +62,56 @@ pub fn validate(r: &Request) -> Result<()> {
             | "organize-undo"
             | "journal-undo"
     ) {
-        bail!("Неизвестная операция: {}", r.kind);
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "Неизвестная операция: {0}",
+                "Unknown operation: {0}",
+                r.kind
+            )
+        );
     }
     if !r.params.is_object() {
-        bail!("Параметры должны быть объектом");
+        bail!(
+            "{}",
+            pc_core::tr!(
+                "Параметры должны быть объектом",
+                "Parameters have to be an object"
+            )
+        );
     }
     if matches!(r.kind.as_str(), "scan" | "index" | "all") {
         let roots = strings(&r.params, "roots");
         if roots.is_empty() {
-            bail!("Выберите хотя бы один корень архива");
+            bail!(
+                "{}",
+                pc_core::tr!(
+                    "Выберите хотя бы один корень архива",
+                    "Choose at least one archive root"
+                )
+            );
         }
         let mut seen = Vec::<PathBuf>::new();
         for root in roots {
             let path = checked_dir(&root)?;
             if path.starts_with("/mnt/user") {
-                bail!("{root}: укажите /mnt/diskN, а не /mnt/user");
+                bail!(
+                    "{}",
+                    pc_core::tf!(
+                        "{0}: укажите /mnt/diskN, а не /mnt/user",
+                        "{0}: use /mnt/diskN, not /mnt/user",
+                        root
+                    )
+                );
             }
             if seen
                 .iter()
                 .any(|p| path.starts_with(p) || p.starts_with(&path))
             {
-                bail!("{root}: корни пересекаются");
+                bail!(
+                    "{}",
+                    pc_core::tf!("{0}: корни пересекаются", "{0}: the roots overlap", root)
+                );
             }
             seen.push(path);
         }
@@ -97,13 +126,22 @@ pub fn validate(r: &Request) -> Result<()> {
     ] {
         if let Some(v) = r.params.get(key) {
             if !v.as_i64().is_some_and(|n| n >= min && n <= max) {
-                bail!("Некорректное значение {key}");
+                bail!(
+                    "{}",
+                    pc_core::tf!("Некорректное значение {0}", "Invalid value for {0}", key)
+                );
             }
         }
     }
     if let Some(v) = r.params.get("ssim_min") {
         if !v.as_f64().is_some_and(|n| (0.0..=1.0).contains(&n)) {
-            bail!("SSIM должен быть от 0 до 1");
+            bail!(
+                "{}",
+                pc_core::tr!(
+                    "SSIM должен быть от 0 до 1",
+                    "SSIM has to be between 0 and 1"
+                )
+            );
         }
     }
     Ok(())
@@ -111,16 +149,30 @@ pub fn validate(r: &Request) -> Result<()> {
 pub fn checked_dir(path: &str) -> Result<PathBuf> {
     let path = FsPath::new(path);
     if !path.is_absolute() {
-        bail!("{}: нужен абсолютный путь", path.display());
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "{0}: нужен абсолютный путь",
+                "{0}: an absolute path is required",
+                path.display()
+            )
+        );
     }
     let mut cur = PathBuf::new();
     for part in path.components() {
         if matches!(part, std::path::Component::ParentDir) {
-            bail!("{}: переход через .. запрещён", path.display());
+            bail!(
+                "{}",
+                pc_core::tf!(
+                    "{0}: переход через .. запрещён",
+                    "{0}: going up through .. is refused",
+                    path.display()
+                )
+            );
         }
         cur.push(part);
         let md = std::fs::symlink_metadata(&cur)
-            .with_context(|| format!("не прочитать {}", cur.display()))?;
+            .with_context(|| pc_core::tf!("не прочитать {0}", "cannot read {0}", cur.display()))?;
         if md.file_type().is_symlink() {
             bail!(
                 "{}: переход по символической ссылке запрещён",
@@ -129,7 +181,14 @@ pub fn checked_dir(path: &str) -> Result<PathBuf> {
         }
     }
     if !path.is_dir() {
-        bail!("{}: это не каталог", path.display());
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "{0}: это не каталог",
+                "{0}: not a directory",
+                path.display()
+            )
+        );
     }
     Ok(path.canonicalize()?)
 }
@@ -141,8 +200,8 @@ pub async fn fs(
         let path = checked_dir(q.get("path").map(String::as_str).unwrap_or("/"))?;
         let mount = pc_core::disk::mount_root(&path)?;
         let mut dirs = Vec::new();
-        for entry in
-            std::fs::read_dir(&path).with_context(|| format!("не открыть {}", path.display()))?
+        for entry in std::fs::read_dir(&path)
+            .with_context(|| pc_core::tf!("не открыть {0}", "cannot open {0}", path.display()))?
         {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
@@ -194,17 +253,20 @@ pub async fn save_settings(State(st): State<Arc<AppState>>, Json(v): Json<Value>
         })?;
         if let Some(s) = v.get("theme") {
             if !matches!(s.as_str(), Some("system" | "light" | "dark")) {
-                bail!("Неизвестная тема");
+                bail!("{}", pc_core::tr!("Неизвестная тема", "Unknown theme"));
             }
         }
         if let Some(s) = v.get("density") {
             if !matches!(s.as_str(), Some("comfortable" | "compact")) {
-                bail!("Неизвестная плотность");
+                bail!(
+                    "{}",
+                    pc_core::tr!("Неизвестная плотность", "Unknown density")
+                );
             }
         }
         if let Some(s) = v.get("language") {
             if !matches!(s.as_str(), Some("ru" | "en")) {
-                bail!("Неизвестный язык");
+                bail!("{}", pc_core::tr!("Неизвестный язык", "Unknown language"));
             }
         }
         // Zero means "decide for me"; anything above the core count would
@@ -214,13 +276,23 @@ pub async fn save_settings(State(st): State<Arc<AppState>>, Json(v): Json<Value>
                 .map(|n| n.get())
                 .unwrap_or(1) as i64;
             if !n.as_i64().is_some_and(|n| (0..=cores).contains(&n)) {
-                bail!("Потоков декодирования: от 0 до {cores}");
+                bail!(
+                    "{}",
+                    pc_core::tf!(
+                        "Потоков декодирования: от 0 до {0}",
+                        "Decoding threads: between 0 and {0}",
+                        cores
+                    )
+                );
             }
         }
         for key in ["series_gap_secs", "event_gap_secs"] {
             if let Some(n) = v.get(key) {
                 if !n.as_i64().is_some_and(|n| (1..=259200).contains(&n)) {
-                    bail!("Некорректный разрыв: {key}");
+                    bail!(
+                        "{}",
+                        pc_core::tf!("Некорректный разрыв: {0}", "Invalid gap: {0}", key)
+                    );
                 }
             }
         }
@@ -272,7 +344,7 @@ pub async fn file_details(State(st): State<Arc<AppState>>, Path(id): Path<i64>) 
             &[&id],
         )?
         .pop()
-        .context("Файл не найден")?;
+        .context(pc_core::tr!("Файл не найден", "File not found"))?;
         let meta = jobs::rows(&db, "SELECT * FROM meta WHERE file_id=?1", &[&id])?.pop();
         let categories = jobs::rows(
             &db,
@@ -319,7 +391,9 @@ pub async fn recent(
 /// Spelled out rather than a checkbox for the same reason the purge screen
 /// asks for one: a reset throws away an hour of reading, and a mis-click
 /// should not be able to do that.
-pub const RESET_WORD: &str = "СБРОСИТЬ";
+pub fn reset_word() -> &'static str {
+    pc_core::tr!("СБРОСИТЬ", "RESET")
+}
 
 /// Throw away the index and the thumbnail cache, and start from nothing.
 ///
@@ -332,8 +406,15 @@ pub async fn reset(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Res
     if let Err(e) = jobs::idle(&st) {
         return error(409, &e.to_string());
     }
-    if v["confirmation"].as_str() != Some(RESET_WORD) {
-        return error(400, &format!("Для сброса индекса введите {RESET_WORD}"));
+    if v["confirmation"].as_str() != Some(reset_word()) {
+        return error(
+            400,
+            &pc_core::tf!(
+                "Для сброса индекса введите {0}",
+                "Type {0} to reset the index",
+                reset_word()
+            ),
+        );
     }
     respond((|| {
         let db = st.db.lock().unwrap();
@@ -431,9 +512,13 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             if r.params.get("roles").is_some() {
                 policy.remove_roles.clear();
                 for name in strings(&r.params, "roles") {
-                    let role = pc_family::Role::parse(&name).context("Неизвестная роль")?;
+                    let role = pc_family::Role::parse(&name)
+                        .context(pc_core::tr!("Неизвестная роль", "Unknown role"))?;
                     if role == pc_family::Role::Original {
-                        bail!("ORIGINAL удалять нельзя");
+                        bail!(
+                            "{}",
+                            pc_core::tr!("ORIGINAL удалять нельзя", "ORIGINAL is never removed")
+                        );
                     }
                     policy.remove_roles.insert(role);
                 }
@@ -446,7 +531,14 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 match pc_apply::quarantine_dest_for(&c.path, c.file_id, db, root.as_deref()) {
                     Ok(dst) => {
                         if dst.exists() {
-                            add_refusal(c.path.clone(), format!("Цель занята: {}", dst.display()));
+                            add_refusal(
+                                c.path.clone(),
+                                pc_core::tf!(
+                                    "Цель занята: {0}",
+                                    "Destination taken: {0}",
+                                    dst.display()
+                                ),
+                            );
                             continue;
                         }
                         let thumb = |id| db.file(id).ok().flatten().and_then(|f| f.thumb_key);
@@ -471,9 +563,13 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 if !b.removable() {
                     add_refusal(
                         b.path.clone(),
-                        b.blocked_detail
-                            .clone()
-                            .unwrap_or("Удаление запрещено видом данных".into()),
+                        b.blocked_detail.clone().unwrap_or(
+                            pc_core::tr!(
+                                "Удаление запрещено видом данных",
+                                "This kind of data is never removed"
+                            )
+                            .into(),
+                        ),
                     );
                     continue;
                 }
@@ -484,7 +580,14 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 match pc_apply::quarantine_dest(&b, root.as_deref()) {
                     Ok(dst) => {
                         if dst.exists() {
-                            add_refusal(b.path.clone(), format!("Цель занята: {}", dst.display()));
+                            add_refusal(
+                                b.path.clone(),
+                                pc_core::tf!(
+                                    "Цель занята: {0}",
+                                    "Destination taken: {0}",
+                                    dst.display()
+                                ),
+                            );
                             continue;
                         }
                         items.push(json!({"path":b.path,"dst":dst,"size":b.size,"file_count":b.file_count,"kind":b.kind.as_str()}));
@@ -500,11 +603,18 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     .candidates
                     .is_empty()
             {
-                bail!("Сначала разберите точные копии на экране «План и перенос». Раскладка иначе перенесёт и дубликаты.");
+                bail!(
+                    "{}",
+                    pc_core::tr!(
+                        "Сначала разберите точные копии на экране «План и перенос». Раскладка иначе перенесёт и дубликаты.",
+                        "Resolve the exact copies on the “Plan and move” screen first, or the sorting carries the duplicates along."
+                    )
+                );
             }
-            let root = r.params["root"]
-                .as_str()
-                .context("Не выбран корень нового дерева")?;
+            let root = r.params["root"].as_str().context(pc_core::tr!(
+                "Не выбран корень нового дерева",
+                "No root chosen for the new tree"
+            ))?;
             checked_dir(root)?;
             let plan = pc_organize::compute(
                 db,
@@ -528,7 +638,14 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             let cutoff = pc_core::time::now_unix() - num(&r.params, "older_than_secs", 604800);
             for e in db.journal_quarantined(None)? {
                 if e.applied_at >= cutoff {
-                    add_refusal(e.src.clone(), "Срок удержания ещё не прошёл".into());
+                    add_refusal(
+                        e.src.clone(),
+                        pc_core::tr!(
+                            "Срок удержания ещё не прошёл",
+                            "The holding period has not passed yet"
+                        )
+                        .into(),
+                    );
                     continue;
                 }
                 items.push(json!({"journal_id":e.id,"path":e.dst,"dst":"Окончательное удаление","original":e.src,"size":e.size,"file_count":e.file_count}));
@@ -539,19 +656,30 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             let entries = if r.kind == "journal-undo" {
                 vec![db
                     .journal_entry(num(&r.params, "journal_id", 0))?
-                    .context("Нет записи журнала")?]
+                    .context(pc_core::tr!("Нет записи журнала", "No such journal entry"))?]
             } else {
                 db.journal_by_run_op(num(&r.params, "run_id", 0), "organize")?
             };
             for e in entries {
                 if e.status != pc_db::JournalStatus::Done {
-                    add_refusal(e.src.clone(), "Запись не завершена или уже отменена".into());
+                    add_refusal(
+                        e.src.clone(),
+                        pc_core::tr!(
+                            "Запись не завершена или уже отменена",
+                            "The entry is unfinished or already undone"
+                        )
+                        .into(),
+                    );
                     continue;
                 }
                 if FsPath::new(&e.src).exists() {
                     add_refusal(
                         e.src.clone(),
-                        "Исходный путь занят, перезапись запрещена".into(),
+                        pc_core::tr!(
+                            "Исходный путь занят, перезапись запрещена",
+                            "The original path is taken; overwriting is refused"
+                        )
+                        .into(),
                     );
                     continue;
                 }
@@ -559,7 +687,13 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 actions.push(Action::Undo(e));
             }
         }
-        _ => bail!("У этой задачи нет дискового плана"),
+        _ => bail!(
+            "{}",
+            pc_core::tr!(
+                "У этой задачи нет дискового плана",
+                "This job has no disk plan"
+            )
+        ),
     }
     if r.kind == "organize-apply" {
         let best: std::collections::HashSet<i64> = db
@@ -602,11 +736,17 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 blocked.insert(src.to_string());
                 add_refusal(
                     src.into(),
-                    format!("Путь спутника занят: {}", target.display()),
+                    pc_core::tf!(
+                        "Путь спутника занят: {0}",
+                        "The companion path is taken: {0}",
+                        target.display()
+                    ),
                 );
             }
             let size = std::fs::metadata(&side)
-                .with_context(|| format!("не прочитать {}", side.display()))?
+                .with_context(|| {
+                    pc_core::tf!("не прочитать {0}", "cannot read {0}", side.display())
+                })?
                 .len();
             extra += size;
             listed.push(json!({"path":side,"dst":if r.kind=="derived-purge" {json!("Окончательное удаление")} else {json!(target)},"size":size}));
@@ -642,7 +782,14 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
 fn bundle_gate(b: &pc_db::Bundle) -> Result<()> {
     if let Some(owner) = &b.owner_ref {
         if FsPath::new(&format!("{owner}.lock")).exists() {
-            bail!("Каталог Lightroom открыт: {owner}");
+            bail!(
+                "{}",
+                pc_core::tf!(
+                    "Каталог Lightroom открыт: {0}",
+                    "The Lightroom catalogue is open: {0}",
+                    owner
+                )
+            );
         }
         if b.kind == pc_core::DerivedKind::LrSmartPreviews && FsPath::new(owner).exists() {
             let check = pc_lightroom::check_originals(FsPath::new(owner))?;
@@ -679,13 +826,27 @@ pub fn apply_action(
                 pc_apply::quarantine(db, run, b, root.as_deref())?,
                 pc_apply::Outcome::Skipped
             ) {
-                bail!("Изменился с момента описи: {}", b.path);
+                bail!(
+                    "{}",
+                    pc_core::tf!(
+                        "Изменился с момента описи: {0}",
+                        "Changed since the inventory: {0}",
+                        b.path
+                    )
+                );
             }
         }
         Action::Move(m) => {
             if !flag(&r.params, "allow_lightroom") && db.lightroom_protected()?.contains_key(&m.src)
             {
-                bail!("Файл защищён каталогом Lightroom: {}", m.src);
+                bail!(
+                    "{}",
+                    pc_core::tf!(
+                        "Файл защищён каталогом Lightroom: {0}",
+                        "Protected by a Lightroom catalogue: {0}",
+                        m.src
+                    )
+                );
             }
             let report = pc_apply::organize(db, run, std::slice::from_ref(m))?;
             if let Some((path, why)) = report.refused.first() {
@@ -707,11 +868,14 @@ pub async fn preview(State(st): State<Arc<AppState>>, Json(r): Json<Request>) ->
 fn split(db: &Db, family: i64, file: i64) -> Result<()> {
     let member = db
         .family(family)?
-        .context("Семейство не найдено")?
+        .context(pc_core::tr!("Семейство не найдено", "Group not found"))?
         .members
         .into_iter()
         .find(|m| m.file_id == file)
-        .context("Файл не входит в семейство")?;
+        .context(pc_core::tr!(
+            "Файл не входит в семейство",
+            "The file is not in that group"
+        ))?;
     let new = db.insert_family(
         "manual",
         None,
@@ -748,7 +912,9 @@ pub async fn split_family(
     Json(v): Json<Value>,
 ) -> Response {
     mutate(&st, |db| {
-        let file = v["file_id"].as_i64().context("Не указан файл")?;
+        let file = v["file_id"]
+            .as_i64()
+            .context(pc_core::tr!("Не указан файл", "No file given"))?;
         let tx = db.conn.unchecked_transaction()?;
         split(db, id, file)?;
         db.conn
@@ -771,11 +937,16 @@ pub async fn best(
     Json(v): Json<Value>,
 ) -> Response {
     mutate(&st, |db| {
-        let file = v["file_id"].as_i64().context("Не указан файл")?;
+        let file = v["file_id"]
+            .as_i64()
+            .context(pc_core::tr!("Не указан файл", "No file given"))?;
         let tx = db.conn.unchecked_transaction()?;
         let n=db.conn.execute("UPDATE series SET best_file=?1 WHERE id=?2 AND EXISTS(SELECT 1 FROM series_members WHERE series_id=?2 AND file_id=?1)",[file,id])?;
         if n == 0 {
-            bail!("Файл не входит в серию");
+            bail!(
+                "{}",
+                pc_core::tr!("Файл не входит в серию", "The file is not in that burst")
+            );
         }
         db.conn.execute("DELETE FROM manual_best WHERE file_id IN(SELECT file_id FROM series_members WHERE series_id=?1)",[id])?;
         db.conn
@@ -799,7 +970,7 @@ pub async fn reject(
             db.conn
                 .query_row("SELECT count(*) FROM files WHERE id=?1", [id], |r| r.get(0))?;
         if known == 0 {
-            bail!("Файл не найден");
+            bail!("{}", pc_core::tr!("Файл не найден", "File not found"));
         }
         if on {
             db.conn.execute(
@@ -854,8 +1025,11 @@ pub async fn category(
     Json(v): Json<Value>,
 ) -> Response {
     mutate(&st, |db| {
-        let cat = v["category"].as_str().context("Не указан вид")?;
-        pc_family::categories::Category::parse(cat).context("Неизвестный вид")?;
+        let cat = v["category"]
+            .as_str()
+            .context(pc_core::tr!("Не указан вид", "No kind given"))?;
+        pc_family::categories::Category::parse(cat)
+            .context(pc_core::tr!("Неизвестный вид", "Unknown kind"))?;
         db.set_category_manual(id, cat)?;
         Ok(json!({"ok":true}))
     })
@@ -866,24 +1040,38 @@ pub async fn date(
     Json(v): Json<Value>,
 ) -> Response {
     mutate(&st, |db| {
-        let ts = v["taken_at"]
-            .as_i64()
-            .context("Дата должна быть unix timestamp")?;
+        let ts = v["taken_at"].as_i64().context(pc_core::tr!(
+            "Дата должна быть unix timestamp",
+            "The date has to be a unix timestamp"
+        ))?;
         if !(-5_364_662_400..=pc_core::time::now_unix() + 86400).contains(&ts) {
-            bail!("Дата за пределами допустимого диапазона");
+            bail!(
+                "{}",
+                pc_core::tr!(
+                    "Дата за пределами допустимого диапазона",
+                    "The date is out of range"
+                )
+            );
         }
         let mut ids = vec![id];
         if let Some(a) = v["file_ids"].as_array() {
             ids = a
                 .iter()
                 .map(|v| {
-                    v.as_i64()
-                        .filter(|id| *id > 0)
-                        .context("Некорректный номер файла")
+                    v.as_i64().filter(|id| *id > 0).context(pc_core::tr!(
+                        "Некорректный номер файла",
+                        "Invalid file number"
+                    ))
                 })
                 .collect::<Result<Vec<_>>>()?;
             if ids.is_empty() {
-                bail!("Не выбраны файлы для правки даты");
+                bail!(
+                    "{}",
+                    pc_core::tr!(
+                        "Не выбраны файлы для правки даты",
+                        "No files chosen for the date change"
+                    )
+                );
             }
         }
         let tx = db.conn.unchecked_transaction()?;

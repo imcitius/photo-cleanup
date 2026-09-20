@@ -44,7 +44,14 @@ pub fn destructive(kind: &str) -> bool {
 }
 pub fn idle(st: &AppState) -> Result<()> {
     if let Some((id, _)) = &*st.jobs.active.lock().unwrap() {
-        bail!("Задача №{id} уже выполняется. Дождитесь окончания или остановите её.");
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "Задача №{0} уже выполняется. Дождитесь окончания или остановите её.",
+                "Job #{0} is already running. Wait for it, or stop it.",
+                id
+            )
+        );
     }
     Ok(())
 }
@@ -107,7 +114,7 @@ pub fn get(st: &AppState, id: i64) -> Result<Value> {
     let db = st.db.lock().unwrap();
     let mut j = rows(&db, "SELECT * FROM jobs WHERE id=?1", &[&id])?
         .pop()
-        .context("Задача не найдена")?;
+        .context(pc_core::tr!("Задача не найдена", "Job not found"))?;
     if let Some((active, c)) = &*st.jobs.active.lock().unwrap() {
         if *active == id {
             j["progress"] = json!(*c.progress.lock().unwrap());
@@ -126,11 +133,17 @@ pub async fn cancel(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> Res
             return Json(json!({"ok":true})).into_response();
         }
     }
-    service::error(409, "Задача уже завершена или была прервана перезапуском")
+    service::error(
+        409,
+        pc_core::tr!(
+            "Задача уже завершена или была прервана перезапуском",
+            "The job has finished, or was interrupted by a restart"
+        ),
+    )
 }
 pub async fn events(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
     if get(&st, id).is_err() {
-        return service::error(404, "Задача не найдена");
+        return service::error(404, pc_core::tr!("Задача не найдена", "Job not found"));
     }
     Sse::new(async_stream::stream! {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -160,10 +173,24 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
         return service::error(400, &format!("{e:#}"));
     }
     if destructive(&req.kind) && req.plan_token.is_none() {
-        return service::error(400, "Сначала откройте предпросмотр плана");
+        return service::error(
+            400,
+            pc_core::tr!(
+                "Сначала откройте предпросмотр плана",
+                "Open the plan preview first"
+            ),
+        );
     }
-    if req.kind == "derived-purge" && req.confirmation.as_deref() != Some("УДАЛИТЬ") {
-        return service::error(400, "Для окончательного удаления введите УДАЛИТЬ");
+    let purge_word = pc_core::tr!("УДАЛИТЬ", "DELETE");
+    if req.kind == "derived-purge" && req.confirmation.as_deref() != Some(purge_word) {
+        return service::error(
+            400,
+            &pc_core::tf!(
+                "Для окончательного удаления введите {0}",
+                "Type {0} to delete for good",
+                purge_word
+            ),
+        );
     }
     let result = (|| -> Result<i64> {
         let db = st.db.lock().unwrap();
@@ -210,9 +237,10 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
             execute(&st, id, &req, &control)
         }));
         let result = result.unwrap_or_else(|_| {
-            Err(anyhow::anyhow!(
-                "Внутренняя ошибка задачи; проверьте незавершённые записи журнала"
-            ))
+            Err(anyhow::anyhow!(pc_core::tr!(
+                "Внутренняя ошибка задачи; проверьте незавершённые записи журнала",
+                "Internal job error; check the unfinished journal entries"
+            )))
         });
         // Opening a fresh connection also rolls back an interrupted metadata
         // transaction before recording the terminal state.
@@ -259,14 +287,20 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
     if destructive(&req.kind) {
         let (preview, actions) = service::make_preview(st, &db, req)?;
         if req.plan_token.as_deref() != preview["token"].as_str() {
-            bail!("План изменился. Обновите предпросмотр и проверьте числа ещё раз.");
+            bail!(
+                "{}",
+                pc_core::tr!(
+                    "План изменился. Обновите предпросмотр и проверьте числа ещё раз.",
+                    "The plan has changed. Refresh the preview and check the numbers again."
+                )
+            );
         }
         let run = db.start_run(&[], env!("CARGO_PKG_VERSION"))?;
         run_id = Some(run);
         db.conn
             .execute("UPDATE jobs SET run_id=?1 WHERE id=?2", [run, id])?;
         control.begin(
-            "Выполнение плана",
+            pc_core::tr!("Выполнение плана", "Carrying out the plan"),
             actions.len() as u64,
             preview["total_bytes"].as_u64().unwrap_or(0),
         )?;
@@ -390,7 +424,14 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
                     step()?;
                 }
             }
-            _ => bail!("Неизвестный вид задачи: {}", req.kind),
+            _ => bail!(
+                "{}",
+                pc_core::tf!(
+                    "Неизвестный вид задачи: {0}",
+                    "Unknown job kind: {0}",
+                    req.kind
+                )
+            ),
         }
     }
     if run_id.is_none() {

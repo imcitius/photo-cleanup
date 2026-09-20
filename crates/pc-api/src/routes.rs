@@ -41,7 +41,13 @@ pub async fn asset(AxPath(file): AxPath<String>) -> Response {
     let body: &'static [u8] = match file.as_str() {
         "app.css" => include_bytes!("../web/dist/static/app.css"),
         "app.js" => include_bytes!("../web/dist/static/app.js"),
-        _ => return (StatusCode::NOT_FOUND, "нет такого файла").into_response(),
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                pc_core::tr!("нет такого файла", "no such file"),
+            )
+                .into_response()
+        }
     };
     let mime = mime_guess::from_path(&file).first_or_octet_stream();
     // The bundle is compiled into the binary under a fixed name, so a browser
@@ -322,7 +328,11 @@ pub async fn family(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) ->
     let db = st.db.lock().unwrap();
     match db.family(id) {
         Ok(Some(f)) => Json(to_out(f, &db)).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, "нет такого семейства").into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            pc_core::tr!("нет такого семейства", "no such group"),
+        )
+            .into_response(),
         Err(e) => Fail(e).into_response(),
     }
 }
@@ -341,7 +351,13 @@ pub async fn set_keeper(
     crate::service::mutate(&st, |db| {
         let tx = db.conn.unchecked_transaction()?;
         if !db.set_family_keeper(id, body.file_id)? {
-            anyhow::bail!("файл не входит в это семейство");
+            anyhow::bail!(
+                "{}",
+                pc_core::tr!(
+                    "файл не входит в это семейство",
+                    "the file is not in that group"
+                )
+            );
         }
         db.conn.execute("DELETE FROM manual_keepers WHERE file_id IN (SELECT file_id FROM family_members WHERE family_id=?1)",[id])?;
         db.conn.execute(
@@ -404,7 +420,11 @@ pub async fn thumb(State(st): State<Arc<AppState>>, AxPath(key): AxPath<String>)
     // The key addresses content, so it is safe to cache hard; but reject
     // anything that is not a plain hex key before touching the filesystem.
     if key.len() != 32 || !key.bytes().all(|c| c.is_ascii_hexdigit()) {
-        return (StatusCode::BAD_REQUEST, "некорректный ключ").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            pc_core::tr!("некорректный ключ", "malformed key"),
+        )
+            .into_response();
     }
     match st.thumbs.get(&key) {
         Some(bytes) => (
@@ -415,7 +435,11 @@ pub async fn thumb(State(st): State<Arc<AppState>>, AxPath(key): AxPath<String>)
             bytes,
         )
             .into_response(),
-        None => (StatusCode::NOT_FOUND, "нет тамбнейла").into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            pc_core::tr!("нет тамбнейла", "no thumbnail"),
+        )
+            .into_response(),
     }
 }
 
@@ -429,7 +453,13 @@ pub async fn original(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) 
         let db = st.db.lock().unwrap();
         match db.file_path_now(id) {
             Ok(Some(p)) => p,
-            Ok(None) => return (StatusCode::NOT_FOUND, "нет такого файла").into_response(),
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    pc_core::tr!("нет такого файла", "no such file"),
+                )
+                    .into_response()
+            }
             Err(e) => return Fail(e).into_response(),
         }
     };
@@ -438,7 +468,11 @@ pub async fn original(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) 
             let mime = mime_guess::from_path(&path).first_or_octet_stream();
             ([(header::CONTENT_TYPE, mime.as_ref())], bytes).into_response()
         }
-        Err(e) => (StatusCode::NOT_FOUND, format!("не прочитать {path}: {e}")).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            pc_core::tf!("не прочитать {0}: {1}", "cannot read {0}: {1}", path, e),
+        )
+            .into_response(),
     }
 }
 
@@ -476,12 +510,18 @@ impl PlanQuery {
         if !names.is_empty() {
             let mut set = std::collections::BTreeSet::new();
             for n in names {
-                let role = Role::parse(n).ok_or_else(|| format!("неизвестная роль «{n}»"))?;
+                let role = Role::parse(n).ok_or_else(|| {
+                    pc_core::tf!("неизвестная роль «{0}»", "unknown role “{0}”", n)
+                })?;
                 // Refusing this in the API as well as the CLI: the original
                 // is the photograph, and no combination of toggles in a
                 // browser should be able to schedule it for removal.
                 if role == Role::Original {
-                    return Err("роль original удалять нельзя: это сам снимок".into());
+                    return Err(pc_core::tr!(
+                        "роль original удалять нельзя: это сам снимок",
+                        "the original role is never removed: it is the photograph itself"
+                    )
+                    .into());
                 }
                 set.insert(role);
             }
@@ -592,7 +632,10 @@ pub async fn apply_plan(State(st): State<Arc<AppState>>, Query(q): Query<PlanQue
     let _ = (st, q);
     crate::service::error(
         409,
-        "Откройте предпросмотр /api/preview и запустите /api/jobs с его plan_token",
+        pc_core::tr!(
+            "Откройте предпросмотр /api/preview и запустите /api/jobs с его plan_token",
+            "Open the /api/preview preview and start /api/jobs with its plan_token"
+        ),
     )
 }
 
@@ -629,9 +672,9 @@ pub async fn quarantine(State(st): State<Arc<AppState>>) -> Api<Vec<QuarantineIt
                         .rsplit_once('/')
                         .map_or(e.src.clone(), |(_, b)| b.to_string()),
                     kind: if is_file {
-                        "снимок".into()
+                        pc_core::tr!("снимок", "photograph").into()
                     } else {
-                        "производные данные".into()
+                        pc_core::tr!("производные данные", "derived data").into()
                     },
                     thumb: file_id
                         .and_then(|id| db.file(id).ok().flatten())
@@ -651,7 +694,10 @@ pub async fn undo(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) -> R
     let _ = (st, id);
     crate::service::error(
         409,
-        "Откат требует предпросмотра /api/preview и задачи /api/jobs",
+        pc_core::tr!(
+            "Откат требует предпросмотра /api/preview и задачи /api/jobs",
+            "Undoing needs an /api/preview preview and an /api/jobs job"
+        ),
     )
 }
 
@@ -723,7 +769,12 @@ pub async fn organize(State(st): State<Arc<AppState>>, Query(q): Query<OrganizeQ
     if q.root.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "не указан корень нового дерева" })),
+            Json(serde_json::json!({
+                "error": pc_core::tr!(
+                    "не указан корень нового дерева",
+                    "no root given for the new tree"
+                )
+            })),
         )
             .into_response();
     }
@@ -898,8 +949,8 @@ pub async fn series(
                 id: s.id,
                 label: match s.kind.as_str() {
                     "pixel-shift" => "pixel-shift",
-                    "bracket" => "брекетинг",
-                    _ => "серия",
+                    "bracket" => pc_core::tr!("брекетинг", "bracketing"),
+                    _ => pc_core::tr!("серия", "burst"),
                 },
                 kind: s.kind,
                 started_at: s.started_at,
@@ -967,7 +1018,7 @@ pub async fn categories(State(st): State<Arc<AppState>>) -> Api<Vec<CategoryGrou
     for c in db.category_counts()? {
         let label = Category::parse(&c.category)
             .map(|x| x.label())
-            .unwrap_or("Прочее");
+            .unwrap_or(pc_core::tr!("Прочее", "Other"));
         let files = db
             .files_in_category(&c.category, 100_000)?
             .into_iter()
@@ -1008,7 +1059,12 @@ pub async fn full_preview(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i6
         let db = st.db.lock().unwrap();
         match db.file_path_now(id) {
             Ok(Some(p)) => p,
-            _ => return crate::service::error(404, "Файл не найден в индексе"),
+            _ => {
+                return crate::service::error(
+                    404,
+                    pc_core::tr!("Файл не найден в индексе", "File not found in the index"),
+                )
+            }
         }
     };
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {

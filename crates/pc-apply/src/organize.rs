@@ -72,20 +72,28 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
         let dst = Path::new(&m.dst);
 
         if !src.is_file() {
-            report.refused.push((m.src.clone(), "файла уже нет".into()));
+            report.refused.push((
+                m.src.clone(),
+                pc_core::tr!("файла уже нет", "the file is already gone").into(),
+            ));
             continue;
         }
         if !unchanged(src, m.size, m.mtime) {
             report.refused.push((
                 m.src.clone(),
-                "изменился с момента индексации — переиндексируйте".into(),
+                pc_core::tr!(
+                    "изменился с момента индексации — переиндексируйте",
+                    "changed since indexing — index it again"
+                )
+                .into(),
             ));
             continue;
         }
         if dst.exists() {
-            report
-                .refused
-                .push((m.src.clone(), format!("цель занята: {}", m.dst)));
+            report.refused.push((
+                m.src.clone(),
+                pc_core::tf!("цель занята: {0}", "destination taken: {0}", m.dst),
+            ));
             continue;
         }
 
@@ -122,16 +130,33 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
                 report.sidecars += moved_with;
 
                 let note = match (&m.renamed_from, moved_with) {
-                    (Some(old), 0) => Some(format!("переименован из {old}")),
-                    (Some(old), n) => Some(format!("переименован из {old}, спутников {n}")),
+                    (Some(old), 0) => {
+                        Some(pc_core::tf!("переименован из {0}", "renamed from {0}", old))
+                    }
+                    (Some(old), n) => Some(pc_core::tf!(
+                        "переименован из {0}, спутников {1}",
+                        "renamed from {0}, {1} companions",
+                        old,
+                        n
+                    )),
                     (None, 0) => None,
-                    (None, n) => Some(format!("спутников перенесено: {n}")),
+                    (None, n) => Some(pc_core::tf!(
+                        "спутников перенесено: {0}",
+                        "companions moved: {0}",
+                        n
+                    )),
                 };
                 db.journal_finish(jid, JournalStatus::Done, note.as_deref())?;
 
                 let name = m.name().to_string();
                 db.set_file_path(m.file_id, &m.dst, &name)
-                    .with_context(|| format!("файл перенесён, но индекс не обновлён: {}", m.dst))?;
+                    .with_context(|| {
+                        pc_core::tf!(
+                            "файл перенесён, но индекс не обновлён: {0}",
+                            "the file moved but the index did not follow: {0}",
+                            m.dst
+                        )
+                    })?;
 
                 if let Some(parent) = src.parent() {
                     source_dirs.insert(parent.to_path_buf());
@@ -146,7 +171,13 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
                 // the mess across the archive.
                 report.refused.push((m.src.clone(), e.to_string()));
                 if report.refused.len() > 50 && report.moved == 0 {
-                    bail!("слишком много отказов подряд, ничего не перенесено — остановка");
+                    bail!(
+                        "{}",
+                        pc_core::tr!(
+                            "слишком много отказов подряд, ничего не перенесено — остановка",
+                            "too many refusals in a row and nothing moved — stopping"
+                        )
+                    );
                 }
             }
         }
@@ -215,7 +246,14 @@ pub(crate) fn prune_empty(
 pub fn undo_run(db: &Db, run_id: i64) -> Result<(u64, Vec<String>)> {
     let entries = db.journal_by_run_op(run_id, "organize")?;
     if entries.is_empty() {
-        bail!("в прогоне {run_id} нет перенесённых файлов");
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "в прогоне {0} нет перенесённых файлов",
+                "run {0} moved no files",
+                run_id
+            )
+        );
     }
     let mut back = 0;
     let mut failed = Vec::new();

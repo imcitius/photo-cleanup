@@ -5,7 +5,7 @@
 //! and an export read as three renditions of one photograph rather than
 //! three copies of one file.
 
-use pc_core::{count_ru, fmt_bytes};
+use pc_core::{count, fmt_bytes};
 use pc_db::{Db, FamilyRow};
 use pc_family::Role;
 
@@ -24,7 +24,7 @@ fn role_rank(role: &str) -> u8 {
 fn short_date(ts: Option<i64>) -> String {
     match ts {
         Some(ts) => pc_core::time::fmt_datetime_ru(ts),
-        None => "дата неизвестна".into(),
+        None => "date unknown".into(),
     }
 }
 
@@ -37,8 +37,12 @@ pub fn print_family(f: &FamilyRow, verbose: bool) {
         "\n📷  {}  ·  {}  ·  {}  —  {}, {}",
         title,
         short_date(f.taken_at),
-        f.camera.as_deref().unwrap_or("камера неизвестна"),
-        count_ru(members.len() as i64, "файл", "файла", "файлов"),
+        f.camera.as_deref().unwrap_or("camera unknown"),
+        count(
+            members.len() as i64,
+            ["файл", "файла", "файлов"],
+            ["file", "files"]
+        ),
         fmt_bytes(f.total_size() as u64)
     );
 
@@ -63,10 +67,10 @@ pub fn print_family(f: &FamilyRow, verbose: bool) {
             println!("       {}", truncate_start(dir, 72));
             if let Some(ev) = &m.evidence {
                 if let Some(detail) = short_evidence(ev) {
-                    println!("       связь: {detail}");
+                    println!("       link: {detail}");
                 }
             }
-            println!("       оценка {:.0}: {}", m.quality, m.breakdown);
+            println!("       score {:.0}: {}", m.quality, m.breakdown);
         }
     }
 }
@@ -96,24 +100,28 @@ fn truncate_start(s: &str, max: usize) -> String {
 pub fn print_series(s: &pc_db::SeriesRow, verbose: bool) {
     let label = match s.kind.as_str() {
         "pixel-shift" => "pixel-shift",
-        "bracket" => "брекетинг",
-        _ => "серия",
+        "bracket" => "bracketing",
+        _ => "burst",
     };
     println!(
         "\n🎞  {} · {} · {} · {}{}",
         label,
         short_date(s.started_at),
-        s.camera.as_deref().unwrap_or("камера неизвестна"),
-        count_ru(s.members.len() as i64, "кадр", "кадра", "кадров"),
+        s.camera.as_deref().unwrap_or("camera unknown"),
+        count(
+            s.members.len() as i64,
+            ["кадр", "кадра", "кадров"],
+            ["frame", "frames"]
+        ),
         if s.protected {
-            "  [НЕ ПРОРЕЖИВАТЬ: один снимок из нескольких файлов]"
+            "  [DO NOT THIN: one photograph made of several files]"
         } else {
             ""
         }
     );
     for m in &s.members {
         println!(
-            "  {} {:<34} резкость {:>8.1}   оценка {:>5.0}",
+            "  {} {:<34} sharpness {:>8.1}   score {:>5.0}",
             if m.is_best { "★" } else { " " },
             truncate(&m.name, 34),
             m.sharpness.unwrap_or(0.0),
@@ -128,27 +136,27 @@ pub fn print_series(s: &pc_db::SeriesRow, verbose: bool) {
 pub fn print_summary(db: &Db) -> anyhow::Result<()> {
     let rows = db.role_counts()?;
     if rows.is_empty() {
-        println!("Семейства не построены. Выполните `photo-cleanup families build`.");
+        println!("No groups built yet. Run `photo-cleanup families build`.");
         return Ok(());
     }
-    println!("\nПо ролям:");
-    for (role, count, bytes) in rows {
+    println!("\nBy role:");
+    for (role, files, bytes) in rows {
         let r = Role::parse(&role).unwrap_or(Role::Unknown);
         let note = if r.removable_by_default() {
-            "  ← удаляется по умолчанию"
+            "  ← removed by default"
         } else {
             ""
         };
         println!(
             "  {:<12} {:>8}  {:>10}{}",
             r.label(),
-            count_ru(count, "файл", "файла", "файлов"),
+            count(files, ["файл", "файла", "файлов"], ["file", "files"]),
             fmt_bytes(bytes as u64),
             note
         );
     }
     println!(
-        "\nСемейств: {} (из них с несколькими файлами: {})",
+        "\nGroups: {} (of which several files: {})",
         db.family_count(false)?,
         db.family_count(true)?
     );
@@ -163,7 +171,7 @@ mod tests {
     fn formats_a_date_from_a_timestamp() {
         assert_eq!(short_date(Some(1_563_129_125)), "14.07.2019 18:32:05");
         assert_eq!(short_date(Some(951_868_800)), "01.03.2000 00:00:00");
-        assert_eq!(short_date(None), "дата неизвестна");
+        assert_eq!(short_date(None), "date unknown");
     }
 
     #[test]

@@ -82,10 +82,13 @@ pub async fn serve(
     let state = Arc::new(state);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
-        .with_context(|| format!("не занять адрес {bind}"))?;
+        .with_context(|| pc_core::tf!("не занять адрес {0}", "cannot bind {0}", bind))?;
     let local = listener.local_addr()?;
-    println!("Интерфейс: http://{local}");
-    println!("Остановить: Ctrl+C");
+    println!(
+        "{}",
+        pc_core::tf!("Интерфейс: http://{0}", "Interface: http://{0}", local)
+    );
+    println!("{}", pc_core::tr!("Остановить: Ctrl+C", "Stop with Ctrl+C"));
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown())
         .await?;
@@ -94,7 +97,7 @@ pub async fn serve(
 
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
-    println!("\nОстановлено.");
+    println!("\n{}", pc_core::tr!("Остановлено.", "Stopped."));
 }
 
 #[cfg(test)]

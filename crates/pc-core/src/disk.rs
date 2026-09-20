@@ -76,7 +76,11 @@ pub fn dev_of_nearest_existing(path: &Path) -> io::Result<u64> {
         cur = cur.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("не найти существующий предок для {}", path.display()),
+                crate::tf!(
+                    "не найти существующий предок для {0}",
+                    "cannot find an existing ancestor of {0}",
+                    path.display()
+                ),
             )
         })?;
     }

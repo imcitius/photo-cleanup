@@ -30,8 +30,13 @@ impl Db {
                 std::fs::create_dir_all(parent).ok();
             }
         }
-        let conn = Connection::open(path)
-            .with_context(|| format!("не удалось открыть базу {}", path.display()))?;
+        let conn = Connection::open(path).with_context(|| {
+            pc_core::tf!(
+                "не удалось открыть базу {0}",
+                "could not open the database {0}",
+                path.display()
+            )
+        })?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;

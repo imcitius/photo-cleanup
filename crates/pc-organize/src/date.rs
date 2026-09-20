@@ -41,13 +41,13 @@ impl Source {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Manual => "вручную",
-            Self::Exif => "съёмка (EXIF)",
-            Self::Digitized => "оцифровка (EXIF)",
-            Self::FileDateTime => "правка (EXIF)",
-            Self::Filename => "имя файла",
-            Self::Path => "путь",
-            Self::Mtime => "mtime файла",
+            Self::Manual => pc_core::tr!("вручную", "by hand"),
+            Self::Exif => pc_core::tr!("съёмка (EXIF)", "taken (EXIF)"),
+            Self::Digitized => pc_core::tr!("оцифровка (EXIF)", "digitised (EXIF)"),
+            Self::FileDateTime => pc_core::tr!("правка (EXIF)", "edited (EXIF)"),
+            Self::Filename => pc_core::tr!("имя файла", "file name"),
+            Self::Path => pc_core::tr!("путь", "path"),
+            Self::Mtime => pc_core::tr!("mtime файла", "file mtime"),
         }
     }
 
