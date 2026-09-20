@@ -157,6 +157,9 @@ struct ThumbsArgs {
     /// Make every thumbnail again, not only the ones that are no good
     #[arg(long)]
     all: bool,
+    /// Only files of one container: tiff, jpeg, png, bmp, heif, psd
+    #[arg(long)]
+    container: Option<String>,
 }
 
 #[derive(Args)]
@@ -536,8 +539,13 @@ fn main() -> Result<()> {
         }
         Command::Thumbs(a) => {
             let store = pc_core::ThumbStore::new(thumbs_dir(&cli.db, a.thumbs));
-            let report =
-                pc_work::thumbs::rebuild(&db, &store, a.all, &pc_core::work::Control::default())?;
+            let report = pc_work::thumbs::rebuild(
+                &db,
+                &store,
+                a.all,
+                a.container.as_deref(),
+                &pc_core::work::Control::default(),
+            )?;
             println!("{}", report.describe());
             Ok(())
         }

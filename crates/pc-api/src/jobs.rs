@@ -409,7 +409,11 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
                 .get("all")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
-            let report = pc_work::thumbs::rebuild(&db, &st.thumbs, all, control)?;
+            let container = req
+                .params
+                .get("container")
+                .and_then(serde_json::Value::as_str);
+            let report = pc_work::thumbs::rebuild(&db, &st.thumbs, all, container, control)?;
             // The phase line is what the job page shows when it is over.
             control.begin(&report.describe(), 0, 0)?;
             Ok(())

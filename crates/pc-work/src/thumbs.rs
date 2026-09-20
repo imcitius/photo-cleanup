@@ -50,6 +50,25 @@ struct Row {
     thumb_key: Option<String>,
 }
 
+/// Everything one re-read of a file yields. The thumbnail is the visible
+/// part; the hashes and the measurements matter more, because groups, bursts
+/// and kinds are all decided by them.
+struct Fixed {
+    id: i64,
+    key: String,
+    pixel_hash: Vec<u8>,
+    phash: i64,
+    dhash: i64,
+    crops: Vec<u8>,
+    metrics: pc_image::metrics::Metrics,
+    width: i64,
+    height: i64,
+}
+
+fn bits_to_i64(v: u64) -> i64 {
+    i64::from_le_bytes(v.to_le_bytes())
+}
+
 /// Whether the stored thumbnail is worth keeping.
 fn is_good(store: &ThumbStore, key: Option<&String>) -> bool {
     let Some(key) = key else { return false };
@@ -68,15 +87,25 @@ fn is_good(store: &ThumbStore, key: Option<&String>) -> bool {
 /// Rebuild what needs it. `all` ignores the state of the stored thumbnail and
 /// makes every one again, which is the answer when the fault was in the
 /// making rather than in the storing.
-pub fn rebuild(db: &Db, store: &ThumbStore, all: bool, control: &Control) -> Result<Report> {
+pub fn rebuild(
+    db: &Db,
+    store: &ThumbStore,
+    all: bool,
+    container: Option<&str>,
+    control: &Control,
+) -> Result<Report> {
     let rows: Vec<Row> = {
+        // One container at a time, for when a fault is known to belong to a
+        // format: re-reading four hundred TIFFs is a minute, re-reading sixty
+        // thousand photographs is an evening.
         let mut st = db.conn.prepare(
             "SELECT id, path, thumb_key FROM files
               WHERE state = 'present' AND phash IS NOT NULL
+                AND (?1 IS NULL OR container = ?1)
               ORDER BY id",
         )?;
         let rows = st
-            .query_map([], |r| {
+            .query_map([container], |r| {
                 Ok(Row {
                     id: r.get(0)?,
                     path: r.get(1)?,
@@ -97,7 +126,7 @@ pub fn rebuild(db: &Db, store: &ThumbStore, all: bool, control: &Control) -> Res
     let failed = AtomicU64::new(0);
     let still_flat = AtomicU64::new(0);
     // (file id, key) for the ones that were made again.
-    let made: Vec<(i64, String)> = rows
+    let made: Vec<Fixed> = rows
         .par_iter()
         .filter_map(|row| {
             if control.check().is_err() {
@@ -129,23 +158,71 @@ pub fn rebuild(db: &Db, store: &ThumbStore, all: bool, control: &Control) -> Res
             if probe.metrics.tonal_range < FLAT {
                 still_flat.fetch_add(1, Ordering::Relaxed);
             }
-            match store.put(&probe.thumb.jpeg) {
-                Ok(key) => Some((row.id, key)),
+            let key = match store.put(&probe.thumb.jpeg) {
+                Ok(key) => key,
                 Err(_) => {
                     failed.fetch_add(1, Ordering::Relaxed);
-                    None
+                    return None;
                 }
+            };
+            let gray = &probe.thumb.gray;
+            let mut crops = Vec::with_capacity(40);
+            for c in pc_hash::crop_hashes(gray) {
+                crops.extend_from_slice(&c.to_le_bytes());
             }
+            Some(Fixed {
+                id: row.id,
+                key,
+                pixel_hash: pc_hash::pixel_hash(gray).to_vec(),
+                phash: bits_to_i64(pc_hash::phash(gray)),
+                dhash: bits_to_i64(pc_hash::dhash(gray)),
+                crops,
+                metrics: probe.metrics,
+                width: probe.width as i64,
+                height: probe.height as i64,
+            })
         })
         .collect();
 
+    // The hashes and the measurements are written too. They came from the
+    // same decode as the thumbnail, so a thumbnail that was wrong means a
+    // phash that was wrong — and groups and bursts are decided by the phash.
+    // Re-reading the archive once should settle all of it.
     db.conn.execute_batch("BEGIN")?;
     {
-        let mut up = db
-            .conn
-            .prepare("UPDATE files SET thumb_key = ?2 WHERE id = ?1")?;
-        for (id, key) in &made {
-            up.execute(rusqlite::params![id, key])?;
+        let mut up = db.conn.prepare(
+            "UPDATE files SET thumb_key = ?2, pixel_hash = ?3, phash = ?4, dhash = ?5,
+                              phash_crops = ?6, width = ?7, height = ?8,
+                              sharpness = ?9, clip_low = ?10, clip_high = ?11, entropy = ?12,
+                              contrast = ?13, saturation = ?14, chroma = ?15, tonal_range = ?16,
+                              white_fraction = ?17, bimodality = ?18, text_rows = ?19,
+                              text_banding = ?20
+              WHERE id = ?1",
+        )?;
+        for f in &made {
+            let m = &f.metrics;
+            up.execute(rusqlite::params![
+                f.id,
+                f.key,
+                f.pixel_hash,
+                f.phash,
+                f.dhash,
+                f.crops,
+                f.width,
+                f.height,
+                m.sharpness as f64,
+                m.clip_low as f64,
+                m.clip_high as f64,
+                m.entropy as f64,
+                m.contrast as f64,
+                m.saturation as f64,
+                m.chroma as f64,
+                m.tonal_range as f64,
+                m.white_fraction as f64,
+                m.bimodality as f64,
+                m.text_rows as f64,
+                m.text_banding as f64,
+            ])?;
         }
     }
     db.conn.execute_batch("COMMIT")?;
