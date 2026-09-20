@@ -22,7 +22,7 @@ RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
       amd64) target=x86_64-unknown-linux-musl ;; \
       arm64) target=aarch64-unknown-linux-musl ;; \
-      *) echo "неизвестная архитектура: ${TARGETARCH}" >&2; exit 1 ;; \
+      *) echo "unknown architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     echo "$target" > /target; \
     apt-get update; \
@@ -47,7 +47,7 @@ RUN target="$(cat /target)" \
 # Fail the build rather than ship something that cannot start on the target.
 # A PT_INTERP segment means the binary wants a dynamic loader.
 RUN if readelf -l /photo-cleanup | grep -q INTERP; then \
-        echo "БИНАРЬ НЕ СТАТИЧЕСКИЙ — на glibc-хосте не запустится:" >&2; \
+        echo "THE BINARY IS NOT STATIC — it will not run on a glibc host:" >&2; \
         readelf -l /photo-cleanup | grep -A2 INTERP >&2; \
         exit 1; \
     fi \
@@ -62,6 +62,10 @@ FROM scratch AS runtime
 COPY --from=builder /photo-cleanup /photo-cleanup
 # The database and the thumbnail cache live here; mount a volume over it.
 WORKDIR /data
+# A scratch image has no PATH at all, so `docker exec <container>
+# photo-cleanup inspect ...` could not find the very binary the container is
+# running. The root is the only directory there is; now the name resolves.
+ENV PATH="/"
 EXPOSE 8080
 ENTRYPOINT ["/photo-cleanup"]
 # Serving on every interface is the point of running this in a container: the

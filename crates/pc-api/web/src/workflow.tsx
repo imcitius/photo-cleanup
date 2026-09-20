@@ -768,6 +768,7 @@ export function JournalPage({
         )}
         <VirtualList
           items={r.data || []}
+          resetKey={`${run}|${op}|${status}`}
           rowHeight={126}
           render={(j) => (
             <div className="journal-row">

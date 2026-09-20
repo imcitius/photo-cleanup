@@ -149,8 +149,13 @@ struct OrganizeUndoArgs {
 
 #[derive(Args)]
 struct InspectArgs {
-    /// The image to look at
-    path: PathBuf,
+    /// The image to look at, by its path
+    path: Option<PathBuf>,
+    /// ...or by part of its name, looked up in the index. Inside a container
+    /// the archive sits under whatever paths it was mounted at, and those are
+    /// the ones the index knows.
+    #[arg(long)]
+    search: Option<String>,
 }
 
 #[derive(Args)]
@@ -510,7 +515,7 @@ fn main() -> Result<()> {
         Command::Organize(OrganizeCmd::Undo(a)) => cmd_organize_undo(&db, &a),
         Command::Organize(OrganizeCmd::Runs) => cmd_organize_runs(&db),
         Command::Status => cmd_status(&db),
-        Command::Inspect(a) => cmd_inspect(&a.path),
+        Command::Inspect(a) => cmd_inspect(&db, &a),
         Command::Catalogs => cmd_catalogs(&db),
     }
 }
@@ -521,7 +526,37 @@ fn main() -> Result<()> {
 /// about that file: which flavour of the format it is, and what the decoder
 /// made of it. This prints both, so the answer does not depend on having
 /// exiftool at hand — on a NAS there usually is none.
-fn cmd_inspect(path: &std::path::Path) -> Result<()> {
+fn cmd_inspect(db: &Db, args: &InspectArgs) -> Result<()> {
+    if let Some(text) = &args.search {
+        let mut st = db.conn.prepare(
+            "SELECT id, path FROM files
+              WHERE path LIKE '%' || ?1 || '%' AND state = 'present'
+              ORDER BY id LIMIT 10",
+        )?;
+        let found: Vec<(i64, String)> = st
+            .query_map([text], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        if found.is_empty() {
+            println!("Nothing in the index matches “{text}”.");
+            return Ok(());
+        }
+        println!("Matches in the index: {}", found.len());
+        for (id, path) in &found {
+            println!("  #{id} {path}");
+        }
+        println!();
+        // The first one, in full. The rest are listed so a different file can
+        // be named directly.
+        return inspect_one(std::path::Path::new(&found[0].1));
+    }
+    let path = args
+        .path
+        .as_deref()
+        .context("give a path, or --search with part of a name")?;
+    inspect_one(path)
+}
+
+fn inspect_one(path: &std::path::Path) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
     let container = pc_image::sniff::sniff(&bytes);
     println!("File:      {}", path.display());

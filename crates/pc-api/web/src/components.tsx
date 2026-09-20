@@ -505,12 +505,15 @@ export function VirtualList<T>({
   height = 560,
   render,
   empty = ui.noResults,
+  resetKey,
 }: {
   items: T[];
   rowHeight?: number;
   height?: number;
   render: (item: T, index: number) => ReactNode;
   empty?: string;
+  /// What makes this a different list. Changing it starts from the top.
+  resetKey?: string | number;
 }) {
   const [scroll, setScroll] = useState(0);
   const ref = useRef<HTMLDivElement>(null);
@@ -528,10 +531,13 @@ export function VirtualList<T>({
     observer.observe(node);
     return () => observer.disconnect();
   });
+  // Keyed by what the list *is*, not by the array that carries it. The rows
+  // are rebuilt on every render and refetched every few seconds, and going
+  // back to the top each time meant a page could not be read to the end.
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = 0;
     setScroll(0);
-  }, [items]);
+  }, [resetKey ?? items.length]);
   if (!items.length) return <Empty title={empty} />;
   const row = measured || rowHeight;
   const first = Math.max(0, Math.floor(scroll / row) - 4),

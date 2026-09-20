@@ -1208,6 +1208,7 @@ export function Categories({
       <Resource r={r}>
         <VirtualList
           items={rows}
+          resetKey={`${filter}|${search}`}
           rowHeight={330}
           height={650}
           render={(row) => (
