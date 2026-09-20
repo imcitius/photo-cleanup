@@ -285,11 +285,9 @@ export function Families({
     ),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
-    [pending, setPending] = useState<{
-      family: number;
-      token: string;
-      names: string[];
-    } | null>(null),
+    [moved, setMoved] = useState<{ family: number; names: string[] } | null>(
+      null,
+    ),
     [focused, setFocused] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null),
     searchRef = useRef<HTMLInputElement>(null);
@@ -323,13 +321,21 @@ export function Families({
     `/families?${query}&limit=100&offset=${page}`,
     revision,
   );
+  // A new search is a new list, so it starts from the top with nothing
+  // selected.
   useEffect(() => {
     setScroll(0);
     setCache(new Map());
     setSelected(null);
     setTotal(0);
     if (listRef.current) listRef.current.scrollTop = 0;
-  }, [query, revision]);
+  }, [query]);
+  // A finished job is the same list with one group fewer. Only the rows are
+  // stale: keeping the scroll, the selection and the count means the page
+  // does not blink back to the top and rebuild itself after every press.
+  useEffect(() => {
+    setCache(new Map());
+  }, [revision]);
   useEffect(() => {
     if (r.data) {
       setTotal(r.data.total);
@@ -425,10 +431,14 @@ export function Families({
     document.addEventListener("keydown", listener);
     return () => document.removeEventListener("keydown", listener);
   }, [cache, selected, focused, total, busy, disabled]);
-  // Ask the server what moving this one group would do, and hold the answer
-  // until the user presses again. The token ties the confirmation to the plan
-  // that was shown: if the group changed in between, the run is refused.
-  const prepareGroup = async (family: Family) => {
+  // One press. The group on screen already lists its files and says how much
+  // is in copies, so a confirmation would only be asking the same question
+  // twice — and this is a move to quarantine, which the journal undoes.
+  //
+  // The plan is still fetched first and the run still carries its token: if
+  // the group changed between the two calls the server refuses, which is the
+  // check that matters. It just does not need the user's hands for it.
+  const moveGroup = async (family: Family) => {
     setBusy(true);
     setError("");
     try {
@@ -440,32 +450,22 @@ export function Families({
         setError(ui.groupApplyNothing);
         return;
       }
-      setPending({
-        family: family.id,
-        token: preview.token,
-        names: preview.items.map((i) => basename(i.path)),
-      });
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const runGroup = async (family: Family) => {
-    if (!pending) return;
-    setBusy(true);
-    setError("");
-    try {
       await post("/jobs", {
         kind: "plan-apply",
         params: { roles: ["copy"], family_id: family.id },
-        plan_token: pending.token,
+        plan_token: preview.token,
       });
-      setPending(null);
-      // The group leaves the list on its own: its copies are no longer in
-      // the archive, so it stops being a group of several files.
-      setSelected(null);
+      setMoved({
+        family: family.id,
+        names: preview.items.map((i) => basename(i.path)),
+      });
+      // The group leaves the list on its own — its copies are no longer in
+      // the archive — so the next one is opened in its place. Going through
+      // ten thousand groups is one press each, not a press and a hunt for
+      // where the list has jumped to.
+      const index = [...cache].find(([, f]) => f.id === family.id)?.[0];
+      const next = index === undefined ? null : cache.get(index + 1) || null;
+      setSelected(next);
       onChange();
     } catch (e) {
       setError((e as Error).message);
@@ -564,6 +564,9 @@ export function Families({
         </label>
       </div>
       {error && <ErrorBox message={error} />}
+      {moved && (
+        <Notice>{t("perenesyono_v_karantin", moved.names.join(", "))}</Notice>
+      )}
       <div className="family-workspace">
         <div className="family-list-pane">
           <div
@@ -691,32 +694,16 @@ export function Families({
                   the plan screen, narrowed to what is on screen. */}
               {!!selected.removable_bytes && (
                 <div className="group-apply">
-                  {pending?.family === selected.id ? (
-                    <>
-                      <span>
-                        {ui.groupApplyConfirm} {pending.names.join(", ")} ·{" "}
-                        {bytes(selected.removable_bytes)}
-                      </span>
-                      <Button
-                        kind="primary"
-                        disabled={disabled || busy}
-                        onClick={() => runGroup(selected)}
-                      >
-                        {ui.move}
-                      </Button>
-                      <Button disabled={busy} onClick={() => setPending(null)}>
-                        {ui.cancel}
-                      </Button>
-                    </>
-                  ) : (
-                    <Button
-                      icon="arrow"
-                      disabled={disabled || busy}
-                      onClick={() => prepareGroup(selected)}
-                    >
-                      {ui.groupApply} · {bytes(selected.removable_bytes)}
-                    </Button>
-                  )}
+                  <Button
+                    icon="arrow"
+                    kind="primary"
+                    disabled={disabled || busy}
+                    title={ui.groupApplyHelp}
+                    onClick={() => moveGroup(selected)}
+                  >
+                    {ui.groupApply} · {bytes(selected.removable_bytes)}
+                  </Button>
+                  <span className="muted">{ui.groupApplyHelp}</span>
                 </div>
               )}
               <div className="section-heading">
@@ -866,6 +853,7 @@ export function SeriesPage({
       null,
     ),
     [error, setError] = useState(""),
+    [hideCopies, setHideCopies] = useState(false),
     [busy, setBusy] = useState(false);
   const r = useResource<{ total: number; series: Series[] }>(
     `/series?offset=${offset}&limit=20`,
@@ -894,101 +882,165 @@ export function SeriesPage({
             {t("zapustite_sborku_na_ekrane_opis_i_indeks")}
           </Empty>
         ) : (
-          r.data.series.map((s) => (
-            <section className="panel series-panel" key={s.id}>
-              <div className="section-heading">
-                <h3>
-                  {s.label} · {when(s.started_at)}
-                </h3>
-                <span className="muted">
-                  {s.camera || ui.unknownCamera} · {s.members.length}{" "}
-                  {t("kadrov")}
-                  {s.members.some((m) => m.is_rejected) &&
-                    ` · ${t("otklonено_n", s.members.filter((m) => m.is_rejected).length)}`}
-                </span>
-              </div>
-              {!s.protected && (
-                <div className="inline">
-                  <Button
-                    disabled={disabled || busy}
-                    title={ui.rejectRestHelp}
-                    onClick={() => act(`/series/${s.id}/reject-rest`)}
-                  >
-                    {ui.rejectRest}
-                  </Button>
-                  <Button
-                    disabled={
-                      disabled || busy || !s.members.some((m) => m.is_rejected)
-                    }
-                    onClick={() => act(`/series/${s.id}/keep-all`)}
-                  >
-                    {ui.keepAll}
-                  </Button>
+          r.data.series.map((s) => {
+            // A burst of fifteen frames is often three photographs and their
+            // copies. Numbering the groups says which frames are the same
+            // file, and the strip can show one of each instead.
+            const groups = new Map<number, number>();
+            s.members.forEach((m) => {
+              if (
+                m.family_id !== null &&
+                m.family_size > 1 &&
+                !groups.has(m.family_id)
+              )
+                groups.set(m.family_id, groups.size + 1);
+            });
+            const position = new Map<number, number>();
+            const copies = s.members.filter((m) => m.family_size > 1).length;
+            const frames = hideCopies
+              ? s.members.filter(
+                  (m) => m.family_size <= 1 || m.is_family_keeper,
+                )
+              : s.members;
+            return (
+              <section className="panel series-panel" key={s.id}>
+                <div className="section-heading">
+                  <h3>
+                    {s.label} · {when(s.started_at)}
+                  </h3>
+                  <span className="muted">
+                    {s.camera || ui.unknownCamera} · {s.members.length}{" "}
+                    {t("kadrov")}
+                    {s.members.some((m) => m.is_rejected) &&
+                      ` · ${t("otklonено_n", s.members.filter((m) => m.is_rejected).length)}`}
+                  </span>
                 </div>
-              )}
-              {s.protected && (
-                <Notice tone="warning">{ui.protectedSeries}</Notice>
-              )}
-              <div className="filmstrip">
-                {s.members.map((m, i) => (
-                  <article
-                    className={`shot${m.is_best ? " best" : ""}${
-                      m.is_rejected ? " rejected" : ""
-                    }`}
-                    key={m.file_id}
-                  >
-                    <Thumb
-                      thumb={m.thumb}
-                      name={m.name}
-                      onClick={() =>
-                        setView({
-                          images: s.members,
-                          start: s.members.indexOf(m),
-                        })
-                      }
-                    />
-                    <strong>
-                      {i + 1}. {m.name}
-                    </strong>
-                    <span className="muted">
-                      {t("mesto_po_kachestvu", m.rank + 1)} {t("rezkost")}
-                      {m.sharpness?.toFixed(1) || "—"}
+                {copies > 0 && (
+                  <div className="inline copies-line">
+                    <span className="muted" title={ui.copiesInBurstHelp}>
+                      {t("kopiy_v_serii", copies, groups.size)}
                     </span>
-                    <p>{m.breakdown}</p>
-                    <details>
-                      <summary>{t("podrobnosti_snimka")}</summary>
-                      <FileDetails fileId={m.file_id} />
-                    </details>
-                    <div className="shot-actions">
-                      <Button
-                        disabled={disabled || busy || m.is_best}
-                        kind={m.is_best ? "selected" : ""}
-                        onClick={() =>
-                          act(`/series/${s.id}/best`, { file_id: m.file_id })
-                        }
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={hideCopies}
+                        onChange={(e) => setHideCopies(e.target.checked)}
+                      />
+                      {ui.hideCopies}
+                    </label>
+                  </div>
+                )}
+                {!s.protected && (
+                  <div className="inline">
+                    <Button
+                      disabled={disabled || busy}
+                      title={ui.rejectRestHelp}
+                      onClick={() => act(`/series/${s.id}/reject-rest`)}
+                    >
+                      {ui.rejectRest}
+                    </Button>
+                    <Button
+                      disabled={
+                        disabled ||
+                        busy ||
+                        !s.members.some((m) => m.is_rejected)
+                      }
+                      onClick={() => act(`/series/${s.id}/keep-all`)}
+                    >
+                      {ui.keepAll}
+                    </Button>
+                  </div>
+                )}
+                {s.protected && (
+                  <Notice tone="warning">{ui.protectedSeries}</Notice>
+                )}
+                <div className="filmstrip">
+                  {frames.map((m, i) => {
+                    const group =
+                      m.family_id !== null
+                        ? groups.get(m.family_id)
+                        : undefined;
+                    const nth = group
+                      ? (position.get(m.family_id!) || 0) + 1
+                      : 0;
+                    if (group) position.set(m.family_id!, nth);
+                    return (
+                      <article
+                        className={`shot${m.is_best ? " best" : ""}${
+                          m.is_rejected ? " rejected" : ""
+                        }${group ? " copy" : ""}${
+                          group && !m.is_family_keeper ? " spare" : ""
+                        }`}
+                        key={m.file_id}
                       >
-                        {m.is_best ? `★ ${ui.best}` : ui.setBest}
-                      </Button>
-                      <Button
-                        disabled={disabled || busy}
-                        kind={m.is_rejected ? "danger-outline" : ""}
-                        title={
-                          m.is_rejected ? ui.keepFrameHelp : ui.rejectFrameHelp
-                        }
-                        onClick={() =>
-                          act(`/files/${m.file_id}/reject`, {
-                            rejected: !m.is_rejected,
-                          })
-                        }
-                      >
-                        {m.is_rejected ? ui.keepFrame : ui.rejectFrame}
-                      </Button>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
-          ))
+                        {group && (
+                          <span
+                            className={`dupe-badge${m.is_family_keeper ? " kept" : ""}`}
+                            title={ui.copiesInBurstHelp}
+                          >
+                            {m.is_family_keeper
+                              ? t("gruppa_hranimyy", group, m.family_size)
+                              : t("gruppa_kopiya", group, nth, m.family_size)}
+                          </span>
+                        )}
+                        <Thumb
+                          thumb={m.thumb}
+                          name={m.name}
+                          onClick={() =>
+                            setView({
+                              images: frames,
+                              start: frames.indexOf(m),
+                            })
+                          }
+                        />
+                        <strong>
+                          {i + 1}. {m.name}
+                        </strong>
+                        <span className="muted">
+                          {t("mesto_po_kachestvu", m.rank + 1)} {t("rezkost")}
+                          {m.sharpness?.toFixed(1) || "—"}
+                        </span>
+                        <p>{m.breakdown}</p>
+                        <details>
+                          <summary>{t("podrobnosti_snimka")}</summary>
+                          <FileDetails fileId={m.file_id} />
+                        </details>
+                        <div className="shot-actions">
+                          <Button
+                            disabled={disabled || busy || m.is_best}
+                            kind={m.is_best ? "selected" : ""}
+                            onClick={() =>
+                              act(`/series/${s.id}/best`, {
+                                file_id: m.file_id,
+                              })
+                            }
+                          >
+                            {m.is_best ? `★ ${ui.best}` : ui.setBest}
+                          </Button>
+                          <Button
+                            disabled={disabled || busy}
+                            kind={m.is_rejected ? "danger-outline" : ""}
+                            title={
+                              m.is_rejected
+                                ? ui.keepFrameHelp
+                                : ui.rejectFrameHelp
+                            }
+                            onClick={() =>
+                              act(`/files/${m.file_id}/reject`, {
+                                rejected: !m.is_rejected,
+                              })
+                            }
+                          >
+                            {m.is_rejected ? ui.keepFrame : ui.rejectFrame}
+                          </Button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            );
+          })
         )}
         {(r.data?.total || 0) > 20 && (
           <div className="pagination">

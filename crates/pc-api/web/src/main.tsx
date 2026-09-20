@@ -55,6 +55,21 @@ function App() {
     [theme, setTheme] = useState(localStorage.getItem("pc-theme") || "system");
   const jobs = useJobs();
   const [dismissed, setDismissed] = useState<number | null>(null);
+  // Work that is over before it is read is not worth a panel: moving one
+  // group's copies takes a fraction of a second, and a block appearing above
+  // the page and vanishing again pushes everything down and back for no
+  // reason. Anything still running after a moment gets the panel as before,
+  // and the indicator in the top bar shows the rest without moving anything.
+  const [showProgress, setShowProgress] = useState(false);
+  const running = !!jobs.active;
+  useEffect(() => {
+    if (!running) {
+      setShowProgress(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowProgress(true), 900);
+    return () => clearTimeout(timer);
+  }, [running]);
   const last = jobs.jobs[0];
   const settings = useResource<Settings>("/settings"),
     status = useResource<Status>("/status", jobs.revision);
@@ -342,7 +357,7 @@ function App() {
             </Button>
           </div>
           {jobs.error && <Notice tone="warning">{jobs.error}</Notice>}
-          {jobs.active && (
+          {jobs.active && showProgress && (
             <JobProgress
               id="job-progress"
               job={jobs.active}

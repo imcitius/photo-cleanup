@@ -867,6 +867,14 @@ pub struct SeriesMemberRow {
     pub is_best: bool,
     /// The user looked at this frame and did not want it.
     pub is_rejected: bool,
+    /// The group of copies this frame belongs to, when it has one. A burst
+    /// of fifteen frames is often three photographs and twelve copies, and
+    /// reading it as fifteen separate frames is how the copies get kept.
+    pub family_id: Option<i64>,
+    /// How many present files that group holds, this one included.
+    pub family_size: i64,
+    /// Whether this is the file the group would keep.
+    pub is_family_keeper: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -930,11 +938,19 @@ impl Db {
 
         let mut st = self.conn.prepare(
             "SELECT sm.file_id, f.name, f.path, sm.rank, sm.score, sm.breakdown,
-                    f.sharpness, f.thumb_key, m.taken_at, r.file_id IS NOT NULL
+                    f.sharpness, f.thumb_key, m.taken_at, r.file_id IS NOT NULL,
+                    fm.family_id,
+                    COALESCE((SELECT COUNT(*) FROM family_members x
+                                JOIN files xf ON xf.id = x.file_id
+                               WHERE x.family_id = fm.family_id
+                                 AND xf.state = 'present'), 0),
+                    fa.keeper_file IS NOT NULL AND fa.keeper_file = sm.file_id
                FROM series_members sm
                JOIN files f ON f.id = sm.file_id
                LEFT JOIN meta m ON m.file_id = f.id
                LEFT JOIN manual_rejects r ON r.file_id = f.id
+               LEFT JOIN family_members fm ON fm.file_id = sm.file_id
+               LEFT JOIN families fa ON fa.id = fm.family_id
               WHERE sm.series_id = ?1
               -- Shooting order, not quality order. A burst read out of
               -- sequence makes the subject jump back and forth, and the one
@@ -959,6 +975,9 @@ impl Db {
                     taken_at: r.get(8)?,
                     is_best: Some(file_id) == best,
                     is_rejected: r.get(9)?,
+                    family_id: r.get(10)?,
+                    family_size: r.get(11)?,
+                    is_family_keeper: r.get(12)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

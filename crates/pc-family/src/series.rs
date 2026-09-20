@@ -215,6 +215,9 @@ pub struct SeriesReport {
     pub series: usize,
     pub frames: usize,
     pub protected: usize,
+    /// Groups of copies whose keeper moved to the folder holding the rest of
+    /// its burst.
+    pub keepers_settled: u64,
     pub by_kind: std::collections::BTreeMap<&'static str, usize>,
 }
 
@@ -278,6 +281,10 @@ pub fn build_controlled(
         }
         *report.by_kind.entry(s.kind.label()).or_insert(0) += 1;
     }
+    // Now that the bursts are known, the groups of copies can be settled in
+    // their favour: between identical files, keep the one where the rest of
+    // the burst lives.
+    report.keepers_settled = crate::folders::settle_keepers(db)?;
     db.conn.execute_batch("COMMIT")?;
     Ok(report)
 }

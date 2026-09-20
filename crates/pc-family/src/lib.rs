@@ -2,6 +2,7 @@
 
 pub mod categories;
 pub mod curation;
+pub mod folders;
 pub mod links;
 pub mod perceptual;
 pub mod plan;
@@ -202,7 +203,7 @@ pub fn build_controlled(
                         totals[i] + roles::keeper_bonus(member_roles[i]),
                         // Shallower paths are the working copy; deeper ones
                         // tend to be archives of it.
-                        -(f.path.matches('/').count() as f64),
+                        -(pc_core::path_parts(&f.path).len() as f64),
                         -(f.path.len() as f64),
                     )
                 };
@@ -261,6 +262,10 @@ pub fn build_controlled(
             report.multi_member += 1;
         }
     }
+    // Rebuilding the groups picks every keeper afresh, so the folder a burst
+    // was settled into has to be settled again — otherwise the sequence
+    // scatters back across folders on the next run.
+    folders::settle_keepers(db)?;
     db.conn.execute_batch("COMMIT")?;
 
     Ok(report)

@@ -436,6 +436,34 @@ main {
   border-radius: 8px;
 }
 
+/* Frames of a burst that are the same file in several places. */
+.dupe-badge {
+  align-self: flex-start;
+  font-size: 10px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+.dupe-badge.kept {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.shot.copy {
+  border-color: var(--warning);
+}
+.shot.spare > .thumb {
+  opacity: 0.72;
+}
+.copies-line {
+  align-items: center;
+  gap: 16px;
+}
+
 /* Path and metadata under the frame being looked at. */
 .viewer-details {
   display: grid;

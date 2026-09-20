@@ -267,6 +267,9 @@ export interface Series {
     taken_at: number | null;
     is_best: boolean;
     is_rejected: boolean;
+    family_id: number | null;
+    family_size: number;
+    is_family_keeper: boolean;
   }[];
 }
 export interface Category {

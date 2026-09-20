@@ -169,7 +169,8 @@ export const ui = {
     "A group is one photograph in several files. “Keep this one” chooses which version stays; “This is a different shot” takes a file out of the group when it does not belong. Nothing moves until you approve the plan.",
   noExactCopies: "no exact copies",
   groupApply: "Move this group's copies",
-  groupApplyConfirm: "Going to quarantine:",
+  groupApplyHelp:
+    "One press: this group's copies go to quarantine, and the journal puts them back.",
   groupApplyNothing:
     "This group holds no exact copies — there is nothing to move. Different versions of a shot stay where they are.",
   compare: "Compare",
@@ -195,6 +196,9 @@ export const ui = {
     "Mark this frame as unwanted. It joins the move plan; the file stays where it is until you approve that plan.",
   keepFrame: "Keep it",
   keepFrameHelp: "Clear the mark: the frame stays in the archive.",
+  hideCopies: "Show one file each",
+  copiesInBurstHelp:
+    "These frames are the same file in several places. The plan keeps one of them; the rest go to quarantine with the other copies.",
   rejectRest: "Mark all but the best",
   rejectRestHelp:
     "Mark every frame of the burst except the one chosen as best. The button beside this one clears them all again.",
@@ -516,6 +520,10 @@ export const messages = {
   zadat_datu_vsemu_sobytiyu: "Set the date for the whole event",
   primer_puti_k_arhivu: "For example, /home/name/Pictures",
   mesto_po_kachestvu: "#{0} by quality",
+  perenesyono_v_karantin: "Moved to quarantine: {0}. The journal puts it back.",
+  kopiy_v_serii: "{0} files here are copies, of {1} photographs",
+  gruppa_kopiya: "group {0} · copy {1} of {2}",
+  gruppa_hranimyy: "group {0} · kept of {1}",
   otmecheno_vruchnuyu_n:
     "Of these, {0} were marked by hand while sorting bursts. Those files do not depend on the role checkboxes above.",
   otklonено_n: "marked: {0}",

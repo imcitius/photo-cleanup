@@ -922,6 +922,9 @@ pub struct SeriesMemberOut {
     taken_at: Option<i64>,
     is_best: bool,
     is_rejected: bool,
+    family_id: Option<i64>,
+    family_size: i64,
+    is_family_keeper: bool,
 }
 
 #[derive(Serialize)]
@@ -977,6 +980,9 @@ pub async fn series(
                         taken_at: m.taken_at,
                         is_best: m.is_best,
                         is_rejected: m.is_rejected,
+                        family_id: m.family_id,
+                        family_size: m.family_size,
+                        is_family_keeper: m.is_family_keeper,
                     })
                     .collect(),
             })
