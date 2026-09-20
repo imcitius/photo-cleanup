@@ -436,6 +436,15 @@ main {
   border-radius: 8px;
 }
 
+/* Folders the server can see, offered before anything is chosen. */
+.suggested-roots {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 /* Which kinds are in the archive, and how much of each. */
 .kind-summary {
   display: flex;

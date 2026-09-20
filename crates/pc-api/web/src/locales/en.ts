@@ -105,6 +105,9 @@ export const ui = {
     "The disks are mounted one by one: losing one loses whatever was on it.",
   rootsHint:
     "Choose the folders holding the originals. Subfolders are walked on their own; macOS photo libraries and Lightroom previews are left alone.",
+  rootsAreServerPaths:
+    "Paths are as the server sees them. Inside a container that is the Container Path from the volume settings — /mnt/disk1, say, not the path on the host.",
+  suggestedRoots: "The server can see:",
   rootsHintArray:
     "On Unraid choose /mnt/diskN/…, not /mnt/user/…: that keeps a move inside one physical disk.",
   lrWarning:

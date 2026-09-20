@@ -390,6 +390,9 @@ export function Setup({
     [gap, setGap] = useState(settings.series_gap_secs),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
+  const suggestions = (settings.suggested_roots || []).filter(
+    (s) => !roots.includes(s),
+  );
   const add = (s: string) => {
     if (s && !roots.includes(s)) setRoots([...roots, s]);
     setInput("");
@@ -426,6 +429,7 @@ export function Setup({
         <div>
           <h2>{t("gde_hranyatsya_fotografii")}</h2>
           <p className="muted">{ui.rootsHint}</p>
+          <p className="muted">{ui.rootsAreServerPaths}</p>
           {looksLikeArray(roots) && (
             <p className="muted">{ui.rootsHintArray}</p>
           )}
@@ -462,6 +466,18 @@ export function Setup({
               {t("obzor_papok")}
             </Button>
           </form>
+          {/* What the server can actually see. In a container this is the
+              only place the operator learns the paths inside it. */}
+          {!roots.length && !!suggestions.length && (
+            <div className="suggested-roots">
+              <span className="muted">{ui.suggestedRoots}</span>
+              {suggestions.map((s) => (
+                <Button key={s} icon="plus" onClick={() => add(s)}>
+                  {s}
+                </Button>
+              ))}
+            </div>
+          )}
         </div>
       </section>
       <section className="panel setup-section highlight">

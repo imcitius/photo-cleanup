@@ -226,8 +226,43 @@ pub fn apply_language(settings: &Value) {
     ));
 }
 
+/// Folders that look like they hold an archive, offered when none are chosen.
+///
+/// A container makes the question "which path?" genuinely confusing: the
+/// operator picked host paths in the Docker form, and the tool only ever sees
+/// the container ones. Rather than make them guess, the server says what it
+/// can actually see.
+fn suggested_roots() -> Vec<String> {
+    // The union view is deliberately left out: a move through it would stop
+    // being a rename, and the tool refuses it anyway.
+    const HIDDEN: [&str; 6] = ["user", "user0", "disks", "remotes", "addons", "rootshare"];
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/mnt") {
+        let mut found: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| !HIDDEN.contains(&name.as_str()) && !name.starts_with('.'))
+            .collect();
+        found.sort();
+        out.extend(found.into_iter().map(|name| format!("/mnt/{name}")));
+    }
+    if out.is_empty() {
+        if let Some(home) = std::env::var_os("HOME") {
+            for name in ["Pictures", "Photos"] {
+                let p = FsPath::new(&home).join(name);
+                if p.is_dir() {
+                    out.push(p.display().to_string());
+                }
+            }
+        }
+    }
+    out.truncate(8);
+    out
+}
+
 pub fn settings_value(st: &AppState, db: &Db) -> Result<Value> {
-    let mut v = json!({"db_path":st.db_path,"thumbs_path":st.thumbs.root(),"quarantine":st.quarantine,"phash_max":10,"ssim_min":0.9,"min_size":102400,"series_gap_secs":3,"event_gap_secs":21600,"theme":"system","density":"comfortable","language":"en","network":st.network,"roots":[],"workers":0,"cores":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1)});
+    let mut v = json!({"db_path":st.db_path,"thumbs_path":st.thumbs.root(),"quarantine":st.quarantine,"phash_max":10,"ssim_min":0.9,"min_size":102400,"series_gap_secs":3,"event_gap_secs":21600,"theme":"system","density":"comfortable","language":"en","network":st.network,"roots":[],"suggested_roots":suggested_roots(),"workers":0,"cores":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1)});
     for row in jobs::rows(db, "SELECT key,value FROM settings", &[])? {
         if let Some(k) = row["key"].as_str() {
             v[k] = serde_json::from_str(row["value"].as_str().unwrap_or("null"))?;

@@ -138,6 +138,8 @@ export interface Settings {
   thumbs_path: string;
   quarantine: string | null;
   roots: string[];
+  /** Folders the server can see, offered when none are chosen yet. */
+  suggested_roots: string[];
   phash_max: number;
   ssim_min: number;
   min_size: number;
