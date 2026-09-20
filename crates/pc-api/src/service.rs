@@ -147,6 +147,22 @@ pub fn validate(r: &Request) -> Result<()> {
     Ok(())
 }
 pub fn checked_dir(path: &str) -> Result<PathBuf> {
+    // Read the text before handing it to `Path`. A Windows verbatim path —
+    // `\\?\C:\…`, which is what `canonicalize` hands back there — is passed to
+    // the OS untouched, and Rust stops treating `..` inside it as a parent
+    // component. The walk below then let it through, the OS resolved it, and
+    // the browse endpoint happily listed the directory above the archive.
+    // Matching on the characters has no such corner.
+    if pc_core::path_parts(path).contains(&"..") {
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "{0}: переход через .. запрещён",
+                "{0}: going up through .. is refused",
+                path
+            )
+        );
+    }
     let path = FsPath::new(path);
     if !path.is_absolute() {
         bail!(

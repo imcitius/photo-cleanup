@@ -709,3 +709,25 @@ async fn a_rejected_frame_moves_beside_itself_and_comes_back() {
     assert_eq!(restored["state"], "done", "{restored}");
     assert!(photo.exists(), "файл не вернулся");
 }
+
+#[tokio::test]
+async fn a_parent_component_is_refused_whatever_the_path_looks_like() {
+    // A Windows verbatim path is handed to the OS untouched, and Rust stops
+    // reading `..` inside it as a parent component — so the check cannot rely
+    // on `Path` and is made on the text. These are the spellings that reach
+    // the endpoint on the platforms this runs on.
+    let f = Fixture::new();
+    let archive = f.archive.display().to_string();
+    for path in [
+        format!("{archive}/.."),
+        format!("{archive}/../"),
+        format!("{archive}/../quarantine"),
+        r"\\?\C:\Users\someone\Pictures\..\Documents".to_string(),
+        r"C:\Users\someone\Pictures\..\Documents".to_string(),
+    ] {
+        let (s, v) = f
+            .req("GET", &format!("/api/fs?path={path}"), Value::Null)
+            .await;
+        assert_eq!(s, 400, "{path} вернул {s}: {v}");
+    }
+}
