@@ -236,15 +236,25 @@ export function Thumb({
   onClick?: () => void;
 }) {
   const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [thumb]);
+  // A thumbnail is addressed by the hash of its own bytes, so it is served as
+  // immutable and cached for a year. That is right while the answer is a
+  // picture and wrong once — if a browser ever cached a failed or empty
+  // response for one of these addresses, it would keep showing that forever
+  // and no amount of reloading would help. So a thumbnail that fails is asked
+  // for once more, past the cache, before giving up on it.
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    setFailed(false);
+    setRetry(0);
+  }, [thumb]);
   const content =
     thumb && !failed ? (
       <img
-        src={`/api/thumb/${thumb}`}
+        src={`/api/thumb/${thumb}${retry ? `?again=${retry}` : ""}`}
         alt={name}
         loading="lazy"
         decoding="async"
-        onError={() => setFailed(true)}
+        onError={() => (retry ? setFailed(true) : setRetry(1))}
       />
     ) : (
       <span className="thumb-placeholder">
