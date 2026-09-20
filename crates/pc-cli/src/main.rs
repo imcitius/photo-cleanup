@@ -563,6 +563,33 @@ fn cmd_inspect(path: &std::path::Path) -> Result<()> {
                 "Measured:  chroma {:.3} · tonal range {:.0} · entropy {:.2} · contrast {:.1} · sharpness {:.1}",
                 m.chroma, m.tonal_range, m.entropy, m.contrast, m.sharpness
             );
+            // The thumbnail is built from the same decode, and it is what
+            // the lists actually show. A frame that reads correctly and
+            // still thumbnails grey is a different fault from a frame that
+            // does not read at all, and only this tells them apart.
+            if p.thumb.jpeg.is_empty() {
+                println!("Thumbnail: NONE — the encoder produced nothing");
+            } else {
+                match image::load_from_memory(&p.thumb.jpeg) {
+                    Ok(t) => {
+                        let tm = pc_image::metrics::measure(&t);
+                        println!(
+                            "Thumbnail: {} × {} · {} · chroma {:.3} · tonal range {:.0}{}",
+                            t.width(),
+                            t.height(),
+                            fmt_bytes(p.thumb.jpeg.len() as u64),
+                            tm.chroma,
+                            tm.tonal_range,
+                            if tm.tonal_range < 8.0 {
+                                " — FLAT, this is the grey square"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
+                    Err(e) => println!("Thumbnail: unreadable — {e}"),
+                }
+            }
             // A frame with no colour and no tonal range is the grey square
             // the interface would show, and saying so beats making the
             // person compare numbers.
