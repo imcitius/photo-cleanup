@@ -249,7 +249,7 @@ function App() {
             </span>
           </div>
           <span className="version">
-            PHOTO-CLEANUP <span>v0.1</span>
+            PHOTO-CLEANUP <span>v{status.data?.version ?? "…"}</span>
           </span>
         </div>
       </aside>

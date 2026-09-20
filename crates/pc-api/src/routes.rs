@@ -91,6 +91,9 @@ pub struct RoleTotal {
 
 #[derive(Serialize)]
 pub struct Status {
+    /// What is actually running, so an upgrade can be seen rather than
+    /// assumed. Taken from the build, never written down by hand.
+    version: &'static str,
     files: i64,
     images: i64,
     skipped: i64,
@@ -139,6 +142,7 @@ pub async fn status(State(st): State<Arc<AppState>>) -> Api<Status> {
     let quarantined_bytes = db.journal_quarantined(None)?.iter().map(|e| e.size).sum();
 
     Ok(Json(Status {
+        version: env!("CARGO_PKG_VERSION"),
         files: idx.total,
         images: idx.images,
         skipped: idx.skipped,

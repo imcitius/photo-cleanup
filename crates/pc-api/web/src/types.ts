@@ -25,6 +25,7 @@ export interface Family {
   members: Member[];
 }
 export interface Status {
+  version: string;
   files: number;
   images: number;
   skipped: number;
