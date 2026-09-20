@@ -1135,8 +1135,13 @@ export function Categories({
                   <Thumb
                     thumb={f.thumb}
                     name={f.name}
+                    // Everything the page is showing, in the order it shows
+                    // it: the arrows then walk the whole kind. Handing the
+                    // viewer one row of the grid made four unrelated files
+                    // look like a group, and every one of them opened the
+                    // same four.
                     onClick={() =>
-                      setView({ images: row, start: row.indexOf(f) })
+                      setView({ images: files, start: files.indexOf(f) })
                     }
                   />
                   <strong title={`${f.dir}/${f.name}`}>{f.name}</strong>

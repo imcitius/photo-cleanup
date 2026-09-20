@@ -511,29 +511,45 @@ export function VirtualList<T>({
 }) {
   const [scroll, setScroll] = useState(0);
   const ref = useRef<HTMLDivElement>(null);
+  // The given row height is an estimate. A row of photo cards is as tall as
+  // the window is wide, so a fixed number either cuts the cards off or leaves
+  // a gap under them; the first row that renders says how tall a row is.
+  const [measured, setMeasured] = useState(0);
+  const rowRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const node = rowRef.current;
+    if (!node) return;
+    const observer = new ResizeObserver(([entry]) =>
+      setMeasured(Math.ceil(entry.contentRect.height)),
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  });
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = 0;
     setScroll(0);
   }, [items]);
   if (!items.length) return <Empty title={empty} />;
-  const first = Math.max(0, Math.floor(scroll / rowHeight) - 4),
-    last = Math.min(items.length, Math.ceil((scroll + height) / rowHeight) + 4);
+  const row = measured || rowHeight;
+  const first = Math.max(0, Math.floor(scroll / row) - 4),
+    last = Math.min(items.length, Math.ceil((scroll + height) / row) + 4);
   return (
     <div
       ref={ref}
       className="virtual-list"
-      style={{ height: Math.min(height, items.length * rowHeight) }}
+      style={{ height: Math.min(height, items.length * row) }}
       onScroll={(e) => setScroll(e.currentTarget.scrollTop)}
     >
-      <div style={{ height: items.length * rowHeight, position: "relative" }}>
+      <div style={{ height: items.length * row, position: "relative" }}>
         {items.slice(first, last).map((item, i) => (
           <div
             key={first + i}
             className="virtual-row"
+            ref={i === 0 ? rowRef : undefined}
             style={{
               position: "absolute",
-              top: (first + i) * rowHeight,
-              height: rowHeight,
+              top: (first + i) * row,
+              minHeight: row,
               left: 0,
               right: 0,
             }}
