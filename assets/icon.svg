@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- The same mark the interface carries: layers of one photograph, and a
+       tick for the one that stays. -->
+  <rect width="256" height="256" rx="56" fill="#16241d"/>
+  <g fill="none" stroke="#98cfa9" stroke-width="13"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 60 54 100l74 40 74-40-74-40z"/>
+    <path d="M54 140l74 40 74-40"/>
+  </g>
+  <circle cx="190" cy="186" r="34" fill="#28694f"/>
+  <path d="M176 186l10 11 20-23" fill="none" stroke="#eaf5ee"
+        stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

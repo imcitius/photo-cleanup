@@ -2,9 +2,10 @@
 <!--
   Unraid Community Applications template.
 
-  Copy this file to /boot/config/plugins/dockerMan/templates-user/ on the
-  array, then Docker → Add Container → pick "photo-cleanup" from the
-  template list.
+  This is the Community Applications template. Installing from CA needs
+  nothing else; to add it by hand, copy this file to
+  /boot/config/plugins/dockerMan/templates-user/ on the array, then
+  Docker → Add Container → pick "photo-cleanup" from the template list.
 
   Two things about the mounts are not cosmetic:
 
@@ -24,6 +25,9 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/imcitius/photo-cleanup/issues</Support>
   <Project>https://github.com/imcitius/photo-cleanup</Project>
+  <Icon>https://raw.githubusercontent.com/imcitius/photo-cleanup/main/assets/icon.png</Icon>
+  <TemplateURL>https://raw.githubusercontent.com/imcitius/photo-cleanup/main/templates/photo-cleanup.xml</TemplateURL>
+  <License>MIT</License>
   <Overview>
     Sorting out a large photo archive: duplicates and the versions of one
     shot, bursts with the best frame picked out, Lightroom previews and

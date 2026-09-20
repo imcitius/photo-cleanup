@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<!--
+  Repository profile for Unraid Community Applications. It describes the
+  repository itself, not any one container; the templates live in templates/.
+-->
+<Profile>
+  <Profile>
+    photo-cleanup sorts out a large photo archive on the machine that holds it.
+    It finds the versions of one photograph — an exact copy, a smaller export,
+    a raw with the camera JPEG beside it — and says which is which rather than
+    calling them all duplicates. It tells a burst of frames from a duplicate
+    and helps pick the keeper. It accounts for Lightroom previews and caches,
+    which can always be made again. And it can sort what is left by date.
+
+    Nothing is deleted without a confirmation: files move to a hidden
+    quarantine folder on the same disk, which is instant and reversible, and
+    space returns only after a separate permanent deletion. Everything runs
+    locally, with no internet involved. The interface is in English or
+    Russian.
+  </Profile>
+  <WebPage>https://github.com/imcitius/photo-cleanup</WebPage>
+  <Forum>https://github.com/imcitius/photo-cleanup/issues</Forum>
+  <Icon>https://raw.githubusercontent.com/imcitius/photo-cleanup/main/assets/icon.png</Icon>
+</Profile>

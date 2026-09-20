@@ -136,8 +136,9 @@ docker run -d --name photo-cleanup --user 99:100 -p 8080:8080 \
 Затем открыть `http://<адрес NAS>:8080` и указать корни — те самые
 `/mnt/diskN/...`, что смонтированы внутрь.
 
-В Unraid проще через шаблон: скопировать
-[`deploy/photo-cleanup.xml`](deploy/photo-cleanup.xml) в
+В Unraid проще всего через Community Applications: найти **photo-cleanup**,
+нажать Install и заполнить пути в форме. Если нужно вручную — скопировать
+[`templates/photo-cleanup.xml`](templates/photo-cleanup.xml) в
 `/boot/config/plugins/dockerMan/templates-user/` и добавить контейнер из
 списка шаблонов.
 

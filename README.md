@@ -113,8 +113,10 @@ docker run -d --name photo-cleanup --user 99:100 -p 8080:8080 \
   ghcr.io/imcitius/photo-cleanup:latest
 ```
 
-On Unraid it is easier through the template: copy
-[`deploy/photo-cleanup.xml`](deploy/photo-cleanup.xml) into
+On Unraid the easiest route is Community Applications: search for
+**photo-cleanup**, press Install, and set the paths in the form. Failing that,
+copy
+[`templates/photo-cleanup.xml`](templates/photo-cleanup.xml) into
 `/boot/config/plugins/dockerMan/templates-user/` and add the container from
 the template list.
 
