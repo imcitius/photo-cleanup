@@ -184,7 +184,10 @@ export function ImageViewer({
           >
             <img
               draggable={false}
-              src={`/api/file/${image.file_id}/preview`}
+              // Pixel for pixel only when the frame is being read that way:
+              // the fitted view is a screen-sized render, which is a fraction
+              // of the bytes and of the wait on a NAS.
+              src={`/api/file/${image.file_id}/preview${one ? "?full=1" : ""}`}
               alt={image.name}
               style={{ transform: `translate(${pan.x}px, ${pan.y}px)` }}
               // An <img> cannot read why the server refused, and "could not

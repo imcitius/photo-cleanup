@@ -377,9 +377,9 @@ impl Summary {
             0.0
         };
         format!(
-            "Проиндексировано {} из {} файлов, пропущено {}, уже актуальны {}.\n\
-             Прочитано {} из {} на диске — сэкономлено {saved:.0}% за счёт встроенных превью.\n\
-             Время: {:.1} с",
+            "Indexed {} of {} files, skipped {}, already current {}.\n\
+             Read {} of {} on disk — {saved:.0}% saved by embedded previews.\n\
+             Time: {:.1} s",
             self.indexed,
             self.seen,
             self.skipped,

@@ -1058,7 +1058,77 @@ pub async fn categories(State(st): State<Arc<AppState>>) -> Api<Vec<CategoryGrou
 }
 
 /// Full raster on demand; RAW uses its embedded JPEG, not a thumbnail upsample.
-pub async fn full_preview(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) -> Response {
+/// The longest side of a rendered view.
+///
+/// Enough to fill a screen and to judge sharpness at 1:1 on a crop, and far
+/// short of handing a browser the full 10-megapixel frame: that was 22 MB per
+/// press, decoded and re-encoded every time.
+const VIEW_SIDE: u32 = 2400;
+
+/// Where a rendered view of this file is kept between looks.
+fn view_key(path: &str, md: &std::fs::Metadata, full: bool) -> String {
+    let stamp = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(if full {
+        b"view-full-v1"
+    } else {
+        b"view-2400-v1"
+    });
+    hasher.update(path.as_bytes());
+    hasher.update(&stamp.to_le_bytes());
+    hasher.update(&md.len().to_le_bytes());
+    pc_core::thumbstore::hex32(&hasher.finalize().as_bytes()[..16])
+}
+
+/// A JPEG a browser can actually show: eight bits per channel, whatever the
+/// file held. Sixteen-bit scans and greyscale are not JPEG colour types, and
+/// handing one straight to the encoder fails.
+///
+/// Fitted to the screen unless the frame is being looked at pixel for pixel,
+/// where a downscale would make the 1:1 button a lie.
+fn render(image: &image::DynamicImage, full: bool) -> anyhow::Result<Vec<u8>> {
+    let scaled = if !full && image.width().max(image.height()) > VIEW_SIDE {
+        image.resize(VIEW_SIDE, VIEW_SIDE, image::imageops::FilterType::Lanczos3)
+    } else {
+        image.clone()
+    };
+    let rgb = scaled.to_rgb8();
+    let mut bytes = Vec::new();
+    let quality = if full { 92 } else { 82 };
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality).encode(
+        rgb.as_raw(),
+        rgb.width(),
+        rgb.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(bytes)
+}
+
+#[derive(Deserialize, Default)]
+pub struct ViewQuery {
+    /// Pixel for pixel, as the 1:1 button means it. Read as text rather than
+    /// as a bool: a query string is written by hand as often as by the
+    /// interface, and `?full=1` should not be an error.
+    #[serde(default)]
+    full: Option<String>,
+}
+
+impl ViewQuery {
+    fn full(&self) -> bool {
+        matches!(self.full.as_deref(), Some("1" | "true" | "yes" | ""))
+    }
+}
+
+pub async fn full_preview(
+    State(st): State<Arc<AppState>>,
+    AxPath(id): AxPath<i64>,
+    Query(q): Query<ViewQuery>,
+) -> Response {
     // Wherever the bytes are now: a frame waiting in quarantine is precisely
     // the one worth looking at closely before it is deleted for good.
     let path = {
@@ -1073,14 +1143,24 @@ pub async fn full_preview(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i6
             }
         }
     };
+    let thumbs = st.thumbs.clone();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
         let p = std::path::Path::new(&path);
-        let read = pc_image::read_for_probe(
-            p,
-            std::fs::metadata(p)
-                .map_err(|e| anyhow::anyhow!("{path}: {e}"))?
-                .len(),
-        )?;
+        let md = std::fs::metadata(p).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+        // A rendered view is keyed by the file it came from, so looking at
+        // the same frame twice does not decode it twice. On a NAS holding
+        // 57 MB TIFFs that is the difference between a picture appearing and
+        // a grey rectangle sitting there while the disk works.
+        let full = q.full();
+        let key = view_key(&path, &md, full);
+        if let Some(cached) = thumbs.get(&key) {
+            return Ok(cached);
+        }
+        let read = pc_image::read_for_probe(p, md.len())?;
+        // A JPEG is already what the browser wants, and a raw file carries a
+        // JPEG inside it. Neither is worth a second copy on disk — only the
+        // frames that had to be decoded are kept, and only while they stay
+        // small enough to be worth keeping.
         if read.complete && read.container == pc_image::Container::Jpeg {
             return Ok(read.head);
         }
@@ -1089,9 +1169,11 @@ pub async fn full_preview(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i6
         }
         let image =
             image::load_from_memory(&read.head).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
-        let mut bytes = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95).encode_image(&image)?;
-        Ok(bytes)
+        let rendered = render(&image, full)?;
+        if rendered.len() <= 6 * 1024 * 1024 {
+            let _ = thumbs.put_at(&key, &rendered);
+        }
+        Ok(rendered)
     })
     .await;
     match result {

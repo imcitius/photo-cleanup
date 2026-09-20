@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone)]
 pub struct ThumbStore {
     root: PathBuf,
 }
@@ -59,6 +60,25 @@ impl ThumbStore {
             return Err(e.into());
         }
         Ok(key)
+    }
+
+    /// Store under a key of the caller's choosing, for things that are not
+    /// identified by their own content — a rendered view of a file, which is
+    /// keyed by the file it was rendered from.
+    pub fn put_at(&self, key: &str, jpeg: &[u8]) -> Result<()> {
+        let path = self.path_for(key);
+        let parent = path.parent().context(crate::tr!(
+            "нет родительского каталога",
+            "no parent directory"
+        ))?;
+        fs::create_dir_all(parent)?;
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        fs::write(&tmp, jpeg)?;
+        if let Err(e) = fs::rename(&tmp, &path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        Ok(())
     }
 
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
