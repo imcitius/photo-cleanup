@@ -103,8 +103,12 @@ pub fn prefix_id(path: &Path) -> u64 {
     };
     let mut h = std::collections::hash_map::DefaultHasher::new();
     prefix.hash(&mut h);
-    // Zero is reserved for "unknown", so a prefix never produces it.
-    h.finish() | 1
+    // Zero is reserved for "unknown", so a prefix never produces it. The top
+    // bit goes because this is stored in an `i64` column: a value above
+    // `i64::MAX` comes back saturated, and then the disk a file was indexed on
+    // no longer matches the disk it is asked about — every move refused as a
+    // move between filesystems.
+    (h.finish() >> 1) | 1
 }
 
 #[cfg(test)]
@@ -117,13 +121,38 @@ mod tests {
         // Quarantine compares the source with its destination, and the two
         // reach the comparison spelled differently: one canonicalised, one as
         // the operator typed it, one through an 8.3 short name.
-        assert_eq!(prefix_id(Path::new(r"\\?\C:\foto")), prefix_id(Path::new(r"C:\foto")));
-        assert_eq!(prefix_id(Path::new(r"c:\foto")), prefix_id(Path::new(r"C:\Other")));
+        assert_eq!(
+            prefix_id(Path::new(r"\\?\C:\foto")),
+            prefix_id(Path::new(r"C:\foto"))
+        );
+        assert_eq!(
+            prefix_id(Path::new(r"c:\foto")),
+            prefix_id(Path::new(r"C:\Other"))
+        );
         assert_eq!(
             prefix_id(Path::new(r"\\?\UNC\nas\photo\a")),
             prefix_id(Path::new(r"\\nas\photo\b"))
         );
-        assert_ne!(prefix_id(Path::new(r"C:\foto")), prefix_id(Path::new(r"D:\foto")));
+        assert_ne!(
+            prefix_id(Path::new(r"C:\foto")),
+            prefix_id(Path::new(r"D:\foto"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_device_fits_the_column_it_is_stored_in() {
+        for path in [
+            r"C:\foto",
+            r"D:\",
+            r"\\?\C:\foto",
+            r"\\nas\photo",
+            r"relative\path",
+        ] {
+            let id = prefix_id(Path::new(path));
+            assert!(id != 0 && id <= i64::MAX as u64, "{path}: {id}");
+            assert_eq!(id, prefix_id(Path::new(path)), "{path} is not stable");
+        }
     }
 
     #[test]

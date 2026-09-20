@@ -153,9 +153,7 @@ fn exact_copies_are_found_and_the_original_is_not_among_them() {
         "копия в Telegram не найдена: {paths:?}"
     );
     assert!(
-        paths
-            .iter()
-            .any(|x| tail(x, "Backup/2019/DSC01234.JPG")),
+        paths.iter().any(|x| tail(x, "Backup/2019/DSC01234.JPG")),
         "копия в Backup не найдена: {paths:?}"
     );
     // The one in its proper place is what the others are measured against.

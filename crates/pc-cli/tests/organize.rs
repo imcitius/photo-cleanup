@@ -109,9 +109,13 @@ fn options(dest: &Path) -> pc_organize::Options {
     }
 }
 
+/// The destination, relative to the new tree and written with one separator.
+/// These tests are about which folder a photograph lands in, not about which
+/// slash the platform writes it with.
 fn rel(dst: &str, dest: &Path) -> String {
     dst.strip_prefix(&*dest.to_string_lossy())
         .unwrap_or(dst)
+        .replace('\\', "/")
         .trim_start_matches('/')
         .to_string()
 }
