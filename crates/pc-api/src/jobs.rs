@@ -401,8 +401,23 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
             Ok(())
         };
 
+        let thumbs = || -> Result<()> {
+            // Every thumbnail, when asked; otherwise only the ones that are
+            // missing, unreadable or flat.
+            let all = req
+                .params
+                .get("all")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let report = pc_work::thumbs::rebuild(&db, &st.thumbs, all, control)?;
+            // The phase line is what the job page shows when it is over.
+            control.begin(&report.describe(), 0, 0)?;
+            Ok(())
+        };
+
         match req.kind.as_str() {
             "scan" => scan()?,
+            "thumbs" => thumbs()?,
             "index" => index()?,
             "families" => families()?,
             "series" => series()?,

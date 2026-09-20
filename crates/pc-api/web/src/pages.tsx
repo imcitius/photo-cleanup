@@ -568,6 +568,20 @@ export function Setup({
           >
             {t("nachat_indeksatsiyu")}
           </Button>
+          {/* Indexing never returns to a file it has already read, which is
+              right for the archive and wrong for a thumbnail that came out
+              grey. This reads the thumbnails instead and makes the bad ones
+              again — nothing else about the index is touched. */}
+          <div className="inline">
+            <Button
+              disabled={disabled || busy}
+              title={ui.rebuildThumbsHelp}
+              onClick={() => run("thumbs")}
+            >
+              {ui.rebuildThumbs}
+            </Button>
+            <span className="muted">{ui.rebuildThumbsHelp}</span>
+          </div>
         </div>
       </section>
       <section className="panel setup-section">

@@ -59,6 +59,8 @@ enum Command {
     Status,
     /// What one image file says about itself, and what happens when it is read
     Inspect(InspectArgs),
+    /// Make thumbnails again for frames whose thumbnail is grey or missing
+    Thumbs(ThumbsArgs),
     /// Lightroom catalogues that were found
     Catalogs,
 }
@@ -145,6 +147,16 @@ struct OrganizeUndoArgs {
     run: Option<i64>,
     #[arg(long)]
     yes: bool,
+}
+
+#[derive(Args)]
+struct ThumbsArgs {
+    /// Where the thumbnails are. Next to the database by default
+    #[arg(long)]
+    thumbs: Option<PathBuf>,
+    /// Make every thumbnail again, not only the ones that are no good
+    #[arg(long)]
+    all: bool,
 }
 
 #[derive(Args)]
@@ -516,6 +528,13 @@ fn main() -> Result<()> {
         Command::Organize(OrganizeCmd::Runs) => cmd_organize_runs(&db),
         Command::Status => cmd_status(&db),
         Command::Inspect(a) => cmd_inspect(&db, &a),
+        Command::Thumbs(a) => {
+            let store = pc_core::ThumbStore::new(thumbs_dir(&cli.db, a.thumbs));
+            let report =
+                pc_work::thumbs::rebuild(&db, &store, a.all, &pc_core::work::Control::default())?;
+            println!("{}", report.describe());
+            Ok(())
+        }
         Command::Catalogs => cmd_catalogs(&db),
     }
 }

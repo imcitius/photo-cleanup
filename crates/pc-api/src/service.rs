@@ -53,6 +53,7 @@ pub fn validate(r: &Request) -> Result<()> {
             | "families"
             | "series"
             | "categories"
+            | "thumbs"
             | "build-all"
             | "all"
             | "plan-apply"

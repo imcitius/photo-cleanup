@@ -71,6 +71,7 @@ export const ui = {
     settings: "Paths, thresholds, and a workspace that suits you.",
   },
   jobs: {
+    thumbs: "Making the thumbnails again",
     scan: "Inventory",
     index: "Indexing",
     families: "Duplicates and versions",
@@ -211,6 +212,9 @@ export const ui = {
     "Mark this frame as unwanted. It joins the move plan; the file stays where it is until you approve that plan.",
   keepFrame: "Keep it",
   keepFrameHelp: "Clear the mark: the frame stays in the archive.",
+  rebuildThumbs: "Rebuild thumbnails",
+  rebuildThumbsHelp:
+    "Checks the stored thumbnails and makes again the ones that are missing, unreadable or grey. Only those files are read from the archive.",
   hideCopies: "Show one file each",
   copiesInBurstHelp:
     "These frames are the same file in several places. The plan keeps one of them; the rest go to quarantine with the other copies.",
