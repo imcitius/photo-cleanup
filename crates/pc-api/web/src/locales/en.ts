@@ -212,6 +212,9 @@ export const ui = {
     "Mark this frame as unwanted. It joins the move plan; the file stays where it is until you approve that plan.",
   keepFrame: "Keep it",
   keepFrameHelp: "Clear the mark: the frame stays in the archive.",
+  moveFolder: "move this folder\u2019s copies",
+  moveFolderHelp:
+    "Shows how many files in this folder the plan calls copies, and moves them all to quarantine at once. The journal puts them back.",
   preferFolder: "keep this folder everywhere",
   preferFolderHelp:
     "In every group that holds a file from this folder, that file becomes the kept one. The choice is remembered as yours and survives a rebuild.",
@@ -548,6 +551,7 @@ export const messages = {
   perenesyono_v_karantin: "Moved to quarantine: {0}. The journal puts it back.",
   papka_teper_hranimaya:
     "Groups changed: {0}. The kept files are now the ones in {1}",
+  iz_papki_uedet: "From {2}, going to quarantine: {0} files · {1}",
   kopiy_v_serii: "{0} files here are copies, of {1} photographs",
   gruppa_kopiya: "group {0} · copy {1} of {2}",
   gruppa_hranimyy: "group {0} · kept of {1}",

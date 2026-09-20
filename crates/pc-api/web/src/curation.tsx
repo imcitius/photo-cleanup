@@ -295,6 +295,12 @@ export function Families({
       dir: string;
       groups: number;
     } | null>(null),
+    [folderMove, setFolderMove] = useState<{
+      dir: string;
+      token: string;
+      files: number;
+      bytes: number;
+    } | null>(null),
     [focused, setFocused] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null),
     searchRef = useRef<HTMLInputElement>(null);
@@ -500,6 +506,55 @@ export function Families({
     }
   };
 
+  // The other half of naming a folder: one folder holds the originals, the
+  // rest are copies of it — and a folder of copies is cleared in one plan
+  // rather than group by group. Shown before it runs, because this is a
+  // thousand files rather than one.
+  const prepareFolderMove = async (dir: string) => {
+    setBusy(true);
+    setError("");
+    try {
+      const preview = await post<Preview>("/preview", {
+        kind: "plan-apply",
+        params: { roles: ["copy"], folder: dir },
+      });
+      if (!preview.items.length) {
+        setError(ui.groupApplyNothing);
+        return;
+      }
+      setFolderMove({
+        dir,
+        token: preview.token,
+        files: preview.items.length,
+        bytes: preview.items.reduce((n, i) => n + (i.size || 0), 0),
+      });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runFolderMove = async () => {
+    if (!folderMove) return;
+    setBusy(true);
+    setError("");
+    try {
+      await post("/jobs", {
+        kind: "plan-apply",
+        params: { roles: ["copy"], folder: folderMove.dir },
+        plan_token: folderMove.token,
+      });
+      setFolderMove(null);
+      setSelected(null);
+      onChange();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const split = async (m: Member) => {
     setBusy(true);
     setError("");
@@ -592,6 +647,30 @@ export function Families({
       {error && <ErrorBox message={error} />}
       {moved && (
         <Notice>{t("perenesyono_v_karantin", moved.names.join(", "))}</Notice>
+      )}
+      {folderMove && (
+        <Notice tone="warning">
+          <p>
+            {t(
+              "iz_papki_uedet",
+              number(folderMove.files),
+              bytes(folderMove.bytes),
+              folderMove.dir,
+            )}
+          </p>
+          <div className="inline">
+            <Button
+              kind="primary"
+              disabled={disabled || busy}
+              onClick={runFolderMove}
+            >
+              {ui.move}
+            </Button>
+            <Button disabled={busy} onClick={() => setFolderMove(null)}>
+              {ui.cancel}
+            </Button>
+          </div>
+        </Notice>
       )}
       {folderResult && (
         <Notice>
@@ -853,6 +932,14 @@ export function Families({
                           onClick={() => preferFolder(m.dir)}
                         >
                           {ui.preferFolder}
+                        </button>
+                        <button
+                          className="link"
+                          disabled={disabled || busy}
+                          title={ui.moveFolderHelp}
+                          onClick={() => prepareFolderMove(m.dir)}
+                        >
+                          {ui.moveFolder}
                         </button>
                       </div>
                       <div className="muted">

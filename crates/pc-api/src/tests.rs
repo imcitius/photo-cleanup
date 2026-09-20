@@ -477,7 +477,12 @@ async fn one_file_carries_its_evidence_and_an_unknown_one_is_a_404() {
     assert_eq!(f.wait(id).await["state"], "done");
 
     let (_, recent) = f.req("GET", "/api/recent?limit=1", Value::Null).await;
-    let file_id = recent[0]["id"].as_i64().unwrap();
+    // Printed rather than unwrapped: this line has failed twice in a
+    // thousand runs, and an empty list and an error body look the same to
+    // `unwrap`. Whichever it is, the next failure says so.
+    let file_id = recent[0]["id"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("/api/recent answered: {recent}"));
     let (s, d) = f
         .req("GET", &format!("/api/file/{file_id}/details"), Value::Null)
         .await;

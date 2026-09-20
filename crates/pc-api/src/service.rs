@@ -596,6 +596,14 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 plan.candidates.retain(|c| c.family_id == family);
                 plan.refusals.clear();
             }
+            // ...or to one folder. A folder that copies another is cleared in
+            // one go rather than in a thousand presses; what leaves is only
+            // what the plan already called a copy, and only from there.
+            if let Some(dir) = r.params.get("folder").and_then(Value::as_str) {
+                plan.candidates
+                    .retain(|c| pc_core::dir_name(&c.path) == dir);
+                plan.refusals.clear();
+            }
             for refusal in plan.refusals {
                 add_refusal(refusal.path, refusal.why);
             }
