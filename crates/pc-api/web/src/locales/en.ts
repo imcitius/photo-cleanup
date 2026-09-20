@@ -212,6 +212,9 @@ export const ui = {
     "Mark this frame as unwanted. It joins the move plan; the file stays where it is until you approve that plan.",
   keepFrame: "Keep it",
   keepFrameHelp: "Clear the mark: the frame stays in the archive.",
+  preferFolder: "keep this folder everywhere",
+  preferFolderHelp:
+    "In every group that holds a file from this folder, that file becomes the kept one. The choice is remembered as yours and survives a rebuild.",
   rebuildThumbs: "Rebuild thumbnails",
   rebuildThumbsHelp:
     "Checks the stored thumbnails and makes again the ones that are missing, unreadable or grey. Only those files are read from the archive.",
@@ -543,6 +546,8 @@ export const messages = {
   primer_puti_k_arhivu: "For example, /home/name/Pictures",
   mesto_po_kachestvu: "#{0} by quality",
   perenesyono_v_karantin: "Moved to quarantine: {0}. The journal puts it back.",
+  papka_teper_hranimaya:
+    "Groups changed: {0}. The kept files are now the ones in {1}",
   kopiy_v_serii: "{0} files here are copies, of {1} photographs",
   gruppa_kopiya: "group {0} · copy {1} of {2}",
   gruppa_hranimyy: "group {0} · kept of {1}",

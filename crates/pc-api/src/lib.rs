@@ -39,6 +39,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/reset", post(service::reset))
         .route("/api/recent", get(service::recent))
         .route("/api/families/{id}/split", post(service::split_family))
+        .route("/api/keepers/prefer-folder", post(service::prefer_folder))
         .route("/api/series/{id}/best", post(service::best))
         .route("/api/series/{id}/reject-rest", post(service::reject_rest))
         .route("/api/series/{id}/keep-all", post(service::keep_all))

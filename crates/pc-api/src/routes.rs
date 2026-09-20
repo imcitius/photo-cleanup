@@ -308,7 +308,10 @@ pub async fn families(
         "count" => "COUNT(*) DESC",
         "size" => "SUM(f.size) DESC",
         "biggest" => "MAX(f.size) DESC",
-        "path" => "MIN(f.path) ASC",
+        // The path of the file the group keeps, which is the folder the
+        // list shows beside it: sorting by anything else puts the boundary
+        // in a different place from the label.
+        "path" => "MIN(CASE WHEN f.id = fa.keeper_file THEN f.path END) ASC",
         _ => "SUM(CASE WHEN fm.role='copy' AND f.id != fa.keeper_file THEN f.size ELSE 0 END) DESC",
     };
     let base = "FROM families fa JOIN family_members fm ON fm.family_id=fa.id JOIN files f ON f.id=fm.file_id WHERE f.state='present' GROUP BY fa.id HAVING (?1 OR COUNT(*)>1) AND (?2='' OR MAX(instr(lower(f.path),lower(?2)))>0) AND (?3='' OR MAX(fm.role=?3)) AND (?4='' OR MAX(instr(f.disk,?4))>0) AND SUM(f.size)>=?5";

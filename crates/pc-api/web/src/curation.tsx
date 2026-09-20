@@ -291,6 +291,10 @@ export function Families({
     [moved, setMoved] = useState<{ family: number; names: string[] } | null>(
       null,
     ),
+    [folderResult, setFolderResult] = useState<{
+      dir: string;
+      groups: number;
+    } | null>(null),
     [focused, setFocused] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null),
     searchRef = useRef<HTMLInputElement>(null);
@@ -477,6 +481,25 @@ export function Families({
     }
   };
 
+  // Ten thousand groups, one press each, is still ten thousand presses. An
+  // archive usually has one folder the photographs were worked in; told
+  // which, every group that has a file there keeps that file.
+  const preferFolder = async (dir: string) => {
+    setBusy(true);
+    setError("");
+    try {
+      const r = await post<{ groups: number }>("/keepers/prefer-folder", {
+        dir,
+      });
+      setFolderResult({ dir, groups: r.groups });
+      onChange();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const split = async (m: Member) => {
     setBusy(true);
     setError("");
@@ -570,6 +593,15 @@ export function Families({
       {moved && (
         <Notice>{t("perenesyono_v_karantin", moved.names.join(", "))}</Notice>
       )}
+      {folderResult && (
+        <Notice>
+          {t(
+            "papka_teper_hranimaya",
+            number(folderResult.groups),
+            folderResult.dir,
+          )}
+        </Notice>
+      )}
       <div className="family-workspace">
         <div className="family-list-pane">
           <div
@@ -631,7 +663,17 @@ export function Families({
                       >
                         {f ? (
                           <button
-                            className={`family-list-item ${selected?.id === f.id ? "active" : ""}`}
+                            className={`family-list-item ${selected?.id === f.id ? "active" : ""}${
+                              // Sorted by folder, the list walks the archive
+                              // section by section, and a line where the
+                              // folder changes is what makes that visible.
+                              sort === "path" &&
+                              cache.get(index - 1)?.members[0]?.dir !==
+                                f.members[0]?.dir
+                                ? " folder-start"
+                                : ""
+                            }`}
+                            title={f.members[0]?.dir}
                             onClick={() => setSelected(f)}
                           >
                             <Thumb
@@ -800,9 +842,19 @@ export function Families({
                         )}
                       </div>
                       <strong>{m.name}</strong>
-                      <code className="path" title={`${m.dir}/${m.name}`}>
-                        {m.dir}
-                      </code>
+                      <div className="member-folder">
+                        <code className="path" title={`${m.dir}/${m.name}`}>
+                          {m.dir}
+                        </code>
+                        <button
+                          className="link"
+                          disabled={disabled || busy}
+                          title={ui.preferFolderHelp}
+                          onClick={() => preferFolder(m.dir)}
+                        >
+                          {ui.preferFolder}
+                        </button>
+                      </div>
                       <div className="muted">
                         {m.width} × {m.height} · {bytes(m.size)}
                       </div>
@@ -1228,6 +1280,12 @@ export function Categories({
                     }
                   />
                   <strong title={`${f.dir}/${f.name}`}>{f.name}</strong>
+                  {/* Two files of the same name in two folders are two files,
+                      and without this the grid shows what looks like the same
+                      card twice. */}
+                  <code className="path" title={f.dir}>
+                    {f.dir}
+                  </code>
                   <span className="muted">
                     {f.width} × {f.height} · {bytes(f.size)}
                   </span>

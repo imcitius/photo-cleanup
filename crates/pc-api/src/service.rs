@@ -995,6 +995,64 @@ pub async fn split_family(
         Ok(json!({"ok":true}))
     })
 }
+/// Treat one folder as where the archive's originals live.
+///
+/// Going through ten thousand groups one at a time is the work this is meant
+/// to save: an archive usually has a folder the photographs were worked in
+/// and other folders that are copies of it. Told which folder that is, every
+/// group that has a file there keeps that file, and the rest become the
+/// copies they are.
+///
+/// The choice is written down as a decision of the user's, not a guess, so
+/// rebuilding the groups does not quietly undo it.
+pub async fn prefer_folder(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Response {
+    mutate(&st, |db| {
+        let dir = v["dir"]
+            .as_str()
+            .filter(|d| !d.is_empty())
+            .context(pc_core::tr!("Не указана папка", "No folder given"))?
+            .to_string();
+
+        let rows: Vec<(i64, i64, String, f64)> = {
+            let mut st = db.conn.prepare(
+                "SELECT fm.family_id, fm.file_id, f.path, COALESCE(fm.quality, 0)
+                   FROM family_members fm JOIN files f ON f.id = fm.file_id
+                  WHERE f.state = 'present'",
+            )?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+
+        // The best file the folder holds, per group. Within one group every
+        // member is the same photograph, so this chooses where it is kept,
+        // not what is kept.
+        let mut best: std::collections::HashMap<i64, (i64, f64)> = std::collections::HashMap::new();
+        for (family, file, path, quality) in rows {
+            if pc_core::dir_name(&path) != dir {
+                continue;
+            }
+            let e = best.entry(family).or_insert((file, quality));
+            if quality > e.1 {
+                *e = (file, quality);
+            }
+        }
+
+        let tx = db.conn.unchecked_transaction()?;
+        let mut changed = 0u64;
+        for (family, (file, _)) in &best {
+            if db.set_family_keeper(*family, *file)? {
+                db.conn
+                    .execute("INSERT OR IGNORE INTO manual_keepers VALUES(?1)", [file])?;
+                changed += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(json!({"groups": changed, "dir": dir}))
+    })
+}
+
 pub fn mutate(st: &AppState, f: impl FnOnce(&Db) -> Result<Value>) -> Response {
     let _gate = st.mutation.lock().unwrap();
     if let Err(e) = jobs::idle(st) {

@@ -484,6 +484,26 @@ main {
   overflow-wrap: anywhere;
 }
 
+/* Where the list crosses from one folder into the next. */
+.family-list-item.folder-start {
+  border-top: 2px solid var(--accent);
+}
+.member-folder {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+.member-folder > .path {
+  flex: 1;
+}
+.member-folder > .link {
+  flex-shrink: 0;
+}
+.photo-card > .path {
+  font-size: 10px;
+}
+
 /* What the role labels mean, next to where they are read. */
 .role-legend {
   margin: 4px 0 18px;
