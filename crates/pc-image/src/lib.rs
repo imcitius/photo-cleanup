@@ -112,7 +112,7 @@ pub fn probe_parts(
     };
 
     let metrics = metrics::measure(&pixels);
-    let thumb = thumb::make(&pixels, meta.orientation);
+    let thumb = thumb::make(pixels, meta.orientation);
     Ok(Probe {
         container,
         extension_lied,

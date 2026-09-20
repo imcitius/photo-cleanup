@@ -251,6 +251,28 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE files ADD COLUMN text_banding REAL;
     "#,
+    r#"
+    CREATE TABLE jobs(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, params TEXT NOT NULL,
+      state TEXT NOT NULL, progress TEXT NOT NULL DEFAULT '{}', started_at INTEGER NOT NULL,
+      finished_at INTEGER, error TEXT, run_id INTEGER);
+    CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE manual_keepers(file_id INTEGER PRIMARY KEY REFERENCES files(id));
+    CREATE TABLE manual_splits(file_id INTEGER PRIMARY KEY REFERENCES files(id));
+    CREATE TABLE manual_best(file_id INTEGER PRIMARY KEY REFERENCES files(id));
+    "#,
+    // 010 — frames the user looked at and did not want.
+    //
+    // The planner reasons about families: a file is a candidate because some
+    // other file makes it redundant. A burst of seventy near-identical frames
+    // has no such argument to offer — they are all different photographs, and
+    // which of them is worth keeping is a judgement only the person who was
+    // there can make. This is where that judgement is written down.
+    r#"
+    CREATE TABLE manual_rejects(
+        file_id  INTEGER PRIMARY KEY REFERENCES files(id),
+        marked_at INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

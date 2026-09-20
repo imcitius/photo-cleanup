@@ -1,0 +1,18 @@
+[package]
+name = "pc-work"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pc-core.workspace = true
+pc-db.workspace = true
+pc-walk.workspace = true
+pc-lightroom.workspace = true
+pc-image.workspace = true
+pc-hash.workspace = true
+anyhow.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+libc.workspace = true

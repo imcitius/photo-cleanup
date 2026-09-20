@@ -1,0 +1,591 @@
+// User-facing vocabulary lives here; data-provided explanations stay on the server.
+export const ru = {
+  app: "photo-cleanup",
+  archive: "Рабочее пространство",
+  local: "Локальный фотоархив",
+  pages: {
+    overview: "Обзор архива",
+    setup: "Опись и индекс",
+    families: "Дубликаты и версии",
+    series: "Серии",
+    categories: "Виды",
+    plan: "План и перенос",
+    organize: "Раскладка по датам",
+    derived: "Превью и кэши",
+    quarantine: "Карантин",
+    journal: "Журнал и прогоны",
+    settings: "Настройки",
+  },
+  subtitles: {
+    overview: "Всё, что происходит с вашим архивом, — в одном месте.",
+    setup:
+      "Выберите папки на сервере. Мы прочитаем архив и построим его карту.",
+    families:
+      "Один снимок, несколько файлов: копии, экспорты, уменьшённые версии. Решение остаётся за вами.",
+    series: "Близкие моменты съёмки. Серии — не дубликаты.",
+    categories: "Разберите изображения по их визуальным признакам.",
+    plan: "Проверьте, что уйдёт в карантин и какая версия останется.",
+    organize: "От отдельных файлов — к событиям и датам.",
+    derived: "Производные данные, которые можно создать заново.",
+    quarantine: "Файлы остаются на диске, пока вы не удалите их окончательно.",
+    journal: "Каждое изменение архива оставляет запись.",
+    settings: "Пути, пороги и удобный для вас вид рабочего пространства.",
+  },
+  jobs: {
+    scan: "Опись",
+    index: "Индексация",
+    families: "Дубликаты и версии",
+    series: "Серии",
+    categories: "Виды",
+    "build-all": "Дубликаты → серии → виды",
+    all: "Весь путь",
+    "plan-apply": "Перенос в карантин",
+    "derived-clean": "Очистка превью",
+    "derived-purge": "Окончательное удаление",
+    "organize-apply": "Раскладка по датам",
+    "organize-undo": "Откат раскладки",
+    "journal-undo": "Восстановление файла",
+  },
+  states: {
+    queued: "В очереди",
+    running: "Выполняется",
+    done: "Завершено",
+    failed: "Ошибка",
+    cancelled: "Остановлено",
+    interrupted: "Прервано",
+    pending: "Требует проверки",
+    undone: "Отменено",
+    purged: "Удалено навсегда",
+  },
+  loading: "Загружаем данные…",
+  retry: "Повторить",
+  refresh: "Обновить",
+  close: "Закрыть",
+  cancel: "Отмена",
+  stop: "Остановить",
+  stopping: "Останавливаем…",
+  save: "Сохранить",
+  saved: "Настройки сохранены",
+  back: "Назад",
+  next: "Далее",
+  empty: "Пока ничего нет",
+  noResults: "Ничего не найдено",
+  reset: "Сбросить фильтры",
+  unknownDate: "Дата неизвестна",
+  unknownCamera: "Камера не определена",
+  backup: "Карантин не заменяет резервную копию",
+  backupDetail:
+    "Ничего не удаляется без вашего слова, но отказ диска — это отдельный риск. Держите копию архива.",
+  parity: "Массив без паритета",
+  parityDetail:
+    "Диски смонтированы поодиночке: отказ одного из них теряет то, что на нём лежало.",
+  rootsHint:
+    "Выбирайте папки с исходниками. Вложенные папки обходятся сами; фотобиблиотеки macOS и превью Lightroom не трогаются.",
+  rootsHintArray:
+    "На Unraid выбирайте /mnt/diskN/…, а не /mnt/user/…: так перенос остаётся в пределах одного физического диска.",
+  lrWarning:
+    "Перенос разорвёт ссылки в Lightroom: каталог хранит абсолютные пути. Включайте только после проверки каталога.",
+  noInternet: "Работает без интернета",
+  keyboard: "Клавиши",
+  search: "Поиск по имени или пути",
+  firstTitle: "Начнём с вашего архива",
+  firstText:
+    "Укажите папки с фотографиями. Сначала составим опись, затем найдём версии одного снимка и подготовим план.",
+  chooseRoots: "Выбрать папки",
+  nextStep: "Следующий шаг",
+  pipeline: "Путь к порядку",
+  pipelineText: "От первого обхода до аккуратного архива.",
+  liveTitle: "Уже в индексе",
+  liveHint: "Список пополняется по ходу работы — останавливать не нужно.",
+  liveResume:
+    "Остановка безопасна: прочитанное сохранено, следующий запуск продолжит с того же места.",
+  workersHint:
+    "0 — оставить одно ядро свободным. Чтение и разбор снимков идут в фоновом классе планировщика: браузер и редактор всегда получают процессор раньше.",
+  resetTitle: "Сброс индекса",
+  resetText:
+    "Забыть всё, что прочитано об архиве: файлы, группы дубликатов, серии, виды и кэш превью. Сами фотографии не трогаются. Журнал переносов и настройки остаются, иначе вернуть файлы из карантина будет нечем.",
+  resetWord: "СБРОСИТЬ",
+  resetAction: "Сбросить индекс",
+  resetPrompt: "Введите СБРОСИТЬ, чтобы подтвердить",
+  resetDone: "Индекс очищен. Начните с описи.",
+  skippedNote:
+    "Пропущенные файлы остались на месте и ничем не затронуты. Обычно это видео, архивы и всё, что не является изображением: индекс их не читает.",
+  nowRunning: "Сейчас выполняется",
+  doneSoFar: "Что уже выполнялось",
+  duration: "Длительность",
+  journalEmptyExplained:
+    "Журнал записывает только изменения в архиве: перенос в карантин, окончательное удаление и раскладку по датам. Опись, индексация и разбор ничего не меняют на диске, поэтому записей пока нет. Что именно выполнялось — в списке ниже.",
+  sdelatVsyo: "Сделать всё",
+  sdelatVsyoOpisanie:
+    "Опись, индекс, дубликаты, серии и виды — одной задачей, без ожидания между стадиями. Ничего не переносится и не удаляется: это только чтение, план переноса вы всё равно будете утверждать отдельно.",
+  recoverable: "Можно вернуть",
+  spaceNote: "Место освободится после удаления из карантина.",
+  copy: "Точные копии",
+  resize: "Уменьшенные версии",
+  previews: "Превью Lightroom и кэши",
+  file: "Файл",
+  files: "Файлов",
+  size: "Объём",
+  path: "Путь",
+  source: "Источник",
+  destination: "Назначение",
+  reason: "Причина",
+  protected: "Защищено",
+  keeper: "Хранимый файл",
+  setKeeper: "Оставить именно этот",
+  setKeeperHelp:
+    "Этот файл останется в архиве, а остальные версии из этой группы станут кандидатами на перенос в карантин.",
+  split: "Это другой снимок",
+  splitHelp:
+    "Файл попал в группу по ошибке — это отдельный кадр, а не версия того же самого. Он уйдёт из группы и больше не будет считаться дубликатом.",
+  familyActionsHelp:
+    "Группа — это один снимок в нескольких файлах. «Оставить именно этот» выбирает, какая версия останется; «Это другой снимок» убирает файл из группы, если он попал сюда по ошибке. Ничего не переносится, пока вы не утвердите план.",
+  noExactCopies: "точных копий нет",
+  compare: "Сравнить",
+  compareHelp: "Выберите два файла для сравнения",
+  previousFrame: "Предыдущий кадр",
+  nextFrame: "Следующий кадр",
+  pinForCompare: "Закрепить для сравнения",
+  unpin: "Снять закрепление",
+  pinnedFrame: "закреплён",
+  viewerHelp:
+    "Стрелки ← → листают кадры на одном месте: так видно разницу в несколько пикселей. Клавиша C закрепляет текущий кадр, и следующий показывается рядом или поверх него. В масштабе 1:1 кадр перетаскивается, панорамирование общее.",
+  best: "Лучший кадр",
+  setBest: "Назначить лучшим",
+  quarantineExplained:
+    "Карантин — это не удаление. Файл переезжает в скрытую папку .photo-cleanup-quarantine рядом с собой, в той же папке архива: тот же диск, переезд мгновенный, ни один байт не копируется. Снимок пропадает из архива, но лежит на месте, и возвращается одной кнопкой на странице «Карантин». Место на диске освободится только после окончательного удаления — это отдельное действие с отдельным подтверждением.",
+  planColumnsHelp:
+    "Слева — файл, который переедет. Справа — куда он переедет и какая версия останется в архиве вместо него.",
+  quarantineFolderHelp:
+    "По умолчанию карантин не задаётся одной папкой: каждый файл уезжает в скрытую .photo-cleanup-quarantine рядом с собой. Укажите путь здесь, если хотите собрать всё перенесённое в одном месте — оно должно быть на том же диске, что и архив.",
+  markedByHand: "ОТМЕЧЕН ВРУЧНУЮ",
+  rejectFrame: "В карантин",
+  rejectFrameHelp:
+    "Отметить кадр как ненужный. Он попадёт в план переноса; файл останется на месте, пока вы не утвердите план.",
+  keepFrame: "Вернуть",
+  keepFrameHelp: "Снять отметку: кадр останется в архиве.",
+  rejectRest: "Отметить все, кроме лучшего",
+  rejectRestHelp:
+    "Отметить каждый кадр серии, кроме назначенного лучшим. Отметки снимаются одной кнопкой рядом.",
+  keepAll: "Снять все отметки",
+  seriesPickHelp:
+    "Кадры идут в порядке съёмки. ★ выбирает лучший, «В карантин» отмечает ненужные — отметки копятся и уходят в план переноса, где вы их ещё раз увидите целиком.",
+  preview: "Предпросмотр плана",
+  previewHint: "Сначала проверьте список, объём и пути назначения.",
+  move: "Перенести в карантин",
+  apply: "Выполнить план",
+  undo: "Восстановить",
+  undoRun: "Откатить прогон",
+  purge: "Удалить навсегда",
+  purgeWord: "УДАЛИТЬ",
+  purgeWarning:
+    "Это навсегда. Удаление из карантина необратимо — восстановить файлы будет неоткуда, кроме вашей резервной копии.",
+  noPlan: "Выберите параметры и откройте предпросмотр.",
+  noCandidates: "Нет кандидатов на перенос",
+  refusals: "Отказы и защищённые файлы",
+  willStay: "Останется в архиве",
+  willMove: "Перейдёт в карантин",
+  manual: "Исправлено вручную",
+  manualHint: "Ручная правка сохраняется при повторной обработке.",
+  onlyPhotos:
+    "В архиве только фотографии: сканов, скриншотов и пустых кадров не нашлось. Если какой-то снимок относится к другому виду — выберите его в списке под карточкой, ручная пометка сохраняется.",
+  rebuildCategories: "Пересобрать виды",
+  rebuildCategoriesHelp:
+    "Разобрать заново по текущему индексу. Файлы не перечитываются — займёт несколько секунд.",
+  protectedSeries:
+    "Pixel-shift защищён: все кадры составляют один снимок. Прореживание недоступно.",
+  seriesNote:
+    "Ни один кадр серии не становится кандидатом на удаление только из-за участия в серии.",
+  pendingNote:
+    "Операция была прервана. Сверьте исходный путь и назначение: файл мог быть перенесён до обновления журнала. Если началось окончательное удаление, часть данных уже может отсутствовать.",
+  jobNote: "Можно закрыть вкладку — задача продолжится на сервере.",
+  stopNote:
+    "Остановка на границе файла. Уже выполненные переносы останутся в журнале.",
+} as const;
+export const jobName = (kind: string) =>
+  ru.jobs[kind as keyof typeof ru.jobs] || kind;
+export const stateName = (state: string) =>
+  ru.states[state as keyof typeof ru.states] || state;
+export const number = (n: number) => n.toLocaleString("ru-RU");
+export function bytes(n: number) {
+  const units = ["Б", "КиБ", "МиБ", "ГиБ", "ТиБ"];
+  let i = 0;
+  while (n >= 1024 && i < 4) {
+    n /= 1024;
+    i++;
+  }
+  return `${n.toLocaleString("ru-RU", { maximumFractionDigits: i ? 1 : 0 })} ${units[i]}`;
+}
+export const when = (n: number | null | undefined) =>
+  n == null
+    ? ru.unknownDate
+    : new Date(n * 1000).toLocaleString("ru-RU", {
+        timeZone: "UTC",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+export const basename = (p: string) => p.split("/").pop() || p;
+/** Seconds as a person says them: "47 с", "3 мин 20 с", "1 ч 12 мин". */
+export function duration(seconds: number) {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s} с`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} мин ${s % 60} с`;
+  return `${Math.floor(m / 60)} ч ${m % 60} мин`;
+}
+/** Colour for a finished job's badge. */
+export const jobTone = (state: string) =>
+  state === "failed" || state === "interrupted"
+    ? "warning"
+    : state === "cancelled"
+      ? "muted"
+      : "";
+/** Where a shot's date came from, in words rather than a column value. */
+export const dateSourceName = (source: string) =>
+  ({
+    exif: "EXIF, из камеры",
+    xmp: "XMP, из каталога",
+    filename: "Разобрано из имени файла",
+    filesystem: "Время файла на диске",
+    none: "Неизвестно",
+  })[source] || source;
+/**
+ * True when the chosen folders look like an Unraid array: separate disks
+ * mounted side by side, with a union view over them.
+ *
+ * The advice that follows from that — pick /mnt/diskN so a move stays on one
+ * spindle, and the warning that a lost disk is a lost disk — is real, and
+ * wrong to show to everyone else. Nobody indexing a laptop's Pictures folder
+ * needs to read about somebody's NAS.
+ */
+export const looksLikeArray = (roots: string[] | undefined) =>
+  !!roots?.some((r) => /^\/mnt\/(disk\d+|user|cache)\b/.test(r));
+
+// Screen text and parameterized messages. Keep all translations in this file.
+const messages = {
+  net_prevyu: "Нет превью",
+  otkryt: "Открыть {0}",
+  vybrat_papku_na_servere: "Выбрать папку на сервере",
+  put_na_servere: "Путь на сервере",
+  otkryt_2: "Открыть",
+  vybrat_etu_papku: "Выбрать эту папку",
+  faylov: "файлов",
+  ryadom: "Рядом",
+  nalozhenie: "Наложение",
+  vpisat: "Вписать",
+  prozrachnost: "Прозрачность",
+  v_masshtabe_1_1_peretaskivayte_kadr_panoramirovanie_sinhronnoe_dl:
+    "В масштабе 1:1 перетаскивайте кадр: панорамирование синхронное. Для RAW показывается встроенное превью.",
+  ne_udalos_prochitat_polnyy_kadr_fayl:
+    "Не удалось прочитать полный кадр: {0} (файл №{1})",
+  rol: "Роль",
+  vse_roli: "Все роли",
+  ne_opredeleno: "? Не определено",
+  disk: "Диск",
+  obyom_ot_mib: "Объём от, МиБ",
+  ot_mib: "От, МиБ",
+  sortirovka: "Сортировка",
+  po_vozvraschaemomu_obyomu: "По возвращаемому объёму",
+  po_date: "По дате",
+  po_chislu_faylov: "По числу файлов",
+  semeystv: "групп",
+  tolko_neskolko_faylov: "Только несколько файлов",
+  spisok_semeystv: "Список групп",
+  postroyte_semeystva_ili_izmenite_filtry:
+    "Постройте группы дубликатов или измените фильтры.",
+  v_kopiyah: "в копиях",
+  semeystvo: "Группа #",
+  versii_snimka: "Версии снимка",
+  sravnit: "Сравнить {0} {1}",
+  pochemu_eta_otsenka: "Почему эта оценка · ",
+  vyberite_semeystvo: "Выберите группу",
+  zdes_poyavyatsya_versii_snimka_i_svyazi_mezhdu_nimi:
+    "Здесь появятся версии снимка и связи между ними.",
+  serii_poka_ne_naydeny: "Серии пока не найдены",
+  zapustite_sborku_na_ekrane_opis_i_indeks:
+    "Запустите сборку на экране «Опись и индекс».",
+  kadrov: "кадров",
+  rezkost: "· резкость ",
+  fotografiya: "Фотография",
+  dokumenty_i_skany: "Документы и сканы",
+  skrinshot: "Скриншот",
+  pustoy_kadr: "Пустой кадр",
+  monohrom: "Монохром",
+  vid_izobrazheniy: "Вид изображений",
+  vse_vidy: "Все виды",
+  vid: "Вид {0}",
+  uverennost: "Уверенность {0}%",
+  arhiv: "АРХИВ",
+  poryadok: "ПОРЯДОК",
+  sistema: "СИСТЕМА",
+  k_soderzhimomu: "К содержимому",
+  berezhno_k_kazhdomu_snimku: "Бережно к каждому снимку",
+  osnovnaya_navigatsiya: "Основная навигация",
+  vash_arhiv_ostayotsya_u_vas: "Ваш архив остаётся у вас",
+  dostupen_po_seti: "Доступен по сети",
+  na_etom_kompyutere: "На этом компьютере",
+  pereklyuchit_temu: "Переключить тему",
+  fotografii_poryadok_spokoystvie: "ФОТОГРАФИИ. ПОРЯДОК. СПОКОЙСТВИЕ.",
+  zadacha: "Задача №",
+  zavershena_s_otkazami: "Завершена с отказами",
+  propuscheno_faylov: "пропущено файлов — {0}",
+  i_eschyo: "…и ещё {0}",
+  skryt_rezultat_zadachi: "Скрыть результат задачи",
+  pokazat_otkazy: "Показать отказы · ",
+  proverit_zhurnal: "Проверить журнал →",
+  snachala_plan_zatem_deystvie: "Сначала план. Затем действие.",
+  photo_cleanup_lokalno_na_vashem_servere:
+    "photo-cleanup · локально на вашем сервере",
+  sleduyuschee_predyduschee_semeystvo: "Следующая / предыдущая группа",
+  sdelat_vybrannyy_fayl_hranimym: "Сделать выбранный файл хранимым",
+  otkryt_vybrannyy_kadr_krupno: "Открыть выбранный кадр крупно",
+  poisk_v_semeystvah: "Поиск по группам",
+  zakryt_okno_i_vernut_fokus: "Закрыть окно и вернуть фокус",
+  pereyti_k_sleduyuschemu_deystviyu: "Перейти к следующему действию",
+  opis: "Опись",
+  indeks: "Индекс",
+  semeystva: "Дубликаты",
+  serii: "Серии",
+  vidy: "Виды",
+  plan: "План",
+  raskladka: "Раскладка",
+  vypolnyaetsya: "Выполняется",
+  ustarelo: "Устарело",
+  gotovo: "Готово",
+  est_dannye: "Есть данные",
+  ne_nachato: "Не начато",
+  naydyom_versii_odnogo_snimka: "Найдём версии одного снимка",
+  indeks_gotov_postroyte_semeystva_serii_i_vidy_chtoby_nachat_razbo:
+    "Индекс готов. Найдите дубликаты, серии и виды, чтобы начать разбор.",
+  pereyti_k_sborke: "Перейти к сборке",
+  nachnite_s_prevyu_i_keshey: "Начните с превью и кэшей",
+  proverte_proizvodnye_dannye_lightroom_ih_mozhno_vosstanovit_iz_or:
+    "Проверьте производные данные Lightroom. Их можно восстановить из оригиналов.",
+  proverit_prevyu: "Проверить превью",
+  proverte_plan_tochnyh_kopiy: "Проверьте план точных копий",
+  dlya_kazhdogo_kandidata_pokazhem_kakoy_fayl_ostayotsya_i_pochemu_:
+    "Для каждого кандидата покажем, какой файл остаётся и почему копию можно перенести.",
+  otkryt_plan: "Открыть план",
+  est_nezavershyonnaya_rabota: "Есть незавершённая работа",
+  zapisey_dlya_proverki: "· записей для проверки: ",
+  otkryt_lightroom: "Открыт Lightroom: ",
+  ego_prevyu_zaschischeny: ". Его превью защищены.",
+  arhiv_na_meste: "АРХИВ / НА МЕСТЕ",
+  text_7_stadiy: "7 стадий",
+  predvaritelnaya_otsenka: "Предварительная оценка",
+  prevyu_i_tochnye_kopii: "превью и точные копии",
+  po_vyboru: "по выбору",
+  zaschischyonnye_fayly_isklyuchayutsya_v_plane:
+    "Защищённые файлы исключаются в плане.",
+  arhiv_v_tsifrah: "Архив в цифрах",
+  izobrazheniy_v_indekse: "Изображений в индексе",
+  semeystv_snimkov: "Групп одного снимка",
+  s_neskolkimi_versiyami: "С несколькими версиями",
+  uzhe_v_karantine: "Уже в карантине",
+  otkryt_karantin: "Открыть карантин",
+  propuscheno_pri_indeksatsii: "Пропущено при индексации: ",
+  poslednie_zadachi: "Последние задачи",
+  zhurnal_operatsiy: "Журнал операций →",
+  zadacha_2: "Задача №{0}",
+  zdes_poyavitsya_istoriya_vashey_raboty_s_arhivom:
+    "Здесь появится история вашей работы с архивом.",
+  gde_hranyatsya_fotografii: "Где хранятся фотографии?",
+  ubrat: "Убрать {0}",
+  koren_arhiva: "Корень архива",
+  dobavit: "Добавить",
+  obzor_papok: "Обзор папок",
+  sostavte_opis: "Составьте опись",
+  naydyom_katalogi_lightroom_prevyu_i_keshi_fotografii_ostanutsya_n:
+    "Найдём каталоги Lightroom, превью и кэши. Фотографии останутся на месте.",
+  nachat_opis: "Начать опись",
+  prochitayte_izobrazheniya: "Прочитайте изображения",
+  indeksatsiya_bolshogo_arhiva_mozhet_zanyat_neskolko_chasov_uzhe_p:
+    "Индексация большого архива может занять несколько часов. Уже прочитанные файлы пропускаются.",
+  minimalnyy_razmer_bayt: "Минимальный размер, байт",
+  chitateley_na_disk: "Читателей на диск",
+  perechitat_uzhe_aktualnye_fayly: "Перечитать уже актуальные файлы",
+  nachat_indeksatsiyu: "Начать индексацию",
+  postroyte_kartu_arhiva: "Постройте карту архива",
+  semeystva_serii_vidy_tsepochka_vypolnitsya_na_servere_dazhe_esli_:
+    "Дубликаты → серии → виды. Цепочка выполнится на сервере, даже если закрыть страницу.",
+  porogi_analiza: "Пороги анализа",
+  rasstoyanie_phash: "Расстояние pHash",
+  minimalnyy_ssim: "Минимальный SSIM",
+  razryv_serii_sekund: "Разрыв серии, секунд",
+  postroit_vsyo: "Построить всё",
+  kakie_versii_perenosit: "Какие версии переносить?",
+  original_vsegda_ostayotsya_v_arhive_po_umolchaniyu_vybirayutsya_t:
+    "ORIGINAL всегда остаётся в архиве. По умолчанию выбираются только точные копии.",
+  tochnaya_kopiya: "Точная копия",
+  umenshennaya_versiya: "Уменьшенная версия",
+  eksport: "Экспорт",
+  konvertatsiya: "Конвертация",
+  jpeg_kamery: "JPEG камеры",
+  ne_opredeleno_2: "Не определено",
+  resize_menshe_megapikseley: "RESIZE меньше, мегапикселей",
+  zaschischat_fayly_iz_katalogov_lightroom:
+    "Защищать файлы из каталогов Lightroom",
+  prevyu_mozhno_peresozdat_esli_ishodniki_dostupny_smart_previews_p:
+    "Превью можно пересоздать, если исходники доступны. Smart Previews проверяются отдельно. Данные ИИ-масок и Denoise не удаляются.",
+  proizvodnye_dannye_poka_ne_naydeny: "Производные данные пока не найдены",
+  nachat_opis_2: "Начать опись →",
+  faylov_2: "файлов · ",
+  obektov: "объектов",
+  udalenie_zaprescheno_vidom_dannyh: "⛔ Удаление запрещено видом данных",
+  zablokirovano: "⚠ Заблокировано: {0}",
+  mozhno_peresozdat: "✓ Можно пересоздать",
+  minimalnyy_razmer_mib: "Минимальный размер, МиБ",
+  katalogi_lightroom: "Каталоги Lightroom",
+  izobrazheniy: "изображений ",
+  otkryt_3: "Открыт",
+  rezervnyy: "Резервный",
+  zakryt: "Закрыт",
+  hranyatsya_v_karantine: "Хранятся в карантине",
+  mozhno_vernut: "↶ Можно вернуть",
+  karantin_nahoditsya_na_tom_zhe_diske_perenos_syuda_eschyo_ne_osvo:
+    "Карантин находится на том же диске. Перенос сюда ещё не освобождает место.",
+  ishodnyy_put: "Исходный путь: ",
+  okonchatelnoe_udalenie: "Окончательное удаление",
+  hranyatsya_ne_menee_dney: "Хранятся не менее, дней",
+  proverit_pered_udaleniem: "Проверить перед удалением",
+  plan_vosstanovleniya: "План восстановления",
+  koren_novogo_dereva: "Корень нового дерева",
+  vybrat: "Выбрать",
+  fayly_s_drugogo_diska_budut_perechisleny_v_otkazah:
+    "Файлы с другого диска будут перечислены в отказах.",
+  razryv_mezhdu_syomkami: "Разрыв между съёмками: ",
+  ch: "ч",
+  propuskat_nenadyozhnye_daty: "Пропускать ненадёжные даты",
+  zaschischat_fayly_lightroom: "Защищать файлы Lightroom",
+  dopolnitelnoe_razreshenie: "Дополнительное разрешение",
+  razreshit_raskladku_nerazobrannyh_dublikatov:
+    "Разрешить раскладку неразобранных дубликатов",
+  kopii_tozhe_pereedut_v_novoe_derevo_rekomenduem_snachala_proverit:
+    "Копии тоже переедут в новое дерево. Рекомендуем сначала проверить ",
+  plan_2: "план",
+  vyberite_papku_novogo_arhiva: "Выберите папку нового архива",
+  poyavitsya_derevo_sobytiy_i_tochnyy_put_kazhdogo_fayla:
+    "Появится дерево событий и точный путь каждого файла.",
+  ispravit_datu_faylov: "Исправить дату · {0} файлов",
+  data_zapisyvaetsya_kak_ukazannoe_vremya_syomki_bez_sdviga_chasovo:
+    "Дата записывается как указанное время съёмки, без сдвига часового пояса.",
+  data_i_vremya: "Дата и время",
+  puti_na_servere: "Пути на сервере",
+  baza_dannyh: "База данных",
+  kesh_prevyu: "Кэш превью",
+  baza_i_kesh_zadany_pri_zapuske_servera:
+    "База и кэш заданы при запуске сервера.",
+  papka_karantina: "Папка карантина",
+  po_umolchaniyu_na_kazhdom_ishodnom_diske:
+    "По умолчанию — на каждом исходном диске",
+  vybrannaya_papka_dolzhna_suschestvovat_perenos_na_drugoy_disk_bud:
+    "Выбранная папка должна существовать. Перенос на другой диск будет отклонён.",
+  porogi_po_umolchaniyu: "Пороги по умолчанию",
+  razryv_sobytiya_sekund: "Разрыв события, секунд",
+  vneshniy_vid: "Внешний вид",
+  tema: "Тема",
+  kak_v_sisteme: "Как в системе",
+  svetlaya: "Светлая",
+  tyomnaya: "Тёмная",
+  plotnost: "Плотность",
+  svobodnaya: "Свободная",
+  kompaktnaya: "Компактная",
+  svyaz_s_zadachey_prervana_perepodklyuchaemsya:
+    "Связь с задачей прервана. Переподключаемся…",
+  progress_zadachi: "Прогресс задачи",
+  ostalos_okolo_min: "Осталось около {0} мин",
+  otsenivaem_vremya: "Оцениваем время",
+  progress: "Прогресс {0}",
+  sputniki: "Спутники · ",
+  imya_zanyato: "Имя занято: ",
+  ispravit_datu: "Исправить дату",
+  sputniki_snimka: "Спутники снимка",
+  eti_fayly_peremeschayutsya_vmeste_so_snimkom_i_vklyucheny_v_obsch:
+    "Эти файлы перемещаются вместе со снимком и включены в общий объём.",
+  pereyti_k_planu_dublikatov: "Перейти к плану дубликатов →",
+  budet_udaleno_okonchatelno: "Будет удалено окончательно",
+  vernutsya_po_ishodnym_putyam: "Вернутся по исходным путям",
+  budet_pereneseno_posle_podtverzhdeniya:
+    "Будет перенесено после подтверждения",
+  otkazov: "· отказов: ",
+  razlozhit_po_datam: "Разложить по датам",
+  izmenite_parametry_ili_proverte_prichiny_otkazov_nizhe:
+    "Измените параметры или проверьте причины отказов ниже.",
+  novoe_derevo: "Новое дерево · ",
+  sobytiy: "событий",
+  tolko_nenadyozhnye_daty: "Только ненадёжные даты",
+  otkazov_net_proverki_povtoryatsya_pered_kazhdym_perenosom:
+    "Отказов нет. Проверки повторятся перед каждым переносом.",
+  vosstanovit_fayly: "Восстановить файлы?",
+  vypolnit_pokazannyy_plan: "Выполнить показанный план?",
+  pokazannyy_spisok: "Показанный список: ",
+  operatsiy_otkazov: "операций. Отказов: ",
+  puti_naznacheniya_ukazany_v_predprosmotre_esli_sostav_plana_izmen:
+    "Пути назначения указаны в предпросмотре. Если состав плана изменился, выполнение будет отклонено.",
+  ya_proveril_rezervnuyu_kopiyu_i_ponimayu_chto_otkata_ne_budet:
+    "Я проверил резервную копию и понимаю, что отката не будет",
+  vvedite: "Введите ",
+  operatsiya_obratima_cherez_zhurnal_fayly_perenosyatsya_v_predelah:
+    "Операция обратима через журнал. Файлы переносятся в пределах одного диска.",
+  zapuskaem: "Запускаем…",
+  progon: "Прогон",
+  vse_progony: "Все прогоны",
+  operatsiya: "Операция",
+  vse_operatsii: "Все операции",
+  prevyu_v_karantin: "Превью в карантин",
+  fayl_v_karantin: "Файл в карантин",
+  status: "Статус",
+  vse_statusy: "Все статусы",
+  progon_2: "· прогон #",
+  progony: "Прогоны",
+  operatsiy: "операций · ",
+  zadat_datu_vsemu_sobytiyu: "Задать дату всему событию",
+  primer_puti_k_arhivu: "Например, /home/имя/Фотографии",
+  mesto_po_kachestvu: "{0}-й по качеству",
+  otmecheno_vruchnuyu_n:
+    "Из них отмечено вручную при разборе серий: {0}. Эти файлы не зависят от галочек ролей выше.",
+  otklonено_n: "отмечено: {0}",
+  snyato: "Снято",
+  otkuda_data: "Откуда дата",
+  kamera: "Камера",
+  obektiv: "Объектив",
+  seriynyy_nomer_kamery: "Серийный номер камеры",
+  ekspozitsiya: "Экспозиция",
+  vyderzhka_znak: "выдержка",
+  mm: "мм",
+  koordinaty: "Координаты",
+  programma: "Программа",
+  kadr: "Кадр",
+  rasshirenie_ne_sovpalo: "расширение не совпало с содержимым",
+  na_diske: "На диске",
+  piksely_prochitany: "Пиксели прочитаны",
+  iz_vstroennogo_prevyu: "Из встроенного превью",
+  polnym_dekodirovaniem: "Полным декодированием файла",
+  izmereno: "Измерено",
+  rezkost_metrika: "резкость",
+  kontrast: "контраст",
+  entropiya: "энтропия",
+  bit: "бит",
+  nasyschennost: "насыщенность",
+  vid_kadra: "Вид",
+  prichina_propuska: "Почему пропущен",
+  kamera_nichego_ne_zapisala:
+    "Камера не записала ни даты, ни модели — файл прошёл через редактор или экспорт, который их стёр.",
+  podrobnosti_snimka: "Подробности снимка",
+  shag_iz: "шаг {0} из {1}",
+  pokazat_tekuschuyu_zadachu: "Показать текущую задачу",
+  nichego_ne_vypolnyaetsya: "Ничего не выполняется",
+  ili_po_stadiyam: "Или по стадиям, если хотите менять параметры между ними:",
+
+  nagruzka_na_mashinu: "Нагрузка на машину",
+  potokov_dekodirovaniya: "Потоков декодирования",
+  yader_dostupno: "Ядер доступно: {0}.",
+} as const;
+export function t(key: keyof typeof messages, ...values: unknown[]): string {
+  return messages[key].replace(/\{(\d+)\}/g, (_, n) =>
+    String(values[Number(n)] ?? ""),
+  );
+}

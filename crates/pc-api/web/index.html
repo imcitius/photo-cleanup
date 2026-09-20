@@ -1,114 +1,13 @@
 <!doctype html>
 <html lang="ru">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>photo-cleanup</title>
-<link rel="stylesheet" href="/static/app.css">
-</head>
-<body>
-<header>
-  <h1>photo-cleanup</h1>
-  <nav id="tabs">
-    <button data-tab="overview" class="active">Обзор</button>
-    <button data-tab="families">Семейства</button>
-    <button data-tab="categories">Виды</button>
-    <button data-tab="series">Серии</button>
-    <button data-tab="plan">План и перенос</button>
-    <button data-tab="organize">Раскладка</button>
-    <button data-tab="derived">Производные данные</button>
-  </nav>
-  <span id="hint">J / K — навигация · Space — сменить лучший · Enter — крупно</span>
-</header>
-
-<main>
-  <section id="overview" class="tab active"></section>
-
-  <section id="families" class="tab">
-    <div class="toolbar">
-      <label><input type="checkbox" id="showSingles"> показывать одиночные кадры</label>
-      <span class="spacer"></span>
-      <button id="prev">←</button>
-      <span id="page"></span>
-      <button id="next">→</button>
-    </div>
-    <div id="familyList"></div>
-  </section>
-
-  <section id="categories" class="tab"></section>
-
-  <section id="series" class="tab"></section>
-
-  <section id="plan" class="tab">
-    <div class="policy">
-      <div class="policy-roles">
-        <strong>Удалять роли:</strong>
-        <label><input type="checkbox" class="role-toggle" value="copy" checked> COPY <span class="muted">точная копия</span></label>
-        <label><input type="checkbox" class="role-toggle" value="resize"> RESIZE <span class="muted">уменьшенная</span></label>
-        <label><input type="checkbox" class="role-toggle" value="export"> EXPORT</label>
-        <label><input type="checkbox" class="role-toggle" value="converted"> CONVERTED</label>
-        <label><input type="checkbox" class="role-toggle" value="camera-jpg"> CAMERA JPG</label>
-        <label><input type="checkbox" class="role-toggle" value="unknown"> ?</label>
-      </div>
-      <div class="policy-roles">
-        <label title="Снимает защиту с кадров, которые вы каталогизировали">
-          <input type="checkbox" id="allowLr"> разрешить трогать файлы из каталогов Lightroom
-        </label>
-      </div>
-      <div id="planTotals" class="totals"></div>
-      <div class="policy-actions">
-        <button id="applyBtn" class="danger" disabled>Перенести в карантин</button>
-        <span class="muted">перенос обратим: файлы остаются на диске до отдельной команды purge</span>
-      </div>
-    </div>
-    <div id="planList"></div>
-    <h2 id="refusalsHead" hidden>Защищено от переноса</h2>
-    <div id="refusals"></div>
-    <h2>В карантине</h2>
-    <div id="quarantine"></div>
-  </section>
-
-  <section id="organize" class="tab">
-    <div class="policy">
-      <div class="policy-roles">
-        <label><strong>Корень нового дерева:</strong>
-          <input type="text" id="orgRoot" placeholder="/mnt/disk3/Photo" size="40">
-        </label>
-        <label>разрыв между съёмками
-          <input type="number" id="orgGap" value="6" min="1" max="72" step="1" size="3"> ч
-        </label>
-      </div>
-      <div class="policy-roles">
-        <label title="Перенос разрывает ссылки в каталогах Lightroom">
-          <input type="checkbox" id="orgAllowLr"> трогать файлы из каталогов Lightroom
-        </label>
-        <label title="Дата из пути или mtime — это догадка, а не съёмка">
-          <input type="checkbox" id="orgSkipUncertain"> пропускать файлы с ненадёжной датой
-        </label>
-        <button id="orgBtn" class="small">Показать раскладку</button>
-      </div>
-      <div id="orgTotals" class="totals"></div>
-      <div class="policy-actions">
-        <span class="muted">Перенос выполняется из командной строки — раскладка трогает
-          весь архив, и такой шаг стоит сделать осознанно:</span>
-      </div>
-      <pre id="orgCommand" class="command" hidden></pre>
-    </div>
-    <div id="orgEvents"></div>
-    <h2 id="orgSampleHead" hidden>Куда поедут файлы</h2>
-    <div id="orgSample"></div>
-    <h2 id="orgRefusalsHead" hidden>Не трогаем</h2>
-    <div id="orgRefusals"></div>
-  </section>
-
-  <section id="derived" class="tab"></section>
-</main>
-
-<div id="lightbox" hidden>
-  <img id="lightboxImg" alt="">
-  <div id="lightboxCaption"></div>
-</div>
-
-<script src="/static/app.js"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>photo-cleanup — фотоархив</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>

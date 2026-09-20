@@ -67,8 +67,18 @@ pub struct Verified {
 /// index: 50k files is 1.25 billion 64-bit comparisons, which a popcount
 /// loop clears in a second or two, and the answer is exact.
 pub fn candidates(files: &[FileInfo], p: &Params) -> Vec<Candidate> {
+    candidates_controlled(files, p, &pc_core::work::Control::default())
+}
+pub fn candidates_controlled(
+    files: &[FileInfo],
+    p: &Params,
+    control: &pc_core::work::Control,
+) -> Vec<Candidate> {
     let out = Mutex::new(Vec::new());
     (0..files.len()).into_par_iter().for_each(|i| {
+        if control.check().is_err() {
+            return;
+        }
         let mut local = Vec::new();
         let a = &files[i];
         for (j, b) in files.iter().enumerate().skip(i + 1) {
@@ -94,6 +104,7 @@ pub fn candidates(files: &[FileInfo], p: &Params) -> Vec<Candidate> {
                 });
             }
         }
+        control.advance(0, None);
         if local.len() > p.max_candidates_per_file {
             local.sort_by_key(|c| c.phash_distance);
             local.truncate(p.max_candidates_per_file);
@@ -197,11 +208,24 @@ pub fn verify(
     store: &ThumbStore,
     p: &Params,
 ) -> VerifyReport {
+    verify_controlled(files, cands, store, p, &pc_core::work::Control::default())
+}
+pub fn verify_controlled(
+    files: &[FileInfo],
+    cands: &[Candidate],
+    store: &ThumbStore,
+    p: &Params,
+    control: &pc_core::work::Control,
+) -> VerifyReport {
     let mut grays = Grays::new(store);
     let mut blank: HashMap<usize, bool> = HashMap::new();
     let mut report = VerifyReport::default();
 
     for c in cands {
+        if control.current(&files[c.a].path).is_err() {
+            break;
+        }
+        control.advance(0, None);
         // Screen out images with nothing to compare before trusting a score.
         let mut is_blank = false;
         for idx in [c.a, c.b] {

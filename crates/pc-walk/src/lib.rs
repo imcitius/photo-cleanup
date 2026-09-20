@@ -103,7 +103,7 @@ impl ScanResult {
 }
 
 /// Recursive size/count/mtime of a bundle directory. Symlinks are not followed.
-fn dir_stats(root: &Path) -> (u64, u64, i64) {
+fn dir_stats(root: &Path, control: &pc_core::work::Control) -> (u64, u64, i64) {
     let mut count = 0u64;
     let mut size = 0u64;
     let mut newest = 0i64;
@@ -112,6 +112,9 @@ fn dir_stats(root: &Path) -> (u64, u64, i64) {
         .into_iter()
         .filter_map(|e| e.ok())
     {
+        if control.check().is_err() {
+            break;
+        }
         let Ok(md) = entry.metadata() else { continue };
         if md.is_file() {
             count += 1;
@@ -122,7 +125,17 @@ fn dir_stats(root: &Path) -> (u64, u64, i64) {
     (count, size, newest)
 }
 
-fn walk_dir(dir: &Path, disk: &Disk, opts: &Options, out: &mut ScanResult) {
+fn walk_dir(
+    dir: &Path,
+    disk: &Disk,
+    opts: &Options,
+    out: &mut ScanResult,
+    control: &pc_core::work::Control,
+) {
+    if control.current(&dir.display().to_string()).is_err() {
+        return;
+    }
+    control.advance(0, None);
     out.dirs_visited += 1;
 
     let rd = match fs::read_dir(dir) {
@@ -134,6 +147,9 @@ fn walk_dir(dir: &Path, disk: &Disk, opts: &Options, out: &mut ScanResult) {
     };
 
     for entry in rd {
+        if control.check().is_err() {
+            return;
+        }
         let Ok(entry) = entry else { continue };
         let path = entry.path();
         let name = pc_core::file_name_str(&path).to_string();
@@ -157,7 +173,7 @@ fn walk_dir(dir: &Path, disk: &Disk, opts: &Options, out: &mut ScanResult) {
                 continue;
             }
             if let Some((kind, owner_base)) = classify_dir(&name) {
-                let (file_count, size, newest_mtime) = dir_stats(&path);
+                let (file_count, size, newest_mtime) = dir_stats(&path, control);
                 let owner_ref = owner_base.map(|b| dir.join(format!("{b}.lrcat")));
                 out.bundles.push(BundleHit {
                     path,
@@ -175,7 +191,7 @@ fn walk_dir(dir: &Path, disk: &Disk, opts: &Options, out: &mut ScanResult) {
             if pc_core::is_pruned_dir_name(&name) {
                 continue;
             }
-            walk_dir(&path, disk, opts, out);
+            walk_dir(&path, disk, opts, out, control);
             continue;
         }
 
@@ -239,6 +255,15 @@ pub fn scan(roots: &[PathBuf]) -> Result<ScanResult> {
 }
 
 pub fn scan_with(roots: &[PathBuf], opts: &Options) -> Result<ScanResult> {
+    scan_controlled(roots, opts, &pc_core::work::Control::default())
+}
+
+pub fn scan_controlled(
+    roots: &[PathBuf],
+    opts: &Options,
+    control: &pc_core::work::Control,
+) -> Result<ScanResult> {
+    control.begin("Обход каталогов", 0, 0)?;
     let mut map = DiskMap::new();
     let mut by_disk: BTreeMap<u64, (Disk, Vec<PathBuf>)> = BTreeMap::new();
 
@@ -259,11 +284,12 @@ pub fn scan_with(roots: &[PathBuf], opts: &Options) -> Result<ScanResult> {
         let mut local = ScanResult::default();
         for p in &paths {
             tracing::info!(disk = %disk.label, root = %p.display(), "обход");
-            walk_dir(p, &disk, opts, &mut local);
+            walk_dir(p, &disk, opts, &mut local, control);
         }
         merged.lock().unwrap().merge(local);
     });
 
+    control.check()?;
     let mut out = merged.into_inner().unwrap();
     out.bundles.sort_by_key(|b| std::cmp::Reverse(b.size));
     out.catalogs.sort_by(|a, b| a.path.cmp(&b.path));

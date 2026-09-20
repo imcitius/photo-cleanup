@@ -44,6 +44,9 @@ pub struct Candidate {
     pub keeper_id: i64,
     pub keeper_path: String,
     pub reason: String,
+    /// Chosen by the user rather than derived from a role, so the interface
+    /// can say which of the two put each file on the list.
+    pub manual: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -157,8 +160,44 @@ pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
                         other => format!("{} — в семействе остаётся {name}", other.label()),
                     }
                 },
+                manual: false,
             });
         }
+    }
+
+    // Frames the user rejected by hand. These arrive with no family and no
+    // keeper behind them: the argument for moving them is not "a better copy
+    // survives" but "the person looked at it and said no". Saying anything
+    // stronger in the reason column would be inventing a justification the
+    // tool does not have.
+    let already: BTreeSet<i64> = plan.candidates.iter().map(|c| c.file_id).collect();
+    for m in db.rejected_rows()? {
+        if already.contains(&m.file_id) {
+            continue;
+        }
+        if let Some(c) = protected.lookup(&m.path) {
+            let stars = c
+                .rating
+                .filter(|r| *r > 0)
+                .map(|r| format!(", {r} звёзд"))
+                .unwrap_or_default();
+            plan.refusals.push(Refusal {
+                path: m.path.clone(),
+                why: format!("отклонён вручную, но файл в каталоге Lightroom{stars}"),
+            });
+            continue;
+        }
+        plan.candidates.push(Candidate {
+            file_id: m.file_id,
+            family_id: m.family_id,
+            path: m.path.clone(),
+            size: m.size,
+            role: Role::Unknown,
+            keeper_id: 0,
+            keeper_path: String::new(),
+            reason: "отклонён вручную при разборе серии".into(),
+            manual: true,
+        });
     }
 
     plan.candidates.sort_by_key(|c| std::cmp::Reverse(c.size));

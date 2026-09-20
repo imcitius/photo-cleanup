@@ -5,7 +5,9 @@
 //! across the network to look at it would be absurd. The browser receives
 //! thumbnails measured in kilobytes, and full frames only when asked.
 
+mod jobs;
 mod routes;
+mod service;
 mod state;
 
 pub use state::AppState;
@@ -21,6 +23,28 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(routes::index))
         .route("/static/{file}", get(routes::asset))
+        .route("/api/jobs", get(jobs::list).post(jobs::start))
+        .route("/api/jobs/{id}", get(jobs::detail))
+        .route("/api/jobs/{id}/cancel", post(jobs::cancel))
+        .route("/api/jobs/{id}/events", get(jobs::events))
+        .route("/api/preview", post(service::preview))
+        .route("/api/fs", get(service::fs))
+        .route("/api/catalogs", get(service::catalogs))
+        .route("/api/journal", get(service::journal))
+        .route("/api/runs", get(service::runs))
+        .route(
+            "/api/settings",
+            get(service::settings).put(service::save_settings),
+        )
+        .route("/api/reset", post(service::reset))
+        .route("/api/recent", get(service::recent))
+        .route("/api/families/{id}/split", post(service::split_family))
+        .route("/api/series/{id}/best", post(service::best))
+        .route("/api/series/{id}/reject-rest", post(service::reject_rest))
+        .route("/api/series/{id}/keep-all", post(service::keep_all))
+        .route("/api/files/{id}/reject", post(service::reject))
+        .route("/api/files/{id}/category", post(service::category))
+        .route("/api/files/{id}/date", post(service::date))
         .route("/api/status", get(routes::status))
         .route("/api/families", get(routes::families))
         .route("/api/families/{id}", get(routes::family))
@@ -35,6 +59,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/quarantine/{id}/undo", post(routes::undo))
         .route("/api/thumb/{key}", get(routes::thumb))
         .route("/api/file/{id}", get(routes::original))
+        .route("/api/file/{id}/preview", get(routes::full_preview))
+        .route("/api/file/{id}/details", get(service::file_details))
         .with_state(state)
 }
 
@@ -44,7 +70,9 @@ pub async fn serve(
     quarantine: Option<std::path::PathBuf>,
     bind: SocketAddr,
 ) -> Result<()> {
-    let state = Arc::new(AppState::new(db_path, thumbs, quarantine)?);
+    let mut state = AppState::new(db_path, thumbs, quarantine)?;
+    state.network = !bind.ip().is_loopback();
+    let state = Arc::new(state);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("не занять адрес {bind}"))?;
@@ -61,3 +89,6 @@ async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
     println!("\nОстановлено.");
 }
+
+#[cfg(test)]
+mod tests;

@@ -16,6 +16,15 @@ pub const THUMB_SIZE: u32 = 384;
 /// decode: Sony writes a 160x120 thumbnail next to the large preview.
 pub const MIN_PREVIEW_PIXELS: u64 = 256 * 256;
 
+/// Intermediate size the full frame is reduced to before the final resamples.
+///
+/// A 25 MP frame reaches a 384 px thumbnail through a Lanczos pass over
+/// twenty-five million pixels, and then a second pass over the same
+/// twenty-five million for the hashing square. One cheap area-average down to
+/// this box first makes both passes trivial, and at twice the thumbnail's
+/// long edge there is nothing left for Lanczos to recover anyway.
+const PRESCALE: u32 = THUMB_SIZE * 2;
+
 /// Side of the square grayscale image kept for hashing.
 ///
 /// The whole-frame hashes only need 32x32, but the regional hashes that catch
@@ -51,9 +60,28 @@ fn apply_orientation(img: DynamicImage, orientation: u16) -> DynamicImage {
     }
 }
 
-pub fn make(img: &DynamicImage, orientation: u16) -> Thumbnail {
-    let upright = apply_orientation(img.clone(), orientation);
-    let small = upright.resize(THUMB_SIZE, THUMB_SIZE, FilterType::Lanczos3);
+/// The frame this thumbnail is built from, reduced once so the two resamples
+/// below cost nothing.
+fn prescaled(img: DynamicImage) -> DynamicImage {
+    if img.width().max(img.height()) <= PRESCALE {
+        img
+    } else {
+        img.thumbnail(PRESCALE, PRESCALE)
+    }
+}
+
+/// Build the cached thumbnail and hashing square.
+///
+/// Orientation is applied *after* the reduction rather than before it. EXIF
+/// only ever records quarter turns and flips, which commute with a resize
+/// into a square box, so the result is the same image — reached without
+/// rotating twenty-five million pixels on the way to throwing them away.
+pub fn make(img: DynamicImage, orientation: u16) -> Thumbnail {
+    let base = prescaled(img);
+    let small = apply_orientation(
+        base.resize(THUMB_SIZE, THUMB_SIZE, FilterType::Lanczos3),
+        orientation,
+    );
 
     let mut jpeg = Vec::new();
     let rgb = small.to_rgb8();
@@ -67,9 +95,11 @@ pub fn make(img: &DynamicImage, orientation: u16) -> Thumbnail {
 
     // Squashed to a square on purpose: aspect ratio is compared separately,
     // and a fixed grid keeps hashes comparable across crops of one scene.
-    let gray = upright
-        .resize_exact(GRAY_SIDE, GRAY_SIDE, FilterType::Triangle)
-        .to_luma8();
+    let gray = apply_orientation(
+        base.resize_exact(GRAY_SIDE, GRAY_SIDE, FilterType::Triangle),
+        orientation,
+    )
+    .to_luma8();
 
     Thumbnail {
         jpeg,
@@ -94,7 +124,7 @@ mod tests {
 
     #[test]
     fn thumbnail_fits_the_box_and_keeps_aspect() {
-        let t = make(&gradient(2000, 1000), 1);
+        let t = make(gradient(2000, 1000), 1);
         assert_eq!(t.width, THUMB_SIZE);
         assert_eq!(t.height, THUMB_SIZE / 2);
         assert_eq!(t.gray.width(), GRAY_SIDE);
@@ -106,8 +136,8 @@ mod tests {
         let upright = gradient(400, 200);
         // The same photograph stored rotated, with EXIF saying so.
         let stored = upright.rotate270();
-        let a = make(&upright, 1);
-        let b = make(&stored, 6);
+        let a = make(upright, 1);
+        let b = make(stored, 6);
         assert_eq!(a.gray.dimensions(), b.gray.dimensions());
         let diff: u32 = a
             .gray
@@ -121,7 +151,7 @@ mod tests {
 
     #[test]
     fn the_encoded_thumbnail_can_be_read_back() {
-        let t = make(&gradient(800, 600), 1);
+        let t = make(gradient(800, 600), 1);
         let back = decode(&t.jpeg).unwrap();
         assert_eq!(back.width(), t.width);
     }

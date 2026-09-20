@@ -1,0 +1,899 @@
+//! Web-only orchestration and reviewed disk plans. Core safety gates stay in pc-apply.
+use crate::{
+    jobs::{self, Request},
+    AppState,
+};
+use anyhow::{bail, Context, Result};
+use axum::{
+    extract::{Path, Query, State},
+    response::{IntoResponse, Response},
+    Json,
+};
+use pc_db::Db;
+use serde_json::{json, Value};
+use std::{
+    collections::HashMap,
+    path::{Path as FsPath, PathBuf},
+    sync::Arc,
+};
+
+pub fn error(code: u16, message: &str) -> Response {
+    (
+        axum::http::StatusCode::from_u16(code).unwrap(),
+        Json(json!({"error":message})),
+    )
+        .into_response()
+}
+pub fn respond(value: Result<Value>) -> Response {
+    match value {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error(400, &format!("{e:#}")),
+    }
+}
+pub fn num(p: &Value, k: &str, default: i64) -> i64 {
+    p[k].as_i64().unwrap_or(default)
+}
+pub fn flag(p: &Value, k: &str) -> bool {
+    p[k].as_bool().unwrap_or(false)
+}
+fn strings(p: &Value, k: &str) -> Vec<String> {
+    p[k].as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+pub fn validate(r: &Request) -> Result<()> {
+    if !matches!(
+        r.kind.as_str(),
+        "scan"
+            | "index"
+            | "families"
+            | "series"
+            | "categories"
+            | "build-all"
+            | "all"
+            | "plan-apply"
+            | "derived-clean"
+            | "derived-purge"
+            | "organize-apply"
+            | "organize-undo"
+            | "journal-undo"
+    ) {
+        bail!("Неизвестная операция: {}", r.kind);
+    }
+    if !r.params.is_object() {
+        bail!("Параметры должны быть объектом");
+    }
+    if matches!(r.kind.as_str(), "scan" | "index" | "all") {
+        let roots = strings(&r.params, "roots");
+        if roots.is_empty() {
+            bail!("Выберите хотя бы один корень архива");
+        }
+        let mut seen = Vec::<PathBuf>::new();
+        for root in roots {
+            let path = checked_dir(&root)?;
+            if path.starts_with("/mnt/user") {
+                bail!("{root}: укажите /mnt/diskN, а не /mnt/user");
+            }
+            if seen
+                .iter()
+                .any(|p| path.starts_with(p) || p.starts_with(&path))
+            {
+                bail!("{root}: корни пересекаются");
+            }
+            seen.push(path);
+        }
+    }
+    for (key, min, max) in [
+        ("min_size", 0, i64::MAX),
+        ("readers_per_disk", 1, 8),
+        ("phash_max", 0, 64),
+        ("gap_secs", 1, 259200),
+        ("resize_below", 0, 1_000_000_000),
+        ("older_than_secs", 0, 315360000),
+    ] {
+        if let Some(v) = r.params.get(key) {
+            if !v.as_i64().is_some_and(|n| n >= min && n <= max) {
+                bail!("Некорректное значение {key}");
+            }
+        }
+    }
+    if let Some(v) = r.params.get("ssim_min") {
+        if !v.as_f64().is_some_and(|n| (0.0..=1.0).contains(&n)) {
+            bail!("SSIM должен быть от 0 до 1");
+        }
+    }
+    Ok(())
+}
+pub fn checked_dir(path: &str) -> Result<PathBuf> {
+    let path = FsPath::new(path);
+    if !path.is_absolute() {
+        bail!("{}: нужен абсолютный путь", path.display());
+    }
+    let mut cur = PathBuf::new();
+    for part in path.components() {
+        if matches!(part, std::path::Component::ParentDir) {
+            bail!("{}: переход через .. запрещён", path.display());
+        }
+        cur.push(part);
+        let md = std::fs::symlink_metadata(&cur)
+            .with_context(|| format!("не прочитать {}", cur.display()))?;
+        if md.file_type().is_symlink() {
+            bail!(
+                "{}: переход по символической ссылке запрещён",
+                cur.display()
+            );
+        }
+    }
+    if !path.is_dir() {
+        bail!("{}: это не каталог", path.display());
+    }
+    Ok(path.canonicalize()?)
+}
+pub async fn fs(
+    State(_st): State<Arc<AppState>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    respond((|| {
+        let path = checked_dir(q.get("path").map(String::as_str).unwrap_or("/"))?;
+        let mount = pc_core::disk::mount_root(&path)?;
+        let mut dirs = Vec::new();
+        for entry in
+            std::fs::read_dir(&path).with_context(|| format!("не открыть {}", path.display()))?
+        {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                dirs.push(json!({"name":entry.file_name().to_string_lossy(),"path":entry.path().to_string_lossy()}));
+            }
+        }
+        dirs.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        Ok(
+            json!({"path":path,"mount":mount,"parent":path.parent().filter(|p|p.starts_with(&mount)),"directories":dirs}),
+        )
+    })())
+}
+
+pub fn settings_value(st: &AppState, db: &Db) -> Result<Value> {
+    let mut v = json!({"db_path":st.db_path,"thumbs_path":st.thumbs.root(),"quarantine":st.quarantine,"phash_max":10,"ssim_min":0.9,"min_size":102400,"series_gap_secs":3,"event_gap_secs":21600,"theme":"system","density":"comfortable","network":st.network,"roots":[],"workers":0,"cores":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1)});
+    for row in jobs::rows(db, "SELECT key,value FROM settings", &[])? {
+        if let Some(k) = row["key"].as_str() {
+            v[k] = serde_json::from_str(row["value"].as_str().unwrap_or("null"))?;
+        }
+    }
+    Ok(v)
+}
+pub async fn settings(State(st): State<Arc<AppState>>) -> Response {
+    let db = st.db.lock().unwrap();
+    respond(settings_value(&st, &db))
+}
+pub async fn save_settings(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Response {
+    let _gate = st.mutation.lock().unwrap();
+    if let Err(e) = jobs::idle(&st) {
+        return error(409, &e.to_string());
+    }
+    respond((|| {
+        validate(&Request {
+            kind: "families".into(),
+            params: v.clone(),
+            plan_token: None,
+            confirmation: None,
+        })?;
+        if let Some(s) = v.get("theme") {
+            if !matches!(s.as_str(), Some("system" | "light" | "dark")) {
+                bail!("Неизвестная тема");
+            }
+        }
+        if let Some(s) = v.get("density") {
+            if !matches!(s.as_str(), Some("comfortable" | "compact")) {
+                bail!("Неизвестная плотность");
+            }
+        }
+        // Zero means "decide for me"; anything above the core count would
+        // only make the threads fight each other.
+        if let Some(n) = v.get("workers") {
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1) as i64;
+            if !n.as_i64().is_some_and(|n| (0..=cores).contains(&n)) {
+                bail!("Потоков декодирования: от 0 до {cores}");
+            }
+        }
+        for key in ["series_gap_secs", "event_gap_secs"] {
+            if let Some(n) = v.get(key) {
+                if !n.as_i64().is_some_and(|n| (1..=259200).contains(&n)) {
+                    bail!("Некорректный разрыв: {key}");
+                }
+            }
+        }
+        if let Some(path) = v["quarantine"].as_str() {
+            checked_dir(path)?;
+        }
+        let db = st.db.lock().unwrap();
+        let tx = db.conn.unchecked_transaction()?;
+        for key in [
+            "roots",
+            "phash_max",
+            "ssim_min",
+            "min_size",
+            "series_gap_secs",
+            "event_gap_secs",
+            "workers",
+            "theme",
+            "density",
+            "quarantine",
+        ] {
+            if let Some(value) = v.get(key) {
+                tx.execute("INSERT INTO settings VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[key,&value.to_string()])?;
+            }
+        }
+        tx.commit()?;
+        settings_value(&st, &db)
+    })())
+}
+/// Everything the index knows about one file.
+///
+/// The score breakdown on a family card says *what* tipped the decision; this
+/// is the evidence behind it — what the camera wrote, where the date came
+/// from, what the frame measured. Without it the numbers are an assertion the
+/// user has no way to check.
+pub async fn file_details(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+    respond((|| {
+        let db = st.db.lock().unwrap();
+        let mut file = jobs::rows(
+            &db,
+            "SELECT f.id, f.path, f.name, f.disk, f.size, f.mtime, f.inode, f.nlink,
+                    f.container, f.extension_lied, f.width, f.height, f.orientation,
+                    f.pixel_source, f.thumb_key, f.state, f.skipped_reason,
+                    f.sharpness, f.clip_low, f.clip_high, f.entropy, f.contrast,
+                    f.saturation, f.white_fraction, f.bimodality, f.text_rows, f.text_banding
+               FROM files f WHERE f.id=?1",
+            &[&id],
+        )?
+        .pop()
+        .context("Файл не найден")?;
+        let meta = jobs::rows(&db, "SELECT * FROM meta WHERE file_id=?1", &[&id])?.pop();
+        let categories = jobs::rows(
+            &db,
+            "SELECT category, confidence, evidence, manual FROM file_categories WHERE file_id=?1",
+            &[&id],
+        )?;
+        file["meta"] = meta.unwrap_or(Value::Null);
+        file["categories"] = json!(categories);
+        Ok(file)
+    })())
+}
+
+/// The tail of the index, newest first.
+///
+/// Indexing commits every couple of seconds, so a page that asks for this
+/// while a pass is running watches the archive arrive photograph by
+/// photograph instead of staring at a bar. Skipped files are included on
+/// purpose: seeing what was refused, as it is refused, is half the value.
+pub async fn recent(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(24)
+        .clamp(1, 200);
+    respond((|| {
+        let db = st.db.lock().unwrap();
+        Ok(json!(jobs::rows(
+            &db,
+            "SELECT id, path, name, size, width, height, thumb_key, skipped_reason
+               FROM files
+              WHERE state='present'
+              ORDER BY id DESC
+              LIMIT ?1",
+            &[&limit],
+        )?))
+    })())
+}
+
+/// The word that has to be typed to wipe the index.
+///
+/// Spelled out rather than a checkbox for the same reason the purge screen
+/// asks for one: a reset throws away an hour of reading, and a mis-click
+/// should not be able to do that.
+pub const RESET_WORD: &str = "СБРОСИТЬ";
+
+/// Throw away the index and the thumbnail cache, and start from nothing.
+///
+/// Nothing in the archive itself is touched — this only forgets what was
+/// *learned* about it. The journal stays, so anything already in quarantine
+/// can still be put back; the chosen folders and thresholds stay too, since
+/// "rescan from scratch" does not mean "ask me everything again".
+pub async fn reset(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Response {
+    let _gate = st.mutation.lock().unwrap();
+    if let Err(e) = jobs::idle(&st) {
+        return error(409, &e.to_string());
+    }
+    if v["confirmation"].as_str() != Some(RESET_WORD) {
+        return error(400, &format!("Для сброса индекса введите {RESET_WORD}"));
+    }
+    respond((|| {
+        let db = st.db.lock().unwrap();
+        db.reset_index()?;
+        let thumbs = st.thumbs.clear()?;
+        Ok(json!({"ok": true, "thumbs_removed": thumbs}))
+    })())
+}
+
+fn quarantine_root(st: &AppState, db: &Db) -> Result<Option<PathBuf>> {
+    Ok(settings_value(st, db)?["quarantine"]
+        .as_str()
+        .map(Into::into))
+}
+pub async fn catalogs(State(st): State<Arc<AppState>>) -> Response {
+    respond((|| {
+        let db = st.db.lock().unwrap();
+        let mut rows = jobs::rows(
+            &db,
+            "SELECT * FROM lr_catalogs ORDER BY is_locked DESC,name",
+            &[],
+        )?;
+        for c in &mut rows {
+            c["is_locked"] =
+                json!(FsPath::new(&format!("{}.lock", c["path"].as_str().unwrap_or(""))).exists());
+        }
+        Ok(json!(rows))
+    })())
+}
+pub async fn journal(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    respond((|| {
+        let db = st.db.lock().unwrap();
+        let run = q.get("run").cloned().unwrap_or_default();
+        let op = q.get("op").cloned().unwrap_or_default();
+        let status = q.get("status").cloned().unwrap_or_default();
+        Ok(json!(jobs::rows(&db,"SELECT * FROM journal WHERE (?1='' OR run_id=CAST(?1 AS INTEGER)) AND (?2='' OR op=?2) AND (?3='' OR status=?3) ORDER BY (status='pending') DESC,id DESC", &[&run,&op,&status])?))
+    })())
+}
+pub async fn runs(State(st): State<Arc<AppState>>) -> Response {
+    respond((|| {
+        let db = st.db.lock().unwrap();
+        Ok(json!(jobs::rows(&db,"SELECT r.*, COUNT(j.id) AS operations, COALESCE(SUM(j.size),0) AS bytes, SUM(j.op='organize' AND j.status='done') AS undoable FROM runs r LEFT JOIN journal j ON j.run_id=r.id GROUP BY r.id ORDER BY r.id DESC",&[])?))
+    })())
+}
+
+pub enum Action {
+    Copy(pc_family::plan::Candidate),
+    Bundle(pc_db::Bundle),
+    Move(pc_organize::Move),
+    Undo(pc_db::JournalEntry),
+    Purge(pc_db::JournalEntry),
+}
+impl Action {
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Copy(x) => &x.path,
+            Self::Bundle(x) => &x.path,
+            Self::Move(x) => &x.src,
+            Self::Undo(x) | Self::Purge(x) => &x.src,
+        }
+    }
+    pub fn source_path(&self) -> &str {
+        match self {
+            Self::Undo(e) | Self::Purge(e) => e.dst.as_deref().unwrap_or(&e.src),
+            _ => self.path(),
+        }
+    }
+    pub fn size(&self) -> u64 {
+        match self {
+            Self::Copy(x) => x.size,
+            Self::Bundle(x) => x.size,
+            Self::Move(x) => x.size,
+            Self::Undo(x) | Self::Purge(x) => x.size,
+        }
+        .max(0) as u64
+    }
+}
+pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<Action>)> {
+    validate(r)?;
+    let root = quarantine_root(st, db)?;
+    let mut actions = Vec::new();
+    let mut items = Vec::new();
+    let mut refusals = Vec::new();
+    let mut add_refusal = |path: String, why: String| refusals.push(json!({"path":path,"why":why}));
+    match r.kind.as_str() {
+        "plan-apply" => {
+            let mut policy = pc_family::Policy {
+                respect_lightroom: !flag(&r.params, "allow_lightroom"),
+                resize_below_pixels: num(&r.params, "resize_below", 2_000_000),
+                ..Default::default()
+            };
+            if r.params.get("roles").is_some() {
+                policy.remove_roles.clear();
+                for name in strings(&r.params, "roles") {
+                    let role = pc_family::Role::parse(&name).context("Неизвестная роль")?;
+                    if role == pc_family::Role::Original {
+                        bail!("ORIGINAL удалять нельзя");
+                    }
+                    policy.remove_roles.insert(role);
+                }
+            }
+            let plan = pc_family::plan::compute(db, &policy)?;
+            for refusal in plan.refusals {
+                add_refusal(refusal.path, refusal.why);
+            }
+            for c in plan.candidates {
+                match pc_apply::quarantine_dest_for(&c.path, c.file_id, db, root.as_deref()) {
+                    Ok(dst) => {
+                        if dst.exists() {
+                            add_refusal(c.path.clone(), format!("Цель занята: {}", dst.display()));
+                            continue;
+                        }
+                        let thumb = |id| db.file(id).ok().flatten().and_then(|f| f.thumb_key);
+                        items.push(json!({"file_id":c.file_id,"path":c.path,"dst":dst,"size":c.size,"file_count":1,"role":c.role.as_str(),"manual":c.manual,"reason":c.reason,"keeper_id":c.keeper_id,"keeper_path":c.keeper_path,"thumb":thumb(c.file_id),"keeper_thumb":thumb(c.keeper_id)}));
+                        actions.push(Action::Copy(c));
+                    }
+                    Err(e) => add_refusal(c.path, format!("{e:#}")),
+                }
+            }
+        }
+        "derived-clean" => {
+            let kinds = strings(&r.params, "kinds");
+            for b in db.list_bundles(&pc_db::model::BundleFilter {
+                state: Some(pc_db::BundleState::Present),
+                ..Default::default()
+            })? {
+                if !kinds.contains(&b.kind.as_str().to_string())
+                    || b.size < num(&r.params, "min_size", 0)
+                {
+                    continue;
+                }
+                if !b.removable() {
+                    add_refusal(
+                        b.path.clone(),
+                        b.blocked_detail
+                            .clone()
+                            .unwrap_or("Удаление запрещено видом данных".into()),
+                    );
+                    continue;
+                }
+                if let Err(e) = bundle_gate(&b) {
+                    add_refusal(b.path.clone(), format!("{e:#}"));
+                    continue;
+                }
+                match pc_apply::quarantine_dest(&b, root.as_deref()) {
+                    Ok(dst) => {
+                        if dst.exists() {
+                            add_refusal(b.path.clone(), format!("Цель занята: {}", dst.display()));
+                            continue;
+                        }
+                        items.push(json!({"path":b.path,"dst":dst,"size":b.size,"file_count":b.file_count,"kind":b.kind.as_str()}));
+                        actions.push(Action::Bundle(b));
+                    }
+                    Err(e) => add_refusal(b.path.clone(), format!("{e:#}")),
+                }
+            }
+        }
+        "organize-apply" => {
+            if !flag(&r.params, "allow_duplicates")
+                && !pc_family::plan::compute(db, &pc_family::Policy::default())?
+                    .candidates
+                    .is_empty()
+            {
+                bail!("Сначала разберите точные копии на экране «План и перенос». Раскладка иначе перенесёт и дубликаты.");
+            }
+            let root = r.params["root"]
+                .as_str()
+                .context("Не выбран корень нового дерева")?;
+            checked_dir(root)?;
+            let plan = pc_organize::compute(
+                db,
+                &pc_organize::Options {
+                    root: root.into(),
+                    gap_secs: num(&r.params, "gap_secs", 21600),
+                    respect_lightroom: !flag(&r.params, "allow_lightroom"),
+                    skip_uncertain: flag(&r.params, "skip_uncertain"),
+                },
+            )?;
+            for refusal in plan.refusals {
+                add_refusal(refusal.path, refusal.why);
+            }
+            for m in plan.moves {
+                let thumb = db.file(m.file_id)?.and_then(|f| f.thumb_key);
+                items.push(json!({"file_id":m.file_id,"path":m.src,"dst":m.dst,"size":m.size,"file_count":1,"source":m.date.source.label(),"uncertain":m.date.uncertain(),"taken_at":m.date.ts,"event":m.event,"year":pc_core::time::civil_from_unix(m.date.ts).0,"renamed_from":m.renamed_from,"thumb":thumb}));
+                actions.push(Action::Move(m));
+            }
+        }
+        "derived-purge" => {
+            let cutoff = pc_core::time::now_unix() - num(&r.params, "older_than_secs", 604800);
+            for e in db.journal_quarantined(None)? {
+                if e.applied_at >= cutoff {
+                    add_refusal(e.src.clone(), "Срок удержания ещё не прошёл".into());
+                    continue;
+                }
+                items.push(json!({"journal_id":e.id,"path":e.dst,"dst":"Окончательное удаление","original":e.src,"size":e.size,"file_count":e.file_count}));
+                actions.push(Action::Purge(e));
+            }
+        }
+        "journal-undo" | "organize-undo" => {
+            let entries = if r.kind == "journal-undo" {
+                vec![db
+                    .journal_entry(num(&r.params, "journal_id", 0))?
+                    .context("Нет записи журнала")?]
+            } else {
+                db.journal_by_run_op(num(&r.params, "run_id", 0), "organize")?
+            };
+            for e in entries {
+                if e.status != pc_db::JournalStatus::Done {
+                    add_refusal(e.src.clone(), "Запись не завершена или уже отменена".into());
+                    continue;
+                }
+                if FsPath::new(&e.src).exists() {
+                    add_refusal(
+                        e.src.clone(),
+                        "Исходный путь занят, перезапись запрещена".into(),
+                    );
+                    continue;
+                }
+                items.push(json!({"journal_id":e.id,"path":e.dst,"dst":e.src,"size":e.size,"file_count":e.file_count}));
+                actions.push(Action::Undo(e));
+            }
+        }
+        _ => bail!("У этой задачи нет дискового плана"),
+    }
+    if r.kind == "organize-apply" {
+        let best: std::collections::HashSet<i64> = db
+            .conn
+            .prepare("SELECT best_file FROM series WHERE best_file IS NOT NULL")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut covers = std::collections::BTreeMap::<String, (bool, Value)>::new();
+        for item in &items {
+            let key = format!("{}/{}", item["year"], item["event"]);
+            let is_best = best.contains(&item["file_id"].as_i64().unwrap_or(0));
+            if !item["thumb"].is_null() && covers.get(&key).is_none_or(|(b, _)| !*b && is_best) {
+                covers.insert(key, (is_best, item["thumb"].clone()));
+            }
+        }
+        for item in &mut items {
+            let key = format!("{}/{}", item["year"], item["event"]);
+            item["event_cover"] = covers
+                .get(&key)
+                .map(|(_, thumb)| thumb.clone())
+                .unwrap_or(Value::Null);
+        }
+    }
+    // Companions move with a photograph, so they belong in the reviewed
+    // count, byte total and destinations too. Refuse occupied sidecar paths
+    // before moving the photograph, not after a partially successful rename.
+    let mut blocked = std::collections::HashSet::new();
+    for item in &mut items {
+        let src = item["path"].as_str().unwrap_or("");
+        let dst = item["dst"].as_str().unwrap_or("");
+        if !FsPath::new(src).is_file() {
+            continue;
+        }
+        let companions = pc_apply::companions(FsPath::new(src));
+        let mut listed = Vec::new();
+        let mut extra = 0;
+        for side in companions {
+            let target = companion_destination(FsPath::new(src), FsPath::new(dst), &side);
+            if r.kind != "derived-purge" && target.exists() {
+                blocked.insert(src.to_string());
+                add_refusal(
+                    src.into(),
+                    format!("Путь спутника занят: {}", target.display()),
+                );
+            }
+            let size = std::fs::metadata(&side)
+                .with_context(|| format!("не прочитать {}", side.display()))?
+                .len();
+            extra += size;
+            listed.push(json!({"path":side,"dst":if r.kind=="derived-purge" {json!("Окончательное удаление")} else {json!(target)},"size":size}));
+        }
+        item["file_count"] = json!(item["file_count"].as_u64().unwrap_or(1) + listed.len() as u64);
+        item["size"] = json!(item["size"].as_u64().unwrap_or(0) + extra);
+        item["companions"] = json!(listed);
+    }
+    if !blocked.is_empty() {
+        items.retain(|i| !blocked.contains(i["path"].as_str().unwrap_or("")));
+        actions.retain(|a| {
+            let src = match a {
+                Action::Undo(e) => e.dst.as_deref().unwrap_or(&e.src),
+                _ => a.path(),
+            };
+            !blocked.contains(src)
+        });
+    }
+    // Stable order is essential: the family planner uses a HashMap.
+    items.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    refusals.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    let count: i64 = items
+        .iter()
+        .map(|x| x["file_count"].as_i64().unwrap_or(1))
+        .sum();
+    let bytes: i64 = items.iter().map(|x| x["size"].as_i64().unwrap_or(0)).sum();
+    let mut out = json!({"kind":r.kind,"params":r.params,"items":items,"refusals":refusals,"total_files":count,"total_bytes":bytes});
+    out["token"] = json!(blake3::hash(out.to_string().as_bytes())
+        .to_hex()
+        .to_string());
+    Ok((out, actions))
+}
+fn bundle_gate(b: &pc_db::Bundle) -> Result<()> {
+    if let Some(owner) = &b.owner_ref {
+        if FsPath::new(&format!("{owner}.lock")).exists() {
+            bail!("Каталог Lightroom открыт: {owner}");
+        }
+        if b.kind == pc_core::DerivedKind::LrSmartPreviews && FsPath::new(owner).exists() {
+            let check = pc_lightroom::check_originals(FsPath::new(owner))?;
+            if !check.all_present() {
+                bail!(
+                    "Отсутствуют оригиналы: {} из {} — {owner}",
+                    check.missing,
+                    check.total
+                );
+            }
+        }
+    }
+    Ok(())
+}
+pub fn apply_action(
+    st: &AppState,
+    db: &Db,
+    run: i64,
+    a: &Action,
+    r: &Request,
+    control: &pc_core::work::Control,
+) -> Result<()> {
+    let root = quarantine_root(st, db)?;
+    match a {
+        Action::Copy(c) => {
+            let (out, why) = pc_apply::files::quarantine_file(db, run, c, root.as_deref())?;
+            if out == pc_apply::FileOutcome::Refused {
+                bail!("{why}");
+            }
+        }
+        Action::Bundle(b) => {
+            bundle_gate(b)?;
+            if matches!(
+                pc_apply::quarantine(db, run, b, root.as_deref())?,
+                pc_apply::Outcome::Skipped
+            ) {
+                bail!("Изменился с момента описи: {}", b.path);
+            }
+        }
+        Action::Move(m) => {
+            if !flag(&r.params, "allow_lightroom") && db.lightroom_protected()?.contains_key(&m.src)
+            {
+                bail!("Файл защищён каталогом Lightroom: {}", m.src);
+            }
+            let report = pc_apply::organize(db, run, std::slice::from_ref(m))?;
+            if let Some((path, why)) = report.refused.first() {
+                bail!("{path}: {why}");
+            }
+        }
+        Action::Undo(e) => pc_apply::undo(db, e.id)?,
+        Action::Purge(e) => pc_apply::purge_entry_controlled(db, e.id, control)?,
+    }
+    Ok(())
+}
+pub async fn preview(State(st): State<Arc<AppState>>, Json(r): Json<Request>) -> Response {
+    respond((|| {
+        let db = st.db.lock().unwrap();
+        Ok(make_preview(&st, &db, &r)?.0)
+    })())
+}
+
+fn split(db: &Db, family: i64, file: i64) -> Result<()> {
+    let member = db
+        .family(family)?
+        .context("Семейство не найдено")?
+        .members
+        .into_iter()
+        .find(|m| m.file_id == file)
+        .context("Файл не входит в семейство")?;
+    let new = db.insert_family(
+        "manual",
+        None,
+        None,
+        Some(file),
+        db.latest_run()?.unwrap_or(0),
+    )?;
+    db.conn.execute(
+        "DELETE FROM family_members WHERE family_id=?1 AND file_id=?2",
+        [family, file],
+    )?;
+    db.insert_family_member(
+        new,
+        file,
+        "unknown",
+        None,
+        member.quality,
+        &member.breakdown,
+    )?;
+    db.conn.execute("UPDATE families SET keeper_file=(SELECT file_id FROM family_members WHERE family_id=?1 ORDER BY quality DESC LIMIT 1) WHERE id=?1 AND keeper_file=?2",[family,file])?;
+    db.conn.execute("DELETE FROM families WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM family_members WHERE family_id=?1)",[family])?;
+    Ok(())
+}
+pub fn restore_curation(db: &Db) -> Result<()> {
+    for row in jobs::rows(db,"SELECT s.file_id,m.family_id FROM manual_splits s JOIN family_members m USING(file_id) WHERE (SELECT COUNT(*) FROM family_members x WHERE x.family_id=m.family_id)>1",&[])? {
+        split(db,row["family_id"].as_i64().unwrap(),row["file_id"].as_i64().unwrap())?;
+    }
+    db.conn.execute_batch("UPDATE families SET keeper_file=(SELECT k.file_id FROM manual_keepers k JOIN family_members m ON m.file_id=k.file_id WHERE m.family_id=families.id LIMIT 1) WHERE EXISTS(SELECT 1 FROM manual_keepers k JOIN family_members m ON m.file_id=k.file_id WHERE m.family_id=families.id); UPDATE series SET best_file=(SELECT k.file_id FROM manual_best k JOIN series_members m ON m.file_id=k.file_id WHERE m.series_id=series.id LIMIT 1) WHERE EXISTS(SELECT 1 FROM manual_best k JOIN series_members m ON m.file_id=k.file_id WHERE m.series_id=series.id);")?;
+    Ok(())
+}
+pub async fn split_family(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(v): Json<Value>,
+) -> Response {
+    mutate(&st, |db| {
+        let file = v["file_id"].as_i64().context("Не указан файл")?;
+        let tx = db.conn.unchecked_transaction()?;
+        split(db, id, file)?;
+        db.conn
+            .execute("INSERT OR IGNORE INTO manual_splits VALUES(?1)", [file])?;
+        tx.commit()?;
+        Ok(json!({"ok":true}))
+    })
+}
+pub fn mutate(st: &AppState, f: impl FnOnce(&Db) -> Result<Value>) -> Response {
+    let _gate = st.mutation.lock().unwrap();
+    if let Err(e) = jobs::idle(st) {
+        return error(409, &e.to_string());
+    }
+    let db = st.db.lock().unwrap();
+    respond(f(&db))
+}
+pub async fn best(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(v): Json<Value>,
+) -> Response {
+    mutate(&st, |db| {
+        let file = v["file_id"].as_i64().context("Не указан файл")?;
+        let tx = db.conn.unchecked_transaction()?;
+        let n=db.conn.execute("UPDATE series SET best_file=?1 WHERE id=?2 AND EXISTS(SELECT 1 FROM series_members WHERE series_id=?2 AND file_id=?1)",[file,id])?;
+        if n == 0 {
+            bail!("Файл не входит в серию");
+        }
+        db.conn.execute("DELETE FROM manual_best WHERE file_id IN(SELECT file_id FROM series_members WHERE series_id=?1)",[id])?;
+        db.conn
+            .execute("INSERT OR IGNORE INTO manual_best VALUES(?1)", [file])?;
+        tx.commit()?;
+        Ok(json!({"ok":true}))
+    })
+}
+/// Mark one frame as not worth keeping, or take the mark back.
+///
+/// Nothing moves here. The mark puts the file in the plan, which the user
+/// still has to read and approve, and even then it goes to quarantine.
+pub async fn reject(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(v): Json<Value>,
+) -> Response {
+    mutate(&st, |db| {
+        let on = v["rejected"].as_bool().unwrap_or(true);
+        let known: i64 =
+            db.conn
+                .query_row("SELECT count(*) FROM files WHERE id=?1", [id], |r| r.get(0))?;
+        if known == 0 {
+            bail!("Файл не найден");
+        }
+        if on {
+            db.conn.execute(
+                "INSERT OR IGNORE INTO manual_rejects VALUES(?1,?2)",
+                rusqlite::params![id, pc_core::time::now_unix()],
+            )?;
+        } else {
+            db.conn
+                .execute("DELETE FROM manual_rejects WHERE file_id=?1", [id])?;
+        }
+        Ok(json!({"ok":true,"rejected":on}))
+    })
+}
+
+/// Reject every frame of a series except the best one.
+///
+/// The point of ranking a burst is to keep one frame from it. Doing that
+/// seventy times by hand is the sort of work people abandon halfway, so it is
+/// one action — and it is as reversible as the individual marks it sets.
+pub async fn reject_rest(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+    mutate(&st, |db| {
+        let tx = db.conn.unchecked_transaction()?;
+        let n = db.conn.execute(
+            "INSERT OR IGNORE INTO manual_rejects
+             SELECT m.file_id, ?2 FROM series_members m
+              JOIN series s ON s.id = m.series_id
+              WHERE m.series_id = ?1
+                AND s.protected = 0
+                AND (s.best_file IS NULL OR m.file_id <> s.best_file)",
+            rusqlite::params![id, pc_core::time::now_unix()],
+        )?;
+        tx.commit()?;
+        Ok(json!({"ok":true,"rejected":n}))
+    })
+}
+
+/// Take back every rejection in one series.
+pub async fn keep_all(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+    mutate(&st, |db| {
+        let n = db.conn.execute(
+            "DELETE FROM manual_rejects WHERE file_id IN
+               (SELECT file_id FROM series_members WHERE series_id=?1)",
+            [id],
+        )?;
+        Ok(json!({"ok":true,"restored":n}))
+    })
+}
+
+pub async fn category(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(v): Json<Value>,
+) -> Response {
+    mutate(&st, |db| {
+        let cat = v["category"].as_str().context("Не указан вид")?;
+        pc_family::categories::Category::parse(cat).context("Неизвестный вид")?;
+        db.set_category_manual(id, cat)?;
+        Ok(json!({"ok":true}))
+    })
+}
+pub async fn date(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(v): Json<Value>,
+) -> Response {
+    mutate(&st, |db| {
+        let ts = v["taken_at"]
+            .as_i64()
+            .context("Дата должна быть unix timestamp")?;
+        if !(-5_364_662_400..=pc_core::time::now_unix() + 86400).contains(&ts) {
+            bail!("Дата за пределами допустимого диапазона");
+        }
+        let mut ids = vec![id];
+        if let Some(a) = v["file_ids"].as_array() {
+            ids = a
+                .iter()
+                .map(|v| {
+                    v.as_i64()
+                        .filter(|id| *id > 0)
+                        .context("Некорректный номер файла")
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if ids.is_empty() {
+                bail!("Не выбраны файлы для правки даты");
+            }
+        }
+        let tx = db.conn.unchecked_transaction()?;
+        for file in ids {
+            db.conn.execute("INSERT INTO meta(file_id,taken_at,date_source) VALUES(?1,?2,'manual') ON CONFLICT(file_id) DO UPDATE SET taken_at=excluded.taken_at,date_source='manual'",[file,ts])?;
+        }
+        tx.commit()?;
+        Ok(json!({"ok":true}))
+    })
+}
+
+fn companion_destination(src: &FsPath, dst: &FsPath, side: &FsPath) -> PathBuf {
+    let stem = |p: &FsPath| {
+        p.file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    };
+    let old = stem(src);
+    let new = stem(dst);
+    let name = side.file_name().unwrap_or_default().to_string_lossy();
+    let renamed = if old == new {
+        name.into_owned()
+    } else if let Some(rest) = name.strip_prefix(&old) {
+        format!("{new}{rest}")
+    } else if let Some(rest) = name.strip_prefix("._").and_then(|n| n.strip_prefix(&old)) {
+        format!("._{new}{rest}")
+    } else {
+        name.into_owned()
+    };
+    dst.with_file_name(renamed)
+}

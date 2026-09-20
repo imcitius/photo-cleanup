@@ -51,6 +51,14 @@ struct Evidence {
 
 /// Build families from exact links first, then fill the gaps perceptually.
 pub fn build(db: &Db, store: &ThumbStore, params: &Params) -> Result<BuildReport> {
+    build_controlled(db, store, params, &pc_core::work::Control::default())
+}
+pub fn build_controlled(
+    db: &Db,
+    store: &ThumbStore,
+    params: &Params,
+    control: &pc_core::work::Control,
+) -> Result<BuildReport> {
     let files = db.all_indexed()?;
     let mut report = BuildReport {
         files: files.len(),
@@ -64,9 +72,24 @@ pub fn build(db: &Db, store: &ThumbStore, params: &Params) -> Result<BuildReport
     let mut evidence: BTreeMap<usize, Evidence> = BTreeMap::new();
 
     // --- what the files themselves assert --------------------------------
+    let split_ids: std::collections::HashSet<i64> = db
+        .conn
+        .prepare("SELECT file_id FROM manual_splits")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let manual_keepers: std::collections::HashSet<i64> = db
+        .conn
+        .prepare("SELECT file_id FROM manual_keepers")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let may_join =
+        |a: usize, b: usize| !split_ids.contains(&files[a].id) && !split_ids.contains(&files[b].id);
     let exact = links::detect(&files);
     report.exact_links = exact.len();
     for l in &exact {
+        if !may_join(l.a, l.b) {
+            continue;
+        }
         uf.union(l.a, l.b);
         for idx in [l.a, l.b] {
             evidence.entry(idx).or_insert(Evidence {
@@ -79,14 +102,21 @@ pub fn build(db: &Db, store: &ThumbStore, params: &Params) -> Result<BuildReport
     }
 
     // --- what they only look like ----------------------------------------
-    let cands = perceptual::candidates(&files, params);
+    control.begin("Поиск похожих изображений", files.len() as u64, 0)?;
+    let cands = perceptual::candidates_controlled(&files, params, control);
+    control.check()?;
     report.perceptual_candidates = cands.len();
-    let verdict = perceptual::verify(&files, &cands, store, params);
+    control.begin("Проверка сходства по пикселям", cands.len() as u64, 0)?;
+    let verdict = perceptual::verify_controlled(&files, &cands, store, params, control);
+    control.check()?;
     report.rejected_by_ssim = verdict.rejected_by_ssim;
     report.rejected_as_blank = verdict.rejected_as_blank;
     report.rejected_as_series = verdict.rejected_as_series;
     report.perceptual_verified = verdict.verified.len();
     for v in &verdict.verified {
+        if !may_join(v.a, v.b) {
+            continue;
+        }
         uf.union(v.a, v.b);
         for idx in [v.a, v.b] {
             evidence.entry(idx).or_insert(Evidence {
@@ -101,7 +131,7 @@ pub fn build(db: &Db, store: &ThumbStore, params: &Params) -> Result<BuildReport
     // Same body and second, but only where appearance already agrees.
     let same_second = links::shutter_candidates(&files);
     for (a, b) in same_second {
-        if pc_hash::hamming(files[a].phash, files[b].phash) <= params.phash_max {
+        if may_join(a, b) && pc_hash::hamming(files[a].phash, files[b].phash) <= params.phash_max {
             uf.union(a, b);
         }
     }
@@ -112,11 +142,14 @@ pub fn build(db: &Db, store: &ThumbStore, params: &Params) -> Result<BuildReport
     let curated = curation::CurationIndex::build(db.lightroom_protected()?);
 
     let groups = uf.groups();
+    control.begin("Сохранение семейств", groups.len() as u64, 0)?;
+    db.conn.execute_batch("BEGIN")?;
     db.clear_families()?;
     let run_id = db.latest_run()?.unwrap_or(0);
 
-    db.conn.execute_batch("BEGIN")?;
     for members in groups.values() {
+        control.check()?;
+        control.advance(0, None);
         let best_pixels = members
             .iter()
             .map(|&m| files[m].pixels())
@@ -167,6 +200,10 @@ pub fn build(db: &Db, store: &ThumbStore, params: &Params) -> Result<BuildReport
             })
             .unwrap_or(0);
 
+        let keeper_pos = members
+            .iter()
+            .position(|&m| manual_keepers.contains(&files[m].id))
+            .unwrap_or(keeper_pos);
         let rep = &files[members[keeper_pos]];
         let kind = if members.len() == 1 {
             "single"

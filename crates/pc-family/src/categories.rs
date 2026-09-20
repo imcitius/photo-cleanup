@@ -156,22 +156,27 @@ pub fn classify(f: &FileInfo) -> Verdict {
         };
     }
 
-    // --- writing ----------------------------------------------------------
+    // --- ink on paper -----------------------------------------------------
     //
-    // Two quite different things arrive here. A scan is flat-lit, so the
-    // paper is white and the histogram splits cleanly into ink and page. A
-    // photograph of the same page in a room is dim and continuous: measured
-    // on real files, white_fraction 0.00 and bimodality 0.04, with the text
-    // structure still plainly there. Demanding paper-white would find only
-    // scanners' output and miss every document anyone photographed.
+    // A scan is flat-lit: the paper is white, the histogram splits cleanly
+    // into ink and page, and there is no colour in it. All four of those have
+    // to hold at once, because each on its own describes half the archive.
     //
-    // What both share is banding: writing comes in lines with quiet gaps,
-    // which is what tells it from a picket fence or foliage — those are busy
-    // from top to bottom and would otherwise land here in their thousands.
+    // This deliberately does not try to find a page someone *photographed*.
+    // An earlier version did, on the grounds that the line structure is
+    // still visible in a dim room — and it called nine hundred photographs of
+    // a sand arena documents. Measured against the real files, a photographed
+    // page and a low-saturation landscape are the same numbers: entropy 7.3
+    // against 7.5, bimodality 0.22 against 0.19, and the landscape scores
+    // *more* line structure than the page, because grass and fencing produce
+    // reversals by the hundred. There is no threshold in between. Telling a
+    // notebook from a paddock is a question about meaning, which is the line
+    // this module does not cross; see the note at the top.
     let banding = f.text_banding.unwrap_or(0.0) as f32;
     let printed = text > 0.008 && banding > 0.12;
+    let scanned = printed && white > 0.40 && saturation < 0.14 && bimodal > 0.60;
 
-    if printed {
+    if scanned {
         let ratio = if f.height > 0 {
             f.width as f32 / f.height as f32
         } else {
@@ -179,28 +184,18 @@ pub fn classify(f: &FileInfo) -> Verdict {
         };
         let a4 = (ratio - 1.414).abs() < 0.06 || (ratio - 0.707).abs() < 0.03;
 
-        let scanned = white > 0.40 && saturation < 0.14 && bimodal > 0.60;
-        let photographed = saturation < 0.25;
-
-        if scanned || photographed {
-            evidence.push(format!("строчная структура {text:.3}"));
-            evidence.push(format!("промежутки между строками {:.0}%", banding * 100.0));
-            if scanned {
-                evidence.push(format!("бумага: белого {:.0}%, ровный свет", white * 100.0));
-            } else {
-                evidence.push("снято камерой, не сканером".into());
-            }
-            if a4 {
-                evidence.push("пропорции листа A4".into());
-            }
-            let base = if scanned { 0.70 } else { 0.50 };
-            let confidence = base + if a4 { 0.12 } else { 0.0 } + text.min(0.04) * 3.0;
-            return Verdict {
-                category: Category::Document,
-                confidence: confidence.min(0.95),
-                evidence,
-            };
+        evidence.push(format!("строчная структура {text:.3}"));
+        evidence.push(format!("промежутки между строками {:.0}%", banding * 100.0));
+        evidence.push(format!("бумага: белого {:.0}%, ровный свет", white * 100.0));
+        if a4 {
+            evidence.push("пропорции листа A4".into());
         }
+        let confidence = 0.70 + if a4 { 0.12 } else { 0.0 } + text.min(0.04) * 3.0;
+        return Verdict {
+            category: Category::Document,
+            confidence: confidence.min(0.95),
+            evidence,
+        };
     }
 
     // --- colourless, but a photograph all the same ------------------------
@@ -297,10 +292,29 @@ mod tests {
     }
 
     #[test]
-    fn a_document_photographed_in_a_dim_room_is_still_a_document() {
-        // Real numbers from a phone photograph of a notebook page: the paper
-        // is not white and the histogram is not bimodal, but the writing is
-        // unmistakably there.
+    fn a_sand_arena_is_not_a_document() {
+        // Real numbers from DSC05554.JPG, one of nine hundred photographs an
+        // earlier version of this classifier filed under "documents and
+        // scans". Dusty ground is unsaturated, fencing and grass produce
+        // reversals by the hundred, and the sky above supplies the quiet rows
+        // that pass for gaps between lines.
+        let mut f = base();
+        f.saturation = Some(0.202);
+        f.white_fraction = Some(0.003);
+        f.bimodality = Some(0.073);
+        f.text_rows = Some(0.100);
+        f.text_banding = Some(0.348);
+        f.entropy = Some(7.29);
+        assert_eq!(classify(&f).category, Category::Photo);
+    }
+
+    #[test]
+    fn a_page_photographed_in_a_dim_room_is_left_as_a_photograph() {
+        // Real numbers from a phone photograph of a notebook page. It is a
+        // document, and it is not claimed as one: on these measurements it is
+        // indistinguishable from the arena above, which scores *more* line
+        // structure. Saying "photograph" and being wrong about a handful
+        // beats saying "document" and being wrong about nine hundred.
         let mut f = base();
         f.name = "IMG_20180104_153945.jpg".into();
         f.saturation = Some(0.13);
@@ -308,14 +322,7 @@ mod tests {
         f.bimodality = Some(0.04);
         f.text_rows = Some(0.0121);
         f.text_banding = Some(0.25);
-        let v = classify(&f);
-        assert_eq!(v.category, Category::Document);
-        assert!(
-            v.evidence.iter().any(|e| e.contains("камерой")),
-            "{:?}",
-            v.evidence
-        );
-        assert!(v.confidence < 0.8, "уверенность выше, чем для скана");
+        assert_eq!(classify(&f).category, Category::Photo);
     }
 
     #[test]
@@ -413,10 +420,16 @@ pub struct CategorizeReport {
 }
 
 pub fn build(db: &Db) -> Result<CategorizeReport> {
+    build_controlled(db, &pc_core::work::Control::default())
+}
+pub fn build_controlled(db: &Db, control: &pc_core::work::Control) -> Result<CategorizeReport> {
     let files = db.all_indexed()?;
     let mut report = CategorizeReport::default();
+    control.begin("Определение видов", files.len() as u64, 0)?;
     db.conn.execute_batch("BEGIN")?;
     for f in &files {
+        control.check()?;
+        control.advance(0, None);
         let v = classify(f);
         db.set_category(
             f.id,

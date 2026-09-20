@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 use pc_db::{Db, JournalStatus};
 use pc_family::plan::Candidate;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::{rename_with_parents, Totals};
@@ -27,6 +28,7 @@ pub fn companions(path: &Path) -> Vec<PathBuf> {
     let stem = name.rsplit_once('.').map_or(name, |(a, _)| a);
 
     let mut out = Vec::new();
+    let mut identities = std::collections::HashSet::new();
     for candidate in [
         format!("{stem}.xmp"),
         format!("{stem}.XMP"),
@@ -37,8 +39,12 @@ pub fn companions(path: &Path) -> Vec<PathBuf> {
         format!("._{name}"),
     ] {
         let p = dir.join(candidate);
-        if p.is_file() && !out.contains(&p) {
-            out.push(p);
+        if let Ok(md) = fs::metadata(&p) {
+            // On case-insensitive filesystems .xmp and .XMP can address
+            // one directory entry. Count and move that companion once.
+            if md.is_file() && identities.insert((md.dev(), md.ino())) {
+                out.push(p);
+            }
         }
     }
     out
@@ -81,26 +87,32 @@ pub fn quarantine_file(
     if !src.is_file() {
         return Ok((FileOutcome::Refused, "файла уже нет".into()));
     }
-    if !keeper.is_file() {
-        return Ok((
-            FileOutcome::Refused,
-            format!("нет файла, ради которого удаляем: {}", c.keeper_path),
-        ));
-    }
-    if src == keeper {
-        return Ok((FileOutcome::Refused, "это и есть сохраняемый файл".into()));
-    }
 
-    // Re-read both and compare the pixels as they are right now.
-    match same_picture(src, keeper) {
-        Ok(true) => {}
-        Ok(false) => {
+    // A candidate the tool picked has to prove itself: the file that makes it
+    // redundant must still exist and still hold the same pixels. A candidate
+    // the *user* picked has no such twin and needs none — the justification is
+    // that they looked at the frame and did not want it.
+    if !c.manual {
+        if !keeper.is_file() {
             return Ok((
                 FileOutcome::Refused,
-                "пиксели больше не совпадают с сохраняемым файлом".into(),
-            ))
+                format!("нет файла, ради которого удаляем: {}", c.keeper_path),
+            ));
         }
-        Err(e) => return Ok((FileOutcome::Refused, format!("проверка не удалась: {e}"))),
+        if src == keeper {
+            return Ok((FileOutcome::Refused, "это и есть сохраняемый файл".into()));
+        }
+        // Re-read both and compare the pixels as they are right now.
+        match same_picture(src, keeper) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok((
+                    FileOutcome::Refused,
+                    "пиксели больше не совпадают с сохраняемым файлом".into(),
+                ))
+            }
+            Err(e) => return Ok((FileOutcome::Refused, format!("проверка не удалась: {e}"))),
+        }
     }
 
     let file = db
@@ -181,6 +193,13 @@ pub fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn case_aliases_do_not_duplicate_one_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("frame.xmp"), b"metadata").unwrap();
+        assert_eq!(companions(&tmp.path().join("frame.ARW")).len(), 1);
+    }
 
     #[test]
     fn sidecars_are_found_next_to_their_photograph() {

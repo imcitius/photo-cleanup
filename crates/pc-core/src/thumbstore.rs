@@ -44,9 +44,16 @@ impl ThumbStore {
         fs::create_dir_all(parent).with_context(|| format!("не создать {}", parent.display()))?;
         // Write beside the target and rename, so a crash never leaves a
         // half-written thumbnail that later looks valid.
-        let tmp = path.with_extension("tmp");
+        // Several identical files may be indexed concurrently. A shared
+        // .tmp name makes one writer rename another writer's temporary file.
+        static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("{}.{sequence}.tmp", std::process::id()));
         fs::write(&tmp, jpeg)?;
-        fs::rename(&tmp, &path)?;
+        if let Err(e) = fs::rename(&tmp, &path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(key)
     }
 
@@ -60,6 +67,51 @@ impl ThumbStore {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// Empty the cache, keeping the directory itself.
+    ///
+    /// Thumbnails are addressed by content, so nothing here is worth keeping
+    /// once the rows that referenced them are gone — and a cache left behind
+    /// after a reset is several gigabytes that no page will ever ask for.
+    /// Returns how many files went.
+    pub fn clear(&self) -> Result<u64> {
+        let mut removed = 0;
+        let entries = match fs::read_dir(&self.root) {
+            Ok(e) => e,
+            // Never created, or already gone: nothing to clear either way.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e).context("не прочитать кэш превью"),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let count = if is_dir { count_files(&path) } else { 1 };
+            let result = if is_dir {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            result.with_context(|| format!("не удалить {}", path.display()))?;
+            removed += count;
+        }
+        Ok(removed)
+    }
+}
+
+/// Files under a directory, for the "removed N thumbnails" line. An entry we
+/// cannot read is simply not counted: this is a report, not a checksum.
+fn count_files(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => count_files(&e.path()),
+            Ok(t) if t.is_file() => 1,
+            _ => 0,
+        })
+        .sum()
 }
 
 fn blake3_of(bytes: &[u8]) -> [u8; 32] {
@@ -105,6 +157,45 @@ mod tests {
         let b = s.put(b"same").unwrap();
         assert_eq!(a, b);
         assert_ne!(a, s.put(b"different").unwrap());
+    }
+
+    #[test]
+    fn concurrent_duplicates_all_receive_a_thumbnail_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(ThumbStore::new(tmp.path()));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(24));
+        let workers: Vec<_> = (0..24)
+            .map(|_| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.put(&vec![37u8; 100_000]).unwrap()
+                })
+            })
+            .collect();
+        let keys: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert!(keys.iter().all(|k| k == &keys[0]));
+        assert_eq!(store.get(&keys[0]).unwrap().len(), 100_000);
+    }
+
+    #[test]
+    fn clearing_removes_every_thumbnail_and_leaves_the_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = ThumbStore::new(tmp.path());
+        let keys: Vec<_> = (0..5)
+            .map(|i| s.put(format!("thumb {i}").as_bytes()).unwrap())
+            .collect();
+        assert_eq!(s.clear().unwrap(), 5);
+        assert!(tmp.path().is_dir());
+        assert!(keys.iter().all(|k| s.get(k).is_none()));
+    }
+
+    #[test]
+    fn clearing_a_cache_that_was_never_written_is_not_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = ThumbStore::new(tmp.path().join("никогда-не-было"));
+        assert_eq!(s.clear().unwrap(), 0);
     }
 
     #[test]

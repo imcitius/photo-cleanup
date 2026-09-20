@@ -223,3 +223,5 @@ mod plural_tests {
         assert_eq!(f(0), "0 файлов");
     }
 }
+
+pub mod work;

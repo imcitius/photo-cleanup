@@ -34,17 +34,42 @@ impl IntoResponse for Fail {
 // ---- static assets ------------------------------------------------------
 
 pub async fn index() -> Html<&'static str> {
-    Html(include_str!("../web/index.html"))
+    Html(include_str!("../web/dist/index.html"))
 }
 
 pub async fn asset(AxPath(file): AxPath<String>) -> Response {
     let body: &'static [u8] = match file.as_str() {
-        "app.css" => include_bytes!("../web/app.css"),
-        "app.js" => include_bytes!("../web/app.js"),
+        "app.css" => include_bytes!("../web/dist/static/app.css"),
+        "app.js" => include_bytes!("../web/dist/static/app.js"),
         _ => return (StatusCode::NOT_FOUND, "нет такого файла").into_response(),
     };
     let mime = mime_guess::from_path(&file).first_or_octet_stream();
-    ([(header::CONTENT_TYPE, mime.as_ref())], body).into_response()
+    // The bundle is compiled into the binary under a fixed name, so a browser
+    // that caches it keeps showing the previous version after an upgrade —
+    // with no way for the user to tell. The build stamps a tag; a browser that
+    // holds a stale one is told to fetch again.
+    (
+        [
+            (header::CONTENT_TYPE, mime.as_ref()),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        [(header::ETAG, asset_tag())],
+        body,
+    )
+        .into_response()
+}
+
+/// One tag per build, so a rebuilt interface invalidates every cached bundle.
+fn asset_tag() -> String {
+    format!(
+        "\"{}-{}\"",
+        env!("CARGO_PKG_VERSION"),
+        pc_core::thumbstore::hex32(&blake3_of(include_bytes!("../web/dist/static/app.js"))[..8])
+    )
+}
+
+fn blake3_of(bytes: &[u8]) -> [u8; 32] {
+    *blake3::Hasher::new().update(bytes).finalize().as_bytes()
 }
 
 // ---- dashboard ----------------------------------------------------------
@@ -65,6 +90,10 @@ pub struct Status {
     skipped: i64,
     families: i64,
     families_multi: i64,
+    /// Built series and classified files, so the overview can tell a stage
+    /// that has produced something from one that was never run.
+    series: i64,
+    categorised: i64,
     roles: Vec<RoleTotal>,
     derived_removable_bytes: i64,
     derived_blocked: i64,
@@ -109,6 +138,12 @@ pub async fn status(State(st): State<Arc<AppState>>) -> Api<Status> {
         skipped: idx.skipped,
         families: db.family_count(false)?,
         families_multi: db.family_count(true)?,
+        series: db
+            .conn
+            .query_row("SELECT count(*) FROM series", [], |r| r.get(0))?,
+        categorised: db
+            .conn
+            .query_row("SELECT count(*) FROM file_categories", [], |r| r.get(0))?,
         roles,
         derived_removable_bytes,
         derived_blocked,
@@ -128,6 +163,16 @@ pub struct FamiliesQuery {
     /// Include families of a single file.
     #[serde(default)]
     all: bool,
+    #[serde(default)]
+    search: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    disk: String,
+    #[serde(default)]
+    min_bytes: i64,
+    #[serde(default)]
+    sort: String,
 }
 
 fn default_limit() -> i64 {
@@ -151,6 +196,9 @@ pub struct MemberOut {
     evidence: Option<serde_json::Value>,
     thumb: Option<String>,
     is_keeper: bool,
+    sidecars: Vec<String>,
+    catalogs: Vec<String>,
+    rating: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -175,14 +223,18 @@ fn role_rank(r: Role) -> u8 {
     }
 }
 
-fn to_out(f: FamilyRow) -> FamilyOut {
+fn to_out(f: FamilyRow, db: &pc_db::Db) -> FamilyOut {
     let total_size = f.total_size();
     let mut members: Vec<MemberOut> = f
         .members
         .into_iter()
         .map(|m| {
             let role = Role::parse(&m.role).unwrap_or(Role::Unknown);
+            let catalogs = crate::jobs::rows(db,"SELECT c.name,lf.rating FROM lr_files lf JOIN lr_catalogs c ON c.id=lf.catalog_id WHERE lf.path=?1 AND c.is_backup=0",&[&m.path]).unwrap_or_default();
             MemberOut {
+                sidecars: pc_apply::companions(std::path::Path::new(&m.path)).iter().map(|p|p.display().to_string()).collect(),
+                rating: catalogs.iter().filter_map(|v|v["rating"].as_i64()).max(),
+                catalogs: catalogs.iter().filter_map(|v|v["name"].as_str().map(str::to_string)).collect(),
                 file_id: m.file_id,
                 dir: m
                     .path
@@ -207,6 +259,7 @@ fn to_out(f: FamilyRow) -> FamilyOut {
     // Derivation order, so the tree reads top-down from the photograph.
     members.sort_by_key(|m| {
         (
+            !m.is_keeper,
             role_rank(Role::parse(m.role).unwrap_or(Role::Unknown)),
             std::cmp::Reverse(m.size),
         )
@@ -216,7 +269,11 @@ fn to_out(f: FamilyRow) -> FamilyOut {
         taken_at: f.taken_at,
         camera: f.camera,
         total_size,
-        removable_bytes: members.iter().filter(|m| m.removable).map(|m| m.size).sum(),
+        removable_bytes: members
+            .iter()
+            .filter(|m| m.removable && !m.is_keeper)
+            .map(|m| m.size)
+            .sum(),
         members,
     }
 }
@@ -232,17 +289,39 @@ pub async fn families(
     Query(q): Query<FamiliesQuery>,
 ) -> Api<FamiliesPage> {
     let db = st.db.lock().unwrap();
-    let rows = db.families(!q.all, q.limit.clamp(1, 200), q.offset.max(0))?;
-    Ok(Json(FamiliesPage {
-        total: db.family_count(!q.all)?,
-        families: rows.into_iter().map(to_out).collect(),
-    }))
+    let order = match q.sort.as_str() {
+        "date" => "fa.taken_at DESC",
+        "count" => "COUNT(*) DESC",
+        _ => "SUM(CASE WHEN fm.role='copy' AND f.id != fa.keeper_file THEN f.size ELSE 0 END) DESC",
+    };
+    let base = "FROM families fa JOIN family_members fm ON fm.family_id=fa.id JOIN files f ON f.id=fm.file_id WHERE f.state='present' GROUP BY fa.id HAVING (?1 OR COUNT(*)>1) AND (?2='' OR MAX(instr(lower(f.path),lower(?2)))>0) AND (?3='' OR MAX(fm.role=?3)) AND (?4='' OR MAX(instr(f.disk,?4))>0) AND SUM(f.size)>=?5";
+    let args: [&dyn rusqlite::ToSql; 5] = [&q.all, &q.search, &q.role, &q.disk, &q.min_bytes];
+    let total: i64 = db.conn.query_row(
+        &format!("SELECT COUNT(*) FROM (SELECT fa.id {base})"),
+        args,
+        |r| r.get(0),
+    )?;
+    let mut stmt = db.conn.prepare(&format!(
+        "SELECT fa.id {base} ORDER BY {order},fa.id LIMIT {} OFFSET {}",
+        q.limit.clamp(1, 200),
+        q.offset.max(0)
+    ))?;
+    let ids = stmt
+        .query_map(args, |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut families = Vec::new();
+    for id in ids {
+        if let Some(f) = db.family(id)? {
+            families.push(to_out(f, &db));
+        }
+    }
+    Ok(Json(FamiliesPage { total, families }))
 }
 
 pub async fn family(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) -> Response {
     let db = st.db.lock().unwrap();
     match db.family(id) {
-        Ok(Some(f)) => Json(to_out(f)).into_response(),
+        Ok(Some(f)) => Json(to_out(f, &db)).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "нет такого семейства").into_response(),
         Err(e) => Fail(e).into_response(),
     }
@@ -259,16 +338,19 @@ pub async fn set_keeper(
     AxPath(id): AxPath<i64>,
     Json(body): Json<KeeperBody>,
 ) -> Response {
-    let db = st.db.lock().unwrap();
-    match db.set_family_keeper(id, body.file_id) {
-        Ok(true) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Ok(false) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "файл не входит в это семейство" })),
-        )
-            .into_response(),
-        Err(e) => Fail(e).into_response(),
-    }
+    crate::service::mutate(&st, |db| {
+        let tx = db.conn.unchecked_transaction()?;
+        if !db.set_family_keeper(id, body.file_id)? {
+            anyhow::bail!("файл не входит в это семейство");
+        }
+        db.conn.execute("DELETE FROM manual_keepers WHERE file_id IN (SELECT file_id FROM family_members WHERE family_id=?1)",[id])?;
+        db.conn.execute(
+            "INSERT OR IGNORE INTO manual_keepers VALUES(?1)",
+            [body.file_id],
+        )?;
+        tx.commit()?;
+        Ok(serde_json::json!({"ok":true}))
+    })
 }
 
 // ---- derived data -------------------------------------------------------
@@ -345,8 +427,8 @@ pub async fn thumb(State(st): State<Arc<AppState>>, AxPath(key): AxPath<String>)
 pub async fn original(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) -> Response {
     let path = {
         let db = st.db.lock().unwrap();
-        match db.file(id) {
-            Ok(Some(f)) => f.path,
+        match db.file_path_now(id) {
+            Ok(Some(p)) => p,
             Ok(None) => return (StatusCode::NOT_FOUND, "нет такого файла").into_response(),
             Err(e) => return Fail(e).into_response(),
         }
@@ -356,7 +438,7 @@ pub async fn original(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) 
             let mime = mime_guess::from_path(&path).first_or_octet_stream();
             ([(header::CONTENT_TYPE, mime.as_ref())], bytes).into_response()
         }
-        Err(e) => (StatusCode::NOT_FOUND, format!("не прочитать: {e}")).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, format!("не прочитать {path}: {e}")).into_response(),
     }
 }
 
@@ -505,66 +587,30 @@ pub async fn plan(State(st): State<Arc<AppState>>, Query(q): Query<PlanQuery>) -
     }
 }
 
-#[derive(Serialize)]
-pub struct ApplyOut {
-    moved: u64,
-    bytes: u64,
-    refused: Vec<RefusalOut>,
-}
-
 /// Move what the plan proposes. Reversible, and the caller has confirmed.
 pub async fn apply_plan(State(st): State<Arc<AppState>>, Query(q): Query<PlanQuery>) -> Response {
-    let policy = match q.to_policy() {
-        Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response()
-        }
-    };
-    let db = st.db.lock().unwrap();
-    let plan = match pc_family::plan::compute(&db, &policy) {
-        Ok(p) => p,
-        Err(e) => return Fail(e).into_response(),
-    };
-    let run_id = match db.latest_run() {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "нет ни одного прогона" })),
-            )
-                .into_response()
-        }
-        Err(e) => return Fail(e).into_response(),
-    };
-
-    match pc_apply::apply(&db, run_id, &plan.candidates, st.quarantine.as_deref()) {
-        Ok(r) => Json(ApplyOut {
-            moved: r.totals.files,
-            bytes: r.totals.bytes,
-            refused: r
-                .refused
-                .into_iter()
-                .map(|(path, why)| RefusalOut { path, why })
-                .collect(),
-        })
-        .into_response(),
-        Err(e) => Fail(e).into_response(),
-    }
+    let _ = (st, q);
+    crate::service::error(
+        409,
+        "Откройте предпросмотр /api/preview и запустите /api/jobs с его plan_token",
+    )
 }
 
 #[derive(Serialize)]
 pub struct QuarantineItem {
     journal_id: i64,
+    /// The indexed file, when the entry is a photograph rather than a bundle
+    /// of regenerable previews. What makes a thumbnail possible.
+    file_id: Option<i64>,
     src: String,
+    /// Where it sits now, so the user can find it without the tool.
+    dst: Option<String>,
     name: String,
     size: i64,
     file_count: i64,
     applied_at: i64,
     kind: String,
+    thumb: Option<String>,
 }
 
 pub async fn quarantine(State(st): State<Arc<AppState>>) -> Api<Vec<QuarantineItem>> {
@@ -572,36 +618,41 @@ pub async fn quarantine(State(st): State<Arc<AppState>>) -> Api<Vec<QuarantineIt
     Ok(Json(
         db.journal_quarantined(None)?
             .into_iter()
-            .map(|e| QuarantineItem {
-                journal_id: e.id,
-                name: e
-                    .src
-                    .rsplit_once('/')
-                    .map_or(e.src.clone(), |(_, b)| b.to_string()),
-                kind: if e.op == "quarantine-file" {
-                    "снимок".into()
-                } else {
-                    "производные данные".into()
-                },
-                src: e.src,
-                size: e.size,
-                file_count: e.file_count,
-                applied_at: e.applied_at,
+            .map(|e| {
+                let is_file = e.op == "quarantine-file";
+                let file_id = is_file.then_some(e.target_id).flatten();
+                QuarantineItem {
+                    journal_id: e.id,
+                    file_id,
+                    name: e
+                        .src
+                        .rsplit_once('/')
+                        .map_or(e.src.clone(), |(_, b)| b.to_string()),
+                    kind: if is_file {
+                        "снимок".into()
+                    } else {
+                        "производные данные".into()
+                    },
+                    thumb: file_id
+                        .and_then(|id| db.file(id).ok().flatten())
+                        .and_then(|f| f.thumb_key),
+                    src: e.src,
+                    dst: e.dst,
+                    size: e.size,
+                    file_count: e.file_count,
+                    applied_at: e.applied_at,
+                }
             })
             .collect(),
     ))
 }
 
 pub async fn undo(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) -> Response {
-    let db = st.db.lock().unwrap();
-    match pc_apply::undo(&db, id) {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
+    let _ = (st, id);
+    crate::service::error(
+        409,
+        "Откат требует предпросмотра /api/preview и задачи /api/jobs",
+    )
 }
 
 // ---- reorganisation -----------------------------------------------------
@@ -813,6 +864,7 @@ pub struct SeriesMemberOut {
     thumb: Option<String>,
     taken_at: Option<i64>,
     is_best: bool,
+    is_rejected: bool,
 }
 
 #[derive(Serialize)]
@@ -870,6 +922,7 @@ pub async fn series(
                         thumb: m.thumb_key,
                         taken_at: m.taken_at,
                         is_best: m.is_best,
+                        is_rejected: m.is_rejected,
                     })
                     .collect(),
             })
@@ -888,6 +941,7 @@ pub struct CategoryFile {
     width: i64,
     height: i64,
     confidence: f64,
+    manual: bool,
     evidence: String,
     thumb: Option<String>,
 }
@@ -905,12 +959,17 @@ pub async fn categories(State(st): State<Arc<AppState>>) -> Api<Vec<CategoryGrou
     use pc_family::categories::Category;
     let db = st.db.lock().unwrap();
     let mut out = Vec::new();
+    let manual: std::collections::HashSet<i64> = db
+        .conn
+        .prepare("SELECT file_id FROM file_categories WHERE manual=1")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     for c in db.category_counts()? {
         let label = Category::parse(&c.category)
             .map(|x| x.label())
             .unwrap_or("Прочее");
         let files = db
-            .files_in_category(&c.category, 24)?
+            .files_in_category(&c.category, 100_000)?
             .into_iter()
             .map(|m| CategoryFile {
                 file_id: m.file_id,
@@ -924,6 +983,7 @@ pub async fn categories(State(st): State<Arc<AppState>>) -> Api<Vec<CategoryGrou
                 height: m.height,
                 // files_in_category reuses MemberRow: confidence rides in
                 // `quality`, the evidence string in `breakdown`.
+                manual: manual.contains(&m.file_id),
                 confidence: m.quality,
                 evidence: m.breakdown,
                 thumb: m.thumb_key,
@@ -938,4 +998,43 @@ pub async fn categories(State(st): State<Arc<AppState>>) -> Api<Vec<CategoryGrou
         });
     }
     Ok(Json(out))
+}
+
+/// Full raster on demand; RAW uses its embedded JPEG, not a thumbnail upsample.
+pub async fn full_preview(State(st): State<Arc<AppState>>, AxPath(id): AxPath<i64>) -> Response {
+    // Wherever the bytes are now: a frame waiting in quarantine is precisely
+    // the one worth looking at closely before it is deleted for good.
+    let path = {
+        let db = st.db.lock().unwrap();
+        match db.file_path_now(id) {
+            Ok(Some(p)) => p,
+            _ => return crate::service::error(404, "Файл не найден в индексе"),
+        }
+    };
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+        let p = std::path::Path::new(&path);
+        let read = pc_image::read_for_probe(
+            p,
+            std::fs::metadata(p)
+                .map_err(|e| anyhow::anyhow!("{path}: {e}"))?
+                .len(),
+        )?;
+        if read.complete && read.container == pc_image::Container::Jpeg {
+            return Ok(read.head);
+        }
+        if let Some(preview) = read.preview {
+            return Ok(preview);
+        }
+        let image =
+            image::load_from_memory(&read.head).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95).encode_image(&image)?;
+        Ok(bytes)
+    })
+    .await;
+    match result {
+        Ok(Ok(bytes)) => ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response(),
+        Ok(Err(e)) => crate::service::error(400, &format!("{e:#}")),
+        Err(e) => crate::service::error(500, &e.to_string()),
+    }
 }

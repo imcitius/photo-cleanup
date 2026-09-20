@@ -6,3 +6,12 @@
 .DS_Store
 /.a5c
 /tmp
+**/node_modules/
+**/test-results/
+**/playwright-report/
+
+# The thumbnail cache and the index are made from the operator's own
+# photographs. Neither belongs in a repository, least of all a public one.
+/thumbs
+/dist
+/pc.thumbs

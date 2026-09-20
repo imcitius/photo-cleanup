@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<!--
+  Unraid Community Applications template.
+
+  Copy this file to /boot/config/plugins/dockerMan/templates-user/ on the
+  array, then Docker → Add Container → pick "photo-cleanup" from the
+  template list.
+
+  Two things about the mounts are not cosmetic:
+
+  * Mount /mnt/diskN, never /mnt/user. The union filesystem hides which
+    physical disk a file is on, and this tool moves files to quarantine with
+    rename(2) — which only works inside one filesystem. Through /mnt/user a
+    move silently becomes a copy, or fails.
+  * The photo shares must be read-write. Quarantine puts a file in a hidden
+    .photo-cleanup-quarantine folder in its own directory; nothing is ever
+    deleted without a separate confirmation, but the archive is written to.
+-->
+<Container version="2">
+  <Name>photo-cleanup</Name>
+  <Repository>ghcr.io/imcitius/photo-cleanup:latest</Repository>
+  <Registry>https://github.com/imcitius/photo-cleanup/pkgs/container/photo-cleanup</Registry>
+  <Network>bridge</Network>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/imcitius/photo-cleanup/issues</Support>
+  <Project>https://github.com/imcitius/photo-cleanup</Project>
+  <Overview>
+    Разбор фотоархива: дубликаты и версии одного снимка, серии, превью
+    Lightroom и кэши, раскладка по датам. Работает без интернета, ничего не
+    удаляет без подтверждения, переносит в карантин на том же диске.
+  </Overview>
+  <Category>MediaApp:Photos Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <ExtraParams>--user 99:100</ExtraParams>
+
+  <Config Name="WebUI" Target="8080" Default="8080" Mode="tcp" Description="Порт веб-интерфейса"
+          Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+
+  <Config Name="Данные" Target="/data" Default="/mnt/user/appdata/photo-cleanup"
+          Description="База индекса и кэш превью. Растёт примерно на 40 КБ на снимок."
+          Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/photo-cleanup</Config>
+
+  <Config Name="Архив — диск 1" Target="/mnt/disk1" Default="/mnt/disk1"
+          Description="Фотографии на первом диске. Чтение и запись: карантин переносит файлы в пределах диска."
+          Type="Path" Display="always" Required="true" Mask="false" Mode="rw">/mnt/disk1</Config>
+
+  <Config Name="Архив — диск 2" Target="/mnt/disk2" Default=""
+          Description="Второй диск массива, если фотографии лежат и на нём. Оставьте пустым, если не нужен."
+          Type="Path" Display="always" Required="false" Mask="false" Mode="rw"></Config>
+
+  <Config Name="Архив — диск 3" Target="/mnt/disk3" Default=""
+          Description="Третий диск массива. Оставьте пустым, если не нужен."
+          Type="Path" Display="always" Required="false" Mask="false" Mode="rw"></Config>
+
+  <Config Name="TZ" Target="TZ" Default="Europe/Moscow" Description="Часовой пояс"
+          Type="Variable" Display="advanced" Required="false" Mask="false">Europe/Moscow</Config>
+</Container>

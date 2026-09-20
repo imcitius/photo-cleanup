@@ -215,7 +215,19 @@ pub struct SeriesReport {
 }
 
 pub fn build(db: &Db, gap_secs: i64) -> Result<SeriesReport> {
+    build_controlled(db, gap_secs, &pc_core::work::Control::default())
+}
+pub fn build_controlled(
+    db: &Db,
+    gap_secs: i64,
+    control: &pc_core::work::Control,
+) -> Result<SeriesReport> {
     let files = db.all_indexed()?;
+    let manual: std::collections::HashSet<i64> = db
+        .conn
+        .prepare("SELECT file_id FROM manual_best")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     let found = detect(
         &files,
         if gap_secs > 0 {
@@ -225,13 +237,21 @@ pub fn build(db: &Db, gap_secs: i64) -> Result<SeriesReport> {
         },
     );
 
-    db.clear_series()?;
     let run_id = db.latest_run()?.unwrap_or(0);
     let mut report = SeriesReport::default();
 
+    control.begin("Сохранение серий", found.len() as u64, 0)?;
     db.conn.execute_batch("BEGIN")?;
+    db.clear_series()?;
     for s in &found {
-        let best = s.best().map(|r| r.file_id);
+        control.check()?;
+        control.advance(0, None);
+        let best = s
+            .members
+            .iter()
+            .find(|m| manual.contains(&m.file_id))
+            .map(|m| m.file_id)
+            .or_else(|| s.best().map(|r| r.file_id));
         let id = db.insert_series(
             s.kind.as_str(),
             s.started_at,

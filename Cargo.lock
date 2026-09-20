@@ -80,6 +80,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -757,16 +779,25 @@ name = "pc-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "axum",
+ "blake3",
+ "image",
  "mime_guess",
  "pc-apply",
  "pc-core",
  "pc-db",
  "pc-family",
+ "pc-image",
+ "pc-lightroom",
  "pc-organize",
+ "pc-work",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -804,6 +835,7 @@ dependencies = [
  "pc-lightroom",
  "pc-organize",
  "pc-walk",
+ "pc-work",
  "rayon",
  "rusqlite",
  "serde_json",
@@ -850,6 +882,7 @@ dependencies = [
  "pc-hash",
  "pc-image",
  "rayon",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
@@ -911,6 +944,22 @@ dependencies = [
  "tempfile",
  "tracing",
  "walkdir",
+]
+
+[[package]]
+name = "pc-work"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "pc-core",
+ "pc-db",
+ "pc-hash",
+ "pc-image",
+ "pc-lightroom",
+ "pc-walk",
+ "rayon",
+ "tracing",
 ]
 
 [[package]]

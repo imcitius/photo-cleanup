@@ -1,0 +1,151 @@
+# What a tag produces: one multi-architecture image in GHCR, and the same
+# binary as a plain file for people who would rather not run Docker.
+#
+# Each architecture is built on a runner of that architecture. Emulating
+# arm64 on an amd64 host works, but a full Rust build under QEMU takes the
+# best part of an hour, and GitHub gives public repositories arm64 runners
+# for nothing.
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  image:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushed by digest; the tags are attached to the manifest below, so
+      # neither architecture can briefly claim the tag on its own.
+      - name: Собрать и выложить по digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Достать статический бинарник
+        run: |
+          docker build --target export --platform ${{ matrix.platform }} \
+            --output type=local,dest=./out .
+          arch="${{ matrix.platform }}"
+          mv ./out/photo-cleanup "./photo-cleanup-linux-${arch#linux/}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ strategy.job-index }}
+          path: photo-cleanup-linux-*
+          if-no-files-found: error
+
+      - name: Записать digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+      - name: Свести архитектуры под один тег
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< '${{ steps.meta.outputs.json }}') \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+      - name: Показать, что получилось
+        run: docker buildx imagetools inspect ${{ env.IMAGE }}:latest
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p pc-cli
+      - run: |
+          mv target/release/photo-cleanup ./photo-cleanup-macos-arm64
+          ./photo-cleanup-macos-arm64 --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-macos
+          path: photo-cleanup-macos-arm64
+          if-no-files-found: error
+
+  release:
+    needs: [manifest, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/bin
+          pattern: binary-*
+          merge-multiple: true
+      - name: Собрать релиз
+        uses: softprops/action-gh-release@v2
+        with:
+          files: /tmp/bin/*
+          generate_release_notes: true
+          body: |
+            Образ: `docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}`
+            Архитектуры: `linux/amd64`, `linux/arm64`.
+
+            Бинарники ниже — статические, зависимостей нет.
+            Запуск: `./photo-cleanup serve --bind 0.0.0.0:8080`.

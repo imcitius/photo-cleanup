@@ -216,6 +216,9 @@ struct IndexArgs {
     /// Перечитать даже то, что уже в индексе
     #[arg(long)]
     reindex: bool,
+    /// Потоков декодирования. 0 — по числу ядер, минус одно для остальной машины.
+    #[arg(long, default_value_t = 0)]
+    workers: usize,
 }
 
 #[derive(Subcommand)]
@@ -335,6 +338,7 @@ fn main() -> Result<()> {
                     min_file_size: a.min_size.max(0) as u64,
                     readers_per_disk: a.readers_per_disk.max(1),
                     reindex: a.reindex,
+                    workers: a.workers,
                 },
             )?;
             println!("\n{}", summary.report());

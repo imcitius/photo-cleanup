@@ -4,7 +4,7 @@
 //! are only meaningful *within* a series: sharpness in particular depends on
 //! resolution, and comparing a 24 MP frame to a web export tells you nothing.
 
-use image::{DynamicImage, GrayImage};
+use image::{DynamicImage, GenericImageView, GrayImage};
 
 /// Working height for the gradient pass. Sharpness lives in the high
 /// frequencies, so the image is not downscaled — it is subsampled, which
@@ -67,8 +67,7 @@ fn gray_of(img: &DynamicImage) -> GrayImage {
 
 /// Mean chroma, sampled on a lattice to keep the cost flat.
 fn saturation_of(img: &DynamicImage) -> f32 {
-    let rgb = img.to_rgb8();
-    let (w, h) = (rgb.width(), rgb.height());
+    let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
         return 0.0;
     }
@@ -78,7 +77,10 @@ fn saturation_of(img: &DynamicImage) -> f32 {
     while y < h {
         let mut x = 0;
         while x < w {
-            let p = rgb.get_pixel(x, y).0;
+            // Read straight from the frame: converting twenty-five million
+            // pixels to RGB in order to look at a quarter of a million of
+            // them costs more than the whole measurement.
+            let p = img.get_pixel(x, y).0;
             let hi = p[0].max(p[1]).max(p[2]) as f32;
             let lo = p[0].min(p[1]).min(p[2]) as f32;
             sum += (hi - lo) / 255.0;

@@ -1,9 +1,16 @@
 //! Quarantine, undo and purge.
 //!
-//! Nothing is ever deleted by `quarantine`. A bundle is moved to
-//! `<mount>/.photo-cleanup-quarantine/<original path relative to mount>`,
-//! which is on the same filesystem and therefore a `rename(2)`: instant, and
-//! instantly reversible. Space comes back only at `purge`.
+//! Nothing is ever deleted by `quarantine`. A file is moved into a hidden
+//! `.photo-cleanup-quarantine` folder *in its own directory*, which is on the
+//! same filesystem and therefore a `rename(2)`: instant, and instantly
+//! reversible. Space comes back only at `purge`.
+//!
+//! It used to go to the root of the file's filesystem instead. That works on a
+//! NAS, where the archive sits on `/mnt/diskN` and the root of that mount is
+//! writable. On an ordinary machine the mount root is `/`, which is not — so
+//! every move failed with "не создать каталог карантина /.photo-cleanup-…".
+//! Beside the file there is no such question: whatever directory a photograph
+//! can be removed from, it can also be written to.
 
 pub mod files;
 pub mod organize;
@@ -53,20 +60,32 @@ fn disk_of(b: &Bundle) -> Disk {
 
 /// Device of `path`, or of its nearest existing ancestor when it does not
 /// exist yet.
+/// The hidden folder beside `src` that holds what was moved out of its
+/// directory, and the path `src` takes inside it.
+fn beside(src: &Path) -> Result<PathBuf> {
+    let parent = src
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .with_context(|| format!("{} — у пути нет родительского каталога", src.display()))?;
+    let name = src
+        .file_name()
+        .with_context(|| format!("{} — у пути нет имени файла", src.display()))?;
+    Ok(parent.join(pc_core::QUARANTINE_DIR).join(name))
+}
+
 /// Where a bundle goes when quarantined.
 ///
-/// The default sits at the root of the bundle's own filesystem, which makes
-/// the move a `rename(2)`. `override_root` exists for the case where that root
-/// is not writable — a single-filesystem host, for instance — and is rejected
-/// unless it lives on the same device, because a cross-device "move" would
-/// silently become a copy of the whole bundle.
+/// Beside itself by default, so the move is a rename and the directory is one
+/// that already takes writes. `override_root` gathers everything in one place
+/// instead, and is rejected unless it lives on the same device, because a
+/// cross-device "move" would silently become a copy of the whole bundle.
 pub fn quarantine_dest(b: &Bundle, override_root: Option<&Path>) -> Result<PathBuf> {
     let disk = disk_of(b);
     let src = PathBuf::from(&b.path);
     let rel = disk.relative(&src);
 
     match override_root {
-        None => Ok(disk.quarantine_root().join(rel)),
+        None => beside(&src),
         Some(root) => {
             let dev = pc_core::dev_of_nearest_existing(root)?;
             if dev != b.dev as u64 {
@@ -82,8 +101,10 @@ pub fn quarantine_dest(b: &Bundle, override_root: Option<&Path>) -> Result<PathB
     }
 }
 
-/// Where an indexed file goes when quarantined, mirroring its path under the
-/// quarantine root on its own filesystem.
+/// Where an indexed file goes when quarantined.
+///
+/// Beside itself by default; under `override_root`, mirroring its path from
+/// the mount point so two files of the same name do not collide.
 pub fn quarantine_dest_for(
     path: &str,
     _file_id: i64,
@@ -91,11 +112,14 @@ pub fn quarantine_dest_for(
     override_root: Option<&Path>,
 ) -> Result<PathBuf> {
     let src = PathBuf::from(path);
+    if override_root.is_none() {
+        return beside(&src);
+    }
     let mut map = pc_core::DiskMap::new();
     let disk = map.resolve(&src)?;
     let rel = disk.relative(&src);
     match override_root {
-        None => Ok(disk.quarantine_root().join(rel)),
+        None => unreachable!("обработано выше"),
         Some(root) => {
             let dev = pc_core::dev_of_nearest_existing(root)?;
             if dev != disk.dev {
@@ -314,33 +338,68 @@ pub fn purge(db: &Db, older_than_secs: i64) -> Result<Totals> {
     let entries = db.journal_quarantined(Some(cutoff))?;
     let mut t = Totals::default();
     for e in entries {
-        let Some(dst) = e.dst.clone() else { continue };
-        let path = Path::new(&dst);
-        let res = if path.is_dir() {
-            fs::remove_dir_all(path)
-        } else if path.exists() {
-            fs::remove_file(path)
-        } else {
-            Ok(()) // already gone
-        };
-        match res {
+        match purge_entry(db, e.id) {
             Ok(()) => {
-                db.journal_mark_purged(e.id)?;
-                // Only a bundle has a state to move; a photograph's row is
-                // identified by the journal entry alone.
-                match (e.op.as_str(), e.target_id) {
-                    ("quarantine", Some(bid)) => db.set_bundle_state(bid, BundleState::Purged)?,
-                    ("quarantine-file", Some(fid)) => db.set_file_state(fid, "purged")?,
-                    _ => {}
-                }
                 t.bundles += 1;
                 t.files += e.file_count as u64;
                 t.bytes += e.size as u64;
             }
-            Err(err) => t.skipped.push(format!("{dst} — {err}")),
+            Err(err) => t.skipped.push(format!("{} — {err}", e.src)),
         }
     }
     Ok(t)
+}
+
+/// Purge one previously reviewed quarantine entry.
+pub fn purge_entry(db: &Db, id: i64) -> Result<()> {
+    purge_entry_controlled(db, id, &pc_core::work::Control::default())
+}
+/// A partially purged entry is left pending: it must never be offered as
+/// intact, undoable quarantine after a cancellation or server restart.
+pub fn purge_entry_controlled(db: &Db, id: i64, control: &pc_core::work::Control) -> Result<()> {
+    let e = db.journal_entry(id)?.context("нет записи карантина")?;
+    if e.status != JournalStatus::Done || !matches!(e.op.as_str(), "quarantine" | "quarantine-file")
+    {
+        bail!("запись {} не находится в карантине", id);
+    }
+    let dst = e.dst.as_deref().context("в записи нет пути назначения")?;
+    let path = Path::new(dst);
+    control.check()?;
+    db.journal_finish(
+        id,
+        JournalStatus::Pending,
+        Some("Окончательное удаление начато; при прерывании часть файлов уже может отсутствовать"),
+    )?;
+    let sidecars = files::companions(path);
+    remove_controlled(path, control)?;
+    for side in sidecars {
+        remove_controlled(&side, control)?;
+    }
+    db.journal_mark_purged(id)?;
+    match (e.op.as_str(), e.target_id) {
+        ("quarantine", Some(id)) => db.set_bundle_state(id, BundleState::Purged)?,
+        ("quarantine-file", Some(id)) => db.set_file_state(id, "purged")?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn remove_controlled(path: &Path, control: &pc_core::work::Control) -> Result<()> {
+    control.current(&path.display().to_string())?;
+    match fs::symlink_metadata(path) {
+        Ok(md) if md.is_dir() => {
+            for entry in
+                fs::read_dir(path).with_context(|| format!("не прочитать {}", path.display()))?
+            {
+                remove_controlled(&entry?.path(), control)?;
+            }
+            fs::remove_dir(path).with_context(|| format!("не удалить {}", path.display()))?;
+        }
+        Ok(_) => fs::remove_file(path).with_context(|| format!("не удалить {}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("не прочитать {}", path.display())),
+    }
+    Ok(())
 }
 
 /// What is currently sitting in quarantine, not yet purged.

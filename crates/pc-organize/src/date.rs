@@ -13,6 +13,7 @@ use pc_db::OrganizeRow;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Source {
     /// `DateTimeOriginal` — when the shutter fired.
+    Manual,
     Exif,
     /// `CreateDate` / `DateTimeDigitized`.
     Digitized,
@@ -28,6 +29,7 @@ pub enum Source {
 impl Source {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Manual => "manual",
             Self::Exif => "exif",
             Self::Digitized => "digitized",
             Self::FileDateTime => "file-datetime",
@@ -39,6 +41,7 @@ impl Source {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Manual => "вручную",
             Self::Exif => "съёмка (EXIF)",
             Self::Digitized => "оцифровка (EXIF)",
             Self::FileDateTime => "правка (EXIF)",
@@ -51,11 +54,15 @@ impl Source {
     /// Whether the source itself knows about the photograph, as opposed to
     /// about the file that happens to hold it.
     pub fn confident(self) -> bool {
-        matches!(self, Self::Exif | Self::Digitized | Self::FileDateTime)
+        matches!(
+            self,
+            Self::Manual | Self::Exif | Self::Digitized | Self::FileDateTime
+        )
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
+            "manual" => Self::Manual,
             "exif" => Self::Exif,
             "digitized" => Self::Digitized,
             "file-datetime" => Self::FileDateTime,
@@ -188,7 +195,10 @@ pub fn date_from_path(dir: &str) -> Option<(i64, Precision)> {
 
 /// Walk the ladder until something answers.
 pub fn resolve(row: &OrganizeRow) -> Dated {
-    if let Some(ts) = row.taken_at.filter(|ts| plausible(*ts)) {
+    if let Some(ts) = row
+        .taken_at
+        .filter(|ts| row.date_source.as_deref() == Some("manual") || plausible(*ts))
+    {
         let source = row
             .date_source
             .as_deref()

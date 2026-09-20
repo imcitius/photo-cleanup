@@ -77,6 +77,8 @@ pub struct FileRow {
     pub dhash: Option<i64>,
     pub thumb_key: Option<String>,
     pub skipped_reason: Option<String>,
+    /// `present` while the file is in the archive, `quarantined` once moved.
+    pub state: String,
 }
 
 impl FileRow {
@@ -96,6 +98,7 @@ impl FileRow {
             dhash: r.get("dhash")?,
             thumb_key: r.get("thumb_key")?,
             skipped_reason: r.get("skipped_reason")?,
+            state: r.get("state")?,
         })
     }
 
@@ -206,7 +209,8 @@ impl Db {
                               xmp_derived_from, dng_original_raw)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
              ON CONFLICT(file_id) DO UPDATE SET
-                 taken_at=excluded.taken_at, date_source=excluded.date_source,
+                 taken_at=CASE WHEN meta.date_source='manual' THEN meta.taken_at ELSE excluded.taken_at END,
+                 date_source=CASE WHEN meta.date_source='manual' THEN meta.date_source ELSE excluded.date_source END,
                  camera_make=excluded.camera_make, camera_model=excluded.camera_model,
                  body_serial=excluded.body_serial, lens=excluded.lens, iso=excluded.iso,
                  f_number=excluded.f_number, focal_length=excluded.focal_length,
@@ -276,6 +280,34 @@ impl Db {
                 FileRow::from_row,
             )
             .optional()?)
+    }
+
+    /// Where a file's bytes are right now.
+    ///
+    /// `files.path` records where a photograph belongs in the archive, and
+    /// quarantining it deliberately does not rewrite that: the row has to keep
+    /// saying where the file would go back to. So for anything that has been
+    /// moved out, the live location is the journal's destination — without
+    /// which the viewer cannot show a frame the user is about to delete
+    /// forever, which is exactly when looking at it matters most.
+    pub fn file_path_now(&self, id: i64) -> Result<Option<String>> {
+        let Some(f) = self.file(id)? else {
+            return Ok(None);
+        };
+        if f.state != "quarantined" {
+            return Ok(Some(f.path));
+        }
+        let moved: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT dst FROM journal
+                  WHERE target_id = ?1 AND status = 'done' AND dst IS NOT NULL
+                  ORDER BY id DESC LIMIT 1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(moved.or(Some(f.path)))
     }
 
     /// Container breakdown, for the scan report.
@@ -686,6 +718,38 @@ impl Db {
     }
 
     /// Members of every family, with what the plan needs to judge them.
+    /// Files the user marked as not worth keeping, with everything the
+    /// planner needs to treat them like any other candidate.
+    pub fn rejected_rows(&self) -> Result<Vec<PlanRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT f.id, f.path, f.size, f.width, f.height, f.mtime, f.inode, f.dev, f.disk
+               FROM manual_rejects r
+               JOIN files f ON f.id = r.file_id
+              WHERE f.state = 'present'
+              ORDER BY f.path",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok(PlanRow {
+                    family_id: 0,
+                    file_id: r.get(0)?,
+                    role: "unknown".into(),
+                    path: r.get(1)?,
+                    size: r.get(2)?,
+                    width: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                    height: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    mtime: r.get(5)?,
+                    inode: r.get(6)?,
+                    dev: r.get(7)?,
+                    disk: r.get(8)?,
+                    pixel_hash: None,
+                    is_keeper: false,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn plan_rows(&self) -> Result<Vec<PlanRow>> {
         let mut st = self.conn.prepare(
             "SELECT fm.family_id, fm.file_id, fm.role, f.path, f.size, f.width, f.height,
@@ -791,6 +855,8 @@ pub struct SeriesMemberRow {
     pub thumb_key: Option<String>,
     pub taken_at: Option<i64>,
     pub is_best: bool,
+    /// The user looked at this frame and did not want it.
+    pub is_rejected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -854,12 +920,19 @@ impl Db {
 
         let mut st = self.conn.prepare(
             "SELECT sm.file_id, f.name, f.path, sm.rank, sm.score, sm.breakdown,
-                    f.sharpness, f.thumb_key, m.taken_at
+                    f.sharpness, f.thumb_key, m.taken_at, r.file_id IS NOT NULL
                FROM series_members sm
                JOIN files f ON f.id = sm.file_id
                LEFT JOIN meta m ON m.file_id = f.id
+               LEFT JOIN manual_rejects r ON r.file_id = f.id
               WHERE sm.series_id = ?1
-              ORDER BY sm.rank",
+              -- Shooting order, not quality order. A burst read out of
+              -- sequence makes the subject jump back and forth, and the one
+              -- frame the user is looking for could be anywhere. The rank
+              -- still travels with each row; it is a label, not an order.
+              -- Cameras stamp a whole second, so several frames share a
+              -- timestamp and the file name is what separates them.
+              ORDER BY COALESCE(m.taken_at, f.mtime), f.name, f.id",
         )?;
         let members = st
             .query_map(params![id], |r| {
@@ -875,6 +948,7 @@ impl Db {
                     thumb_key: r.get(7)?,
                     taken_at: r.get(8)?,
                     is_best: Some(file_id) == best,
+                    is_rejected: r.get(9)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
