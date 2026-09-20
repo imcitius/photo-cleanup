@@ -1,1 +1,7 @@
 * text=auto eol=lf
+
+# Windows reads these, and a batch file with bare LF endings misbehaves in
+# ways that are hard to see: a trailing `pause` can be swallowed, leaving a
+# console window that vanishes before anyone reads the error in it.
+*.bat text eol=crlf
+packaging/windows/README.txt text eol=crlf
