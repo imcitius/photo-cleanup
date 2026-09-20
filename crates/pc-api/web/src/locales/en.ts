@@ -212,6 +212,8 @@ export const ui = {
     "Mark this frame as unwanted. It joins the move plan; the file stays where it is until you approve that plan.",
   keepFrame: "Keep it",
   keepFrameHelp: "Clear the mark: the frame stays in the archive.",
+  folderHasNoCopies:
+    "The plan finds no copies in this folder — it looks like the originals live here. To take away what duplicates them elsewhere, press “keep this folder everywhere”.",
   moveFolder: "move this folder\u2019s copies",
   moveFolderHelp:
     "Shows how many files in this folder the plan calls copies, and moves them all to quarantine at once. The journal puts them back.",
@@ -552,6 +554,8 @@ export const messages = {
   papka_teper_hranimaya:
     "Groups changed: {0}. The kept files are now the ones in {1}",
   iz_papki_uedet: "From {2}, going to quarantine: {0} files · {1}",
+  dubli_etih_grupp:
+    "Duplicates of these groups: {0} files · {1}. They live in other folders and go to quarantine.",
   kopiy_v_serii: "{0} files here are copies, of {1} photographs",
   gruppa_kopiya: "group {0} · copy {1} of {2}",
   gruppa_hranimyy: "group {0} · kept of {1}",

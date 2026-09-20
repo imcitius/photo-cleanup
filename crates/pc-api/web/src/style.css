@@ -519,6 +519,20 @@ main {
   font-size: 10px;
 }
 
+/* The answer to a folder action, beside the folder it was about. */
+.folder-note {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.folder-note p {
+  margin: 0 0 8px;
+}
+
 /* What the role labels mean, next to where they are read. */
 .role-legend {
   margin: 4px 0 18px;

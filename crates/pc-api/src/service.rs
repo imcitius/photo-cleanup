@@ -596,6 +596,11 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     .get("folder")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                keeper_folder: r
+                    .params
+                    .get("keeper_folder")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             };
             let mut plan = pc_family::plan::compute_scoped(db, &policy, &scope)?;
             // One group at a time. Ten thousand groups is not a decision
@@ -612,6 +617,13 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             if let Some(dir) = r.params.get("folder").and_then(Value::as_str) {
                 plan.candidates
                     .retain(|c| pc_core::dir_name(&c.path) == dir);
+                plan.refusals.clear();
+            }
+            // The groups this folder keeps: their copies go, wherever they
+            // are. This is what follows from calling a folder the main one.
+            if let Some(dir) = r.params.get("keeper_folder").and_then(Value::as_str) {
+                plan.candidates
+                    .retain(|c| pc_core::dir_name(&c.keeper_path) == dir);
                 plan.refusals.clear();
             }
             for refusal in plan.refusals {

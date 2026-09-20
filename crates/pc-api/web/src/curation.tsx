@@ -291,15 +291,14 @@ export function Families({
     [moved, setMoved] = useState<{ family: number; names: string[] } | null>(
       null,
     ),
-    [folderResult, setFolderResult] = useState<{
+    // What the last folder action said, kept beside the folder it was about:
+    // an answer shown at the top of a page the user has scrolled away from
+    // reads as nothing happening at all.
+    [folderNote, setFolderNote] = useState<{
       dir: string;
-      groups: number;
-    } | null>(null),
-    [folderMove, setFolderMove] = useState<{
-      dir: string;
-      token: string;
-      files: number;
-      bytes: number;
+      text: string;
+      // The move this answer offers next, when there is one.
+      move?: { token: string; files: number; bytes: number; scope: string };
     } | null>(null),
     [focused, setFocused] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null),
@@ -497,13 +496,36 @@ export function Families({
       const r = await post<{ groups: number }>("/keepers/prefer-folder", {
         dir,
       });
-      setFolderResult({ dir, groups: r.groups });
+      // Naming the folder is half a decision; what follows from it is taking
+      // away what duplicates those groups. Offered here, with its numbers,
+      // rather than left for the user to find.
+      const next = await plannedMove("keeper_folder", dir);
+      setFolderNote({
+        dir,
+        text: t("papka_teper_hranimaya", number(r.groups), dir),
+        move: next,
+      });
       onChange();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
     }
+  };
+
+  /// What a plan narrowed this way would move, with the token that runs it.
+  const plannedMove = async (scope: string, dir: string) => {
+    const preview = await post<Preview>("/preview", {
+      kind: "plan-apply",
+      params: { roles: ["copy"], [scope]: dir },
+    });
+    if (!preview.items.length) return undefined;
+    return {
+      token: preview.token,
+      files: preview.items.length,
+      bytes: preview.items.reduce((n, i) => n + (i.size || 0), 0),
+      scope,
+    };
   };
 
   // The other half of naming a folder: one folder holds the originals, the
@@ -514,19 +536,13 @@ export function Families({
     setBusy(true);
     setError("");
     try {
-      const preview = await post<Preview>("/preview", {
-        kind: "plan-apply",
-        params: { roles: ["copy"], folder: dir },
-      });
-      if (!preview.items.length) {
-        setError(ui.groupApplyNothing);
-        return;
-      }
-      setFolderMove({
+      const move = await plannedMove("folder", dir);
+      setFolderNote({
         dir,
-        token: preview.token,
-        files: preview.items.length,
-        bytes: preview.items.reduce((n, i) => n + (i.size || 0), 0),
+        // Nothing to move is an answer too, and a common one: a folder of
+        // originals has no copies in it.
+        text: move ? "" : ui.folderHasNoCopies,
+        move,
       });
     } catch (e) {
       setError((e as Error).message);
@@ -536,16 +552,17 @@ export function Families({
   };
 
   const runFolderMove = async () => {
-    if (!folderMove) return;
+    if (!folderNote?.move) return;
+    const { scope, token } = folderNote.move;
     setBusy(true);
     setError("");
     try {
       await post("/jobs", {
         kind: "plan-apply",
-        params: { roles: ["copy"], folder: folderMove.dir },
-        plan_token: folderMove.token,
+        params: { roles: ["copy"], [scope]: folderNote.dir },
+        plan_token: token,
       });
-      setFolderMove(null);
+      setFolderNote(null);
       setSelected(null);
       onChange();
     } catch (e) {
@@ -647,39 +664,6 @@ export function Families({
       {error && <ErrorBox message={error} />}
       {moved && (
         <Notice>{t("perenesyono_v_karantin", moved.names.join(", "))}</Notice>
-      )}
-      {folderMove && (
-        <Notice tone="warning">
-          <p>
-            {t(
-              "iz_papki_uedet",
-              number(folderMove.files),
-              bytes(folderMove.bytes),
-              folderMove.dir,
-            )}
-          </p>
-          <div className="inline">
-            <Button
-              kind="primary"
-              disabled={disabled || busy}
-              onClick={runFolderMove}
-            >
-              {ui.move}
-            </Button>
-            <Button disabled={busy} onClick={() => setFolderMove(null)}>
-              {ui.cancel}
-            </Button>
-          </div>
-        </Notice>
-      )}
-      {folderResult && (
-        <Notice>
-          {t(
-            "papka_teper_hranimaya",
-            number(folderResult.groups),
-            folderResult.dir,
-          )}
-        </Notice>
       )}
       <div className="family-workspace">
         <div className="family-list-pane">
@@ -947,6 +931,48 @@ export function Families({
                             {ui.moveFolder}
                           </button>
                         </div>
+                        {folderNote?.dir === m.dir && (
+                          <div className="folder-note">
+                            {folderNote.text && <p>{folderNote.text}</p>}
+                            {folderNote.move && (
+                              <>
+                                <p>
+                                  {t(
+                                    folderNote.move.scope === "keeper_folder"
+                                      ? "dubli_etih_grupp"
+                                      : "iz_papki_uedet",
+                                    number(folderNote.move.files),
+                                    bytes(folderNote.move.bytes),
+                                    m.dir,
+                                  )}
+                                </p>
+                                <div className="inline">
+                                  <Button
+                                    kind="primary"
+                                    disabled={disabled || busy}
+                                    onClick={runFolderMove}
+                                  >
+                                    {ui.move}
+                                  </Button>
+                                  <Button
+                                    disabled={busy}
+                                    onClick={() => setFolderNote(null)}
+                                  >
+                                    {ui.cancel}
+                                  </Button>
+                                </div>
+                              </>
+                            )}
+                            {!folderNote.move && (
+                              <Button
+                                disabled={busy}
+                                onClick={() => setFolderNote(null)}
+                              >
+                                {ui.close}
+                              </Button>
+                            )}
+                          </div>
+                        )}
                       </div>
                       <div className="muted">
                         {m.width} × {m.height} · {bytes(m.size)}

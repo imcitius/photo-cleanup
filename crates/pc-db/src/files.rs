@@ -771,7 +771,7 @@ impl Db {
     }
 
     pub fn plan_rows(&self) -> Result<Vec<PlanRow>> {
-        self.plan_rows_scoped(None, None)
+        self.plan_rows_scoped(None, None, None)
     }
 
     /// The rows a plan is built from, narrowed to one group or one folder.
@@ -787,6 +787,7 @@ impl Db {
         &self,
         family: Option<i64>,
         folder_prefix: Option<&str>,
+        keeper_folder_prefix: Option<&str>,
     ) -> Result<Vec<PlanRow>> {
         let mut st = self.conn.prepare(
             "SELECT fm.family_id, fm.file_id, fm.role, f.path, f.size, f.width, f.height,
@@ -801,27 +802,32 @@ impl Db {
                       SELECT x.family_id
                         FROM family_members x JOIN files xf ON xf.id = x.file_id
                        WHERE xf.state = 'present' AND xf.path LIKE ?2 || '%'))
+                AND (?3 IS NULL OR fa.keeper_file IN (
+                      SELECT kf.id FROM files kf WHERE kf.path LIKE ?3 || '%'))
               ORDER BY fm.family_id",
         )?;
         let rows = st
-            .query_map(rusqlite::params![family, folder_prefix], |r| {
-                let file_id: i64 = r.get(1)?;
-                Ok(PlanRow {
-                    family_id: r.get(0)?,
-                    file_id,
-                    role: r.get(2)?,
-                    path: r.get(3)?,
-                    size: r.get(4)?,
-                    width: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
-                    height: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                    mtime: r.get(7)?,
-                    inode: r.get(8)?,
-                    dev: r.get(9)?,
-                    disk: r.get(10)?,
-                    pixel_hash: r.get(11)?,
-                    is_keeper: r.get::<_, Option<i64>>(12)? == Some(file_id),
-                })
-            })?
+            .query_map(
+                rusqlite::params![family, folder_prefix, keeper_folder_prefix],
+                |r| {
+                    let file_id: i64 = r.get(1)?;
+                    Ok(PlanRow {
+                        family_id: r.get(0)?,
+                        file_id,
+                        role: r.get(2)?,
+                        path: r.get(3)?,
+                        size: r.get(4)?,
+                        width: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                        height: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                        mtime: r.get(7)?,
+                        inode: r.get(8)?,
+                        dev: r.get(9)?,
+                        disk: r.get(10)?,
+                        pixel_hash: r.get(11)?,
+                        is_keeper: r.get::<_, Option<i64>>(12)? == Some(file_id),
+                    })
+                },
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }

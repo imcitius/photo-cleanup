@@ -82,6 +82,10 @@ pub struct Scope {
     /// Matched by prefix when the rows are fetched; the exact folder is the
     /// caller's business.
     pub folder: Option<String>,
+    /// Groups whose *kept* file lives here. This is the other direction: not
+    /// "clear out this folder" but "the originals are here, take away what
+    /// duplicates them, wherever it lies".
+    pub keeper_folder: Option<String>,
 }
 
 pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
@@ -89,7 +93,11 @@ pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
 }
 
 pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
-    let rows = db.plan_rows_scoped(scope.family, scope.folder.as_deref())?;
+    let rows = db.plan_rows_scoped(
+        scope.family,
+        scope.folder.as_deref(),
+        scope.keeper_folder.as_deref(),
+    )?;
     let protected = if policy.respect_lightroom {
         CurationIndex::build(db.lightroom_protected()?)
     } else {
