@@ -43,10 +43,111 @@ pub struct Thumbnail {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<DynamicImage> {
+    // A TIFF that claims differencing it never applied is read as an even
+    // grey field. The claim is corrected in our copy of the bytes rather than
+    // in the pixels afterwards: the decoder then does the right thing, and
+    // nothing has to be undone.
+    let fixups = crate::tiff::spurious_predictors(bytes);
+    if !fixups.is_empty() {
+        let mut patched = bytes.to_vec();
+        // Predictor 1: none — written in the file's own byte order, which is
+        // not the same two bytes either way.
+        let one = if bytes.starts_with(b"MM") {
+            1u16.to_be_bytes()
+        } else {
+            1u16.to_le_bytes()
+        };
+        for at in fixups {
+            if let Some(slot) = patched.get_mut(at..at + 2) {
+                slot.copy_from_slice(&one);
+            }
+        }
+        return image::load_from_memory(&patched).context(pc_core::tr!(
+            "не декодировать изображение",
+            "cannot decode the image"
+        ));
+    }
     image::load_from_memory(bytes).context(pc_core::tr!(
         "не декодировать изображение",
         "cannot decode the image"
     ))
+}
+
+#[cfg(test)]
+mod predictor_tests {
+    use super::*;
+
+    /// An uncompressed RGB TIFF of four pixels that claims `Predictor 2`
+    /// although its samples are stored as they are — the shape Lightroom
+    /// writes.
+    fn tiff_claiming_a_predictor(predictor: u16, compression: u16) -> Vec<u8> {
+        const ENTRIES: u16 = 10;
+        let ifd_at = 8usize;
+        let ifd_len = 2 + ENTRIES as usize * 12 + 4;
+        let bits_at = ifd_at + ifd_len;
+        let data_at = bits_at + 6;
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"II");
+        buf.extend_from_slice(&42u16.to_le_bytes());
+        buf.extend_from_slice(&(ifd_at as u32).to_le_bytes());
+        buf.extend_from_slice(&ENTRIES.to_le_bytes());
+
+        let entry = |tag: u16, kind: u16, count: u32, value: u32, buf: &mut Vec<u8>| {
+            buf.extend_from_slice(&tag.to_le_bytes());
+            buf.extend_from_slice(&kind.to_le_bytes());
+            buf.extend_from_slice(&count.to_le_bytes());
+            // A SHORT of one value is written into the first half of the
+            // value field; a LONG fills it.
+            if kind == 3 && count == 1 {
+                buf.extend_from_slice(&(value as u16).to_le_bytes());
+                buf.extend_from_slice(&0u16.to_le_bytes());
+            } else {
+                buf.extend_from_slice(&value.to_le_bytes());
+            }
+        };
+        entry(256, 3, 1, 4, &mut buf); // width
+        entry(257, 3, 1, 1, &mut buf); // height
+        entry(258, 3, 3, bits_at as u32, &mut buf); // bits per sample
+        entry(259, 3, 1, compression as u32, &mut buf);
+        entry(262, 3, 1, 2, &mut buf); // RGB
+        entry(273, 4, 1, data_at as u32, &mut buf); // strip offsets
+        entry(277, 3, 1, 3, &mut buf); // samples per pixel
+        entry(278, 3, 1, 1, &mut buf); // rows per strip
+        entry(279, 4, 1, 12, &mut buf); // strip byte counts
+        entry(317, 3, 1, predictor as u32, &mut buf);
+        buf.extend_from_slice(&0u32.to_le_bytes()); // no next directory
+        for _ in 0..3 {
+            buf.extend_from_slice(&8u16.to_le_bytes()); // eight bits each
+        }
+        buf.extend_from_slice(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120]);
+        buf
+    }
+
+    #[test]
+    fn a_predictor_claimed_over_uncompressed_pixels_is_ignored() {
+        // Obeyed, the tag turns the fourth pixel into the sum of all four.
+        // This is the whole of the grey-tile fault: every Lightroom TIFF
+        // export in the archive read as an even grey field.
+        let img = decode(&tiff_claiming_a_predictor(2, 1)).unwrap();
+        let rgb = img.to_rgb8();
+        assert_eq!(rgb.get_pixel(0, 0).0, [10, 20, 30]);
+        assert_eq!(rgb.get_pixel(3, 0).0, [100, 110, 120]);
+    }
+
+    #[test]
+    fn a_file_with_no_predictor_is_left_alone() {
+        let img = decode(&tiff_claiming_a_predictor(1, 1)).unwrap();
+        assert_eq!(img.to_rgb8().get_pixel(3, 0).0, [100, 110, 120]);
+    }
+
+    #[test]
+    fn a_predictor_over_compressed_pixels_is_left_to_the_decoder() {
+        // Where the tag is meaningful it must reach the decoder untouched.
+        // Nothing is patched, whatever the bytes then turn out to be.
+        let claimed = tiff_claiming_a_predictor(2, 5);
+        assert!(crate::tiff::spurious_predictors(&claimed).is_empty());
+    }
 }
 
 /// Undo the EXIF orientation so stored pixels are upright.

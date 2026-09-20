@@ -1170,8 +1170,10 @@ pub async fn full_preview(
         if let Some(preview) = read.preview {
             return Ok(preview);
         }
+        // Through our own decode: a TIFF that claims differencing it never
+        // applied has to be read the same way here as in the thumbnails.
         let image =
-            image::load_from_memory(&read.head).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+            pc_image::thumb::decode(&read.head).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
         let rendered = render(&image, full)?;
         if rendered.len() <= 6 * 1024 * 1024 {
             let _ = thumbs.put_at(&key, &rendered);
