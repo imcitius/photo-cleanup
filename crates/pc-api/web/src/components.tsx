@@ -335,6 +335,9 @@ export function FileDetails({ fileId }: { fileId: number }) {
         num(d.contrast, 1) && `${t("kontrast")} ${num(d.contrast, 1)}`,
         num(d.entropy) && `${t("entropiya")} ${num(d.entropy)} ${t("bit")}`,
         num(d.saturation) && `${t("nasyschennost")} ${num(d.saturation)}`,
+        num(d.chroma) && `${t("cvetnost")} ${num(d.chroma)}`,
+        num(d.tonal_range, 0) &&
+          `${t("razmah_tonov")} ${num(d.tonal_range, 0)}`,
       ]
         .filter(Boolean)
         .join(" · ") || null,

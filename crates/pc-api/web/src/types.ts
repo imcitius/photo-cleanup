@@ -77,6 +77,8 @@ export interface FileDetails {
   entropy: number | null;
   contrast: number | null;
   saturation: number | null;
+  chroma: number | null;
+  tonal_range: number | null;
   white_fraction: number | null;
   bimodality: number | null;
   text_rows: number | null;

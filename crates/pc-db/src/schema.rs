@@ -273,6 +273,18 @@ const MIGRATIONS: &[&str] = &[
         marked_at INTEGER NOT NULL
     );
     "#,
+    // 011 — two measurements the kinds were getting wrong without.
+    //
+    // `saturation` is absolute chroma, so it falls with the light and a
+    // forest at dusk measured the same as a black-and-white print. `chroma`
+    // is colour relative to brightness, which a monochrome frame has none of
+    // at any exposure. `tonal_range` is the span of the histogram, which
+    // tells a lens cap from a moon on a black sky — both are nearly all
+    // black, but only one of them has something in it.
+    r#"
+    ALTER TABLE files ADD COLUMN chroma      REAL;
+    ALTER TABLE files ADD COLUMN tonal_range REAL;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

@@ -13,6 +13,7 @@
 
 use anyhow::Result;
 use pc_db::{Db, FileInfo};
+use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub enum Category {
@@ -119,18 +120,38 @@ pub fn classify(f: &FileInfo) -> Verdict {
     let text = f.text_rows.unwrap_or(0.0) as f32;
     let entropy = f.entropy.unwrap_or(8.0) as f32;
     let contrast = f.contrast.unwrap_or(50.0) as f32;
+    // Measured after these kinds were first written, so an archive indexed
+    // by an older version does not have them. Where one is missing the old
+    // reading is used, which is what that archive was sorted by anyway.
+    let chroma = f.chroma.map(|v| v as f32);
+    let tonal = f.tonal_range.map(|v| v as f32);
 
     // --- nothing on it ----------------------------------------------------
-    if entropy < 2.0 && contrast < 12.0 {
+    //
+    // Darkness is not emptiness. A moon on a black sky is nearly all black —
+    // low entropy, low contrast — and so is a lens cap; what separates them
+    // is that the moon shot holds something bright, so its histogram spans
+    // the range while the lens cap's is a single spike.
+    let empty = entropy < 2.0 && contrast < 12.0 && tonal.is_none_or(|t| t < 24.0);
+    if empty {
         return Verdict {
             category: Category::Blank,
             confidence: 0.9,
-            evidence: vec![pc_core::tf!(
-                "энтропия {0:.1}, контраст {1:.0}",
-                "entropy {0:.1}, contrast {1:.0}",
-                entropy,
-                contrast
-            )],
+            evidence: vec![match tonal {
+                Some(t) => pc_core::tf!(
+                    "энтропия {0:.1}, контраст {1:.0}, размах тонов {2:.0}",
+                    "entropy {0:.1}, contrast {1:.0}, tonal range {2:.0}",
+                    entropy,
+                    contrast,
+                    t
+                ),
+                None => pc_core::tf!(
+                    "энтропия {0:.1}, контраст {1:.0}",
+                    "entropy {0:.1}, contrast {1:.0}",
+                    entropy,
+                    contrast
+                ),
+            }],
         };
     }
 
@@ -185,9 +206,20 @@ pub fn classify(f: &FileInfo) -> Verdict {
     // reversals by the hundred. There is no threshold in between. Telling a
     // notebook from a paddock is a question about meaning, which is the line
     // this module does not cross; see the note at the top.
+    //
+    // The thresholds are set where a page of text sits and a scanned
+    // photograph does not. Measured on both: a page scores line structure
+    // 0.054 against a photograph's 0.0014, gaps between lines 0.50 against
+    // 0.15, and three quarters white paper against a quarter. The old
+    // thresholds sat below the photograph, and every black-and-white print
+    // in the archive was filed as a document.
     let banding = f.text_banding.unwrap_or(0.0) as f32;
-    let printed = text > 0.008 && banding > 0.12;
-    let scanned = printed && white > 0.40 && saturation < 0.14 && bimodal > 0.60;
+    let colourless = match chroma {
+        Some(c) => c < 0.12,
+        None => saturation < 0.14,
+    };
+    let printed = text > 0.025 && banding > 0.25;
+    let scanned = printed && white > 0.55 && colourless && bimodal > 0.75;
 
     if scanned {
         let ratio = if f.height > 0 {
@@ -224,15 +256,24 @@ pub fn classify(f: &FileInfo) -> Verdict {
     }
 
     // --- colourless, but a photograph all the same ------------------------
-    if saturation < 0.035 && entropy > 4.0 {
+    //
+    // Asked of chroma, which is colour as a share of brightness, because a
+    // photograph loses chroma with the light: the same forest measured at
+    // dusk has a third of the absolute colour it had at noon, and a tenth of
+    // it after dark. Judged on that, three and a half thousand ordinary
+    // colour photographs were filed as black-and-white.
+    let no_colour = match chroma {
+        Some(c) => c < 0.045,
+        None => saturation < 0.035,
+    };
+    if no_colour && entropy > 4.0 {
         return Verdict {
             category: Category::Monochrome,
             confidence: 0.7,
-            evidence: vec![pc_core::tf!(
-                "насыщенность {0:.3}",
-                "saturation {0:.3}",
-                saturation
-            )],
+            evidence: vec![match chroma {
+                Some(c) => pc_core::tf!("цветность {0:.3}", "chroma {0:.3}", c),
+                None => pc_core::tf!("насыщенность {0:.3}", "saturation {0:.3}", saturation),
+            }],
         };
     }
 
@@ -273,6 +314,7 @@ mod tests {
             height: 3508,
             camera_model: None,
             saturation: Some(0.02),
+            chroma: Some(0.01),
             white_fraction: Some(0.72),
             bimodality: Some(0.93),
             text_rows: Some(0.03),
@@ -281,6 +323,78 @@ mod tests {
             contrast: Some(70.0),
             ..base()
         }
+    }
+
+    #[test]
+    fn a_forest_at_dusk_keeps_its_colour() {
+        // The complaint that started this: three and a half thousand ARW
+        // frames under "monochrome", every one of them in colour. Absolute
+        // chroma falls with the light — the same scene at an eighth of the
+        // exposure measures 0.045 against 0.36 — so a dim photograph read as
+        // colourless. Chroma relative to brightness does not move.
+        let mut f = base();
+        f.saturation = Some(0.031);
+        f.chroma = Some(0.42);
+        f.entropy = Some(6.1);
+        assert_eq!(classify(&f).category, Category::Photo);
+    }
+
+    #[test]
+    fn a_black_and_white_frame_is_still_recognised() {
+        let mut f = base();
+        f.saturation = Some(0.004);
+        f.chroma = Some(0.008);
+        assert_eq!(classify(&f).category, Category::Monochrome);
+    }
+
+    #[test]
+    fn an_archive_indexed_before_chroma_existed_still_sorts() {
+        // No chroma measured: the old reading decides, as it did before.
+        let mut f = base();
+        f.saturation = Some(0.004);
+        f.chroma = None;
+        assert_eq!(classify(&f).category, Category::Monochrome);
+    }
+
+    #[test]
+    fn the_moon_on_a_black_sky_is_not_an_empty_frame() {
+        // Nearly every pixel is black, so entropy and contrast both say
+        // nothing is there. The span of the histogram says otherwise.
+        let mut f = base();
+        f.entropy = Some(0.13);
+        f.contrast = Some(9.0);
+        f.tonal_range = Some(184.0);
+        assert_ne!(classify(&f).category, Category::Blank);
+    }
+
+    #[test]
+    fn a_lens_cap_is_still_an_empty_frame() {
+        let mut f = base();
+        f.entropy = Some(0.0);
+        f.contrast = Some(0.0);
+        f.tonal_range = Some(0.0);
+        assert_eq!(classify(&f).category, Category::Blank);
+    }
+
+    #[test]
+    fn a_scanned_photograph_is_not_a_document() {
+        // Measured on a black-and-white print on a flatbed: white border,
+        // no colour, plenty of grain — everything the old thresholds asked
+        // for, which is how seventy-five family photographs became
+        // "documents and scans". A page of text scores forty times the line
+        // structure.
+        let mut f = base();
+        f.name = "ScanImage364.jpg".into();
+        f.camera_model = None;
+        f.saturation = Some(0.0);
+        f.chroma = Some(0.01);
+        f.white_fraction = Some(0.26);
+        f.bimodality = Some(0.41);
+        f.text_rows = Some(0.0014);
+        f.text_banding = Some(0.145);
+        f.entropy = Some(6.22);
+        f.contrast = Some(68.9);
+        assert_eq!(classify(&f).category, Category::Monochrome);
     }
 
     #[test]
@@ -448,10 +562,77 @@ pub struct CategorizeReport {
     pub by_category: std::collections::BTreeMap<&'static str, usize>,
 }
 
-pub fn build(db: &Db) -> Result<CategorizeReport> {
-    build_controlled(db, &pc_core::work::Control::default())
+pub fn build(db: &Db, store: Option<&pc_core::ThumbStore>) -> Result<CategorizeReport> {
+    build_controlled(db, store, &pc_core::work::Control::default())
 }
-pub fn build_controlled(db: &Db, control: &pc_core::work::Control) -> Result<CategorizeReport> {
+
+/// Fill in measurements an older index does not have, from the thumbnails it
+/// already wrote.
+///
+/// The alternative is re-reading the archive, which for a few hundred
+/// gigabytes is an hour of disk for two numbers per file. A thumbnail is
+/// enough for both: colour survives the downscale, and so does the span
+/// between the darkest and the brightest of the frame.
+fn fill_missing_measurements(
+    db: &Db,
+    store: &pc_core::ThumbStore,
+    control: &pc_core::work::Control,
+) -> Result<u64> {
+    let pending: Vec<(i64, String)> = {
+        let mut st = db.conn.prepare(
+            "SELECT id, thumb_key FROM files
+              WHERE chroma IS NULL AND thumb_key IS NOT NULL AND state = 'present'",
+        )?;
+        let rows = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    control.begin(
+        pc_core::tr!(
+            "Дозамер по миниатюрам",
+            "Measuring again, from the thumbnails"
+        ),
+        pending.len() as u64,
+        0,
+    )?;
+
+    let measured: Vec<(i64, f64, f64)> = pending
+        .par_iter()
+        .filter_map(|(id, key)| {
+            let bytes = store.get(key)?;
+            let img = image::load_from_memory(&bytes).ok()?;
+            let m = pc_image::metrics::measure(&img);
+            Some((*id, m.chroma as f64, m.tonal_range as f64))
+        })
+        .collect();
+
+    db.conn.execute_batch("BEGIN")?;
+    {
+        let mut up = db
+            .conn
+            .prepare("UPDATE files SET chroma = ?2, tonal_range = ?3 WHERE id = ?1")?;
+        for (id, chroma, range) in &measured {
+            control.check()?;
+            control.advance(0, None);
+            up.execute(rusqlite::params![id, chroma, range])?;
+        }
+    }
+    db.conn.execute_batch("COMMIT")?;
+    Ok(measured.len() as u64)
+}
+
+pub fn build_controlled(
+    db: &Db,
+    store: Option<&pc_core::ThumbStore>,
+    control: &pc_core::work::Control,
+) -> Result<CategorizeReport> {
+    if let Some(store) = store {
+        fill_missing_measurements(db, store, control)?;
+    }
     let files = db.all_indexed()?;
     let mut report = CategorizeReport::default();
     control.begin(

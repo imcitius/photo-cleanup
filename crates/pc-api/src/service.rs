@@ -401,7 +401,8 @@ pub async fn file_details(State(st): State<Arc<AppState>>, Path(id): Path<i64>) 
                     f.container, f.extension_lied, f.width, f.height, f.orientation,
                     f.pixel_source, f.thumb_key, f.state, f.skipped_reason,
                     f.sharpness, f.clip_low, f.clip_high, f.entropy, f.contrast,
-                    f.saturation, f.white_fraction, f.bimodality, f.text_rows, f.text_banding
+                    f.saturation, f.white_fraction, f.bimodality, f.text_rows, f.text_banding,
+                    f.chroma, f.tonal_range
                FROM files f WHERE f.id=?1",
             &[&id],
         )?

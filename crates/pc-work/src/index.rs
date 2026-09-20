@@ -163,6 +163,8 @@ fn process(
             entropy: Some(probe.metrics.entropy as f64),
             contrast: Some(probe.metrics.contrast as f64),
             saturation: Some(probe.metrics.saturation as f64),
+            chroma: Some(probe.metrics.chroma as f64),
+            tonal_range: Some(probe.metrics.tonal_range as f64),
             white_fraction: Some(probe.metrics.white_fraction as f64),
             bimodality: Some(probe.metrics.bimodality as f64),
             text_rows: Some(probe.metrics.text_rows as f64),

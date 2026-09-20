@@ -539,6 +539,8 @@ export const messages = {
   entropiya: "энтропия",
   bit: "бит",
   nasyschennost: "насыщенность",
+  cvetnost: "цветность",
+  razmah_tonov: "размах тонов",
   vid_kadra: "Вид",
   prichina_propuska: "Почему пропущен",
   kamera_nichego_ne_zapisala:

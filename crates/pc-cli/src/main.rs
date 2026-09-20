@@ -145,10 +145,18 @@ struct OrganizeUndoArgs {
     yes: bool,
 }
 
+#[derive(Args)]
+struct CategoriesBuildArgs {
+    /// Where the thumbnails are. Measurements an older index is missing are
+    /// taken from them rather than by reading the archive again.
+    #[arg(long)]
+    thumbs: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum CategoriesCmd {
     /// Classify everything in the index
-    Build,
+    Build(CategoriesBuildArgs),
     /// Summary by kind
     List,
     /// Show the files of one kind
@@ -404,15 +412,17 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(pc_api::serve(&cli.db, &thumbs, a.quarantine, addr, a.open))
         }
-        Command::Categories(CategoriesCmd::Build) => {
-            let r = pc_family::categories::build(&db)?;
+        Command::Categories(CategoriesCmd::Build(a)) => {
+            let store = pc_core::ThumbStore::new(thumbs_dir(&cli.db, a.thumbs));
+            let r = pc_family::categories::build(&db, Some(&store))?;
             println!("Classified: {}", r.classified);
             for (label, n) in &r.by_category {
                 println!("  {label}: {n}");
             }
             println!(
-                "\nСемантические виды — «фото счётчика», «чек» — здесь не определяются:\n\
-                 это вопрос о смысле картинки, а не о её пикселях, и нужна модель."
+                "\nKinds that are about meaning — a photograph of a meter, a receipt —\n\
+                 are not worked out here: that is a question about the picture\n\
+                 rather than about its pixels, and it needs a model."
             );
             Ok(())
         }

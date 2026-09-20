@@ -397,7 +397,7 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
             service::restore_curation(&db)
         };
         let categories = || -> Result<()> {
-            pc_family::categories::build_controlled(&db, control)?;
+            pc_family::categories::build_controlled(&db, Some(&st.thumbs), control)?;
             Ok(())
         };
 

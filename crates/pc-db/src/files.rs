@@ -34,6 +34,8 @@ pub struct NewFile {
     pub entropy: Option<f64>,
     pub contrast: Option<f64>,
     pub saturation: Option<f64>,
+    pub chroma: Option<f64>,
+    pub tonal_range: Option<f64>,
     pub white_fraction: Option<f64>,
     pub bimodality: Option<f64>,
     pub text_rows: Option<f64>,
@@ -140,9 +142,10 @@ impl Db {
                                partial_hash, pixel_hash, phash, dhash, phash_crops, thumb_key,
                                skipped_reason, indexed_run, first_seen_run, last_seen_run,
                                sharpness, clip_low, clip_high, entropy, contrast,
-                               saturation, white_fraction, bimodality, text_rows, text_banding)
+                               saturation, white_fraction, bimodality, text_rows, text_banding,
+                               chroma, tonal_range)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
-                     ?21,?22,?22,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32)
+                     ?21,?22,?22,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34)
              ON CONFLICT(path) DO UPDATE SET
                  name=excluded.name, disk=excluded.disk, dev=excluded.dev,
                  inode=excluded.inode, nlink=excluded.nlink, size=excluded.size,
@@ -156,7 +159,8 @@ impl Db {
                  last_seen_run=excluded.last_seen_run, sharpness=excluded.sharpness,
                  clip_low=excluded.clip_low, clip_high=excluded.clip_high,
                  entropy=excluded.entropy, contrast=excluded.contrast,
-                 saturation=excluded.saturation, white_fraction=excluded.white_fraction,
+                 saturation=excluded.saturation, chroma=excluded.chroma,
+                 tonal_range=excluded.tonal_range, white_fraction=excluded.white_fraction,
                  bimodality=excluded.bimodality, text_rows=excluded.text_rows,
                  text_banding=excluded.text_banding",
             params![
@@ -191,7 +195,9 @@ impl Db {
                 f.white_fraction,
                 f.bimodality,
                 f.text_rows,
-                f.text_banding
+                f.text_banding,
+                f.chroma,
+                f.tonal_range
             ],
         )?;
         Ok(self.conn.query_row(
@@ -363,6 +369,8 @@ pub struct FileInfo {
     pub entropy: Option<f64>,
     pub contrast: Option<f64>,
     pub saturation: Option<f64>,
+    pub chroma: Option<f64>,
+    pub tonal_range: Option<f64>,
     pub white_fraction: Option<f64>,
     pub bimodality: Option<f64>,
     pub text_rows: Option<f64>,
@@ -414,7 +422,7 @@ impl Db {
                     m.dng_original_raw, m.lens,
                     f.sharpness, f.clip_low, f.clip_high, f.entropy, f.contrast,
                     f.saturation, f.white_fraction, f.bimodality, f.text_rows,
-                    f.text_banding
+                    f.text_banding, f.chroma, f.tonal_range
                FROM files f LEFT JOIN meta m ON m.file_id = f.id
               WHERE f.phash IS NOT NULL AND f.state = 'present'
               ORDER BY f.id",
@@ -455,6 +463,8 @@ impl Db {
                     bimodality: r.get(30)?,
                     text_rows: r.get(31)?,
                     text_banding: r.get(32)?,
+                    chroma: r.get(33)?,
+                    tonal_range: r.get(34)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

@@ -541,6 +541,8 @@ export const messages = {
   entropiya: "entropy",
   bit: "bits",
   nasyschennost: "saturation",
+  cvetnost: "chroma",
+  razmah_tonov: "tonal range",
   vid_kadra: "Kind",
   prichina_propuska: "Why it was skipped",
   kamera_nichego_ne_zapisala:

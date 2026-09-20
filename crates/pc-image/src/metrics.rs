@@ -30,7 +30,22 @@ pub struct Metrics {
     pub contrast: f32,
     /// Mean chroma. Paper, screenshots of text and scans sit near zero;
     /// photographs almost never do.
+    ///
+    /// Absolute, so it falls with the light: the same colourful scene at a
+    /// third of the exposure measures a third of the chroma. Use `chroma`
+    /// to ask whether there is colour in a frame at all.
     pub saturation: f32,
+    /// Colour as a share of brightness, over the pixels bright enough to
+    /// carry any: zero for a monochrome frame at any exposure, and unmoved
+    /// by how dark the photograph is.
+    pub chroma: f32,
+    /// Distance between the darkest and the brightest of the frame, ignoring
+    /// the outermost tenth of a percent at each end.
+    ///
+    /// What separates an empty frame from a photograph that is mostly empty:
+    /// a lens cap has nothing in it, while a moon on a black sky is one small
+    /// bright thing on a large dark nothing.
+    pub tonal_range: f32,
     /// Fraction of pixels bright enough to be unprinted paper.
     pub white_fraction: f32,
     /// Fraction of pixels at either extreme. Ink on paper is bimodal; a
@@ -63,6 +78,42 @@ fn gray_of(img: &DynamicImage) -> GrayImage {
             (y * step).min(g.height() - 1),
         )
     })
+}
+
+/// Colour relative to brightness, over the pixels that have enough of it.
+///
+/// `(max - min) / max` is the saturation of HSV, and unlike plain chroma it
+/// does not fall away with the light. Pixels darker than a quarter of the
+/// range are skipped: at those levels the difference between the channels is
+/// sensor noise and rounding, and averaging it in would report colour in a
+/// black frame.
+fn chroma_of(img: &DynamicImage) -> f32 {
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return 0.0;
+    }
+    let step = ((w as f64 * h as f64 / 250_000.0).sqrt().ceil() as u32).max(1);
+    let (mut sum, mut n) = (0.0f32, 0u32);
+    let mut y = 0;
+    while y < h {
+        let mut x = 0;
+        while x < w {
+            let p = img.get_pixel(x, y).0;
+            let hi = p[0].max(p[1]).max(p[2]) as f32;
+            let lo = p[0].min(p[1]).min(p[2]) as f32;
+            if hi >= 16.0 {
+                sum += (hi - lo) / hi;
+                n += 1;
+            }
+            x += step;
+        }
+        y += step;
+    }
+    if n == 0 {
+        0.0
+    } else {
+        sum / n as f32
+    }
 }
 
 /// Mean chroma, sampled on a lattice to keep the cost flat.
@@ -197,6 +248,26 @@ pub fn measure(img: &DynamicImage) -> Metrics {
         top.iter().sum::<f32>() / top.len() as f32
     };
 
+    // The span of the histogram, with a thousandth trimmed off each end so a
+    // single hot pixel or a dust speck does not speak for the whole frame.
+    let edge = (n * 0.001) as u32;
+    let percentile = |from_low: bool| -> f32 {
+        let mut seen = 0u32;
+        let levels: Box<dyn Iterator<Item = usize>> = if from_low {
+            Box::new(0..256)
+        } else {
+            Box::new((0..256).rev())
+        };
+        for i in levels {
+            seen += hist[i];
+            if seen > edge {
+                return i as f32;
+            }
+        }
+        0.0
+    };
+    let tonal_range = (percentile(false) - percentile(true)).max(0.0);
+
     let (text_rows, text_banding) = text_rows_of(&g);
     let white_fraction = hist[235..=255].iter().sum::<u32>() as f32 / n;
     let bimodality =
@@ -209,6 +280,8 @@ pub fn measure(img: &DynamicImage) -> Metrics {
         entropy,
         contrast: var.sqrt(),
         saturation: saturation_of(img),
+        chroma: chroma_of(img),
+        tonal_range,
         white_fraction,
         bimodality,
         text_rows,
