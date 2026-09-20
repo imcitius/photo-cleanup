@@ -168,6 +168,9 @@ struct InspectArgs {
     /// the ones the index knows.
     #[arg(long)]
     search: Option<String>,
+    /// Where the thumbnails are. Next to the database by default
+    #[arg(long)]
+    thumbs: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -527,7 +530,10 @@ fn main() -> Result<()> {
         Command::Organize(OrganizeCmd::Undo(a)) => cmd_organize_undo(&db, &a),
         Command::Organize(OrganizeCmd::Runs) => cmd_organize_runs(&db),
         Command::Status => cmd_status(&db),
-        Command::Inspect(a) => cmd_inspect(&db, &a),
+        Command::Inspect(a) => {
+            let store = pc_core::ThumbStore::new(thumbs_dir(&cli.db, a.thumbs.clone()));
+            cmd_inspect(&db, &store, &a)
+        }
         Command::Thumbs(a) => {
             let store = pc_core::ThumbStore::new(thumbs_dir(&cli.db, a.thumbs));
             let report =
@@ -545,7 +551,49 @@ fn main() -> Result<()> {
 /// about that file: which flavour of the format it is, and what the decoder
 /// made of it. This prints both, so the answer does not depend on having
 /// exiftool at hand — on a NAS there usually is none.
-fn cmd_inspect(db: &Db, args: &InspectArgs) -> Result<()> {
+/// What the thumbnail store actually holds for this file, which is a
+/// different question from whether a good thumbnail can be made. A key that
+/// resolves to nothing, or to a tone, is a grey tile in the lists however
+/// well the file itself reads.
+fn report_stored_thumb(db: &Db, store: &pc_core::ThumbStore, id: i64) -> Result<()> {
+    let key: Option<String> =
+        db.conn
+            .query_row("SELECT thumb_key FROM files WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })?;
+    let Some(key) = key else {
+        println!("Stored:    no thumbnail recorded for this file");
+        return Ok(());
+    };
+    match store.get(&key) {
+        None => println!("Stored:    key {key} — NOT IN THE STORE, the lists show a grey tile"),
+        Some(bytes) if bytes.is_empty() => {
+            println!("Stored:    key {key} — zero bytes, the lists show a grey tile")
+        }
+        Some(bytes) => match image::load_from_memory(&bytes) {
+            Err(e) => println!("Stored:    key {key} — unreadable: {e}"),
+            Ok(img) => {
+                let m = pc_image::metrics::measure(&img);
+                println!(
+                    "Stored:    key {key} — {} × {} · {} · chroma {:.3} · tonal range {:.0}{}",
+                    img.width(),
+                    img.height(),
+                    fmt_bytes(bytes.len() as u64),
+                    m.chroma,
+                    m.tonal_range,
+                    if m.tonal_range < 8.0 {
+                        " — FLAT, this is the grey tile"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        },
+    }
+    Ok(())
+}
+
+fn cmd_inspect(db: &Db, store: &pc_core::ThumbStore, args: &InspectArgs) -> Result<()> {
     if let Some(text) = &args.search {
         let mut st = db.conn.prepare(
             "SELECT id, path FROM files
@@ -566,7 +614,8 @@ fn cmd_inspect(db: &Db, args: &InspectArgs) -> Result<()> {
         println!();
         // The first one, in full. The rest are listed so a different file can
         // be named directly.
-        return inspect_one(std::path::Path::new(&found[0].1));
+        inspect_one(std::path::Path::new(&found[0].1))?;
+        return report_stored_thumb(db, store, found[0].0);
     }
     let path = args
         .path
