@@ -260,14 +260,14 @@ async fn recovery_and_directory_boundaries() {
     #[cfg(windows)]
     let _ = link;
     for path in escapes {
-        let (s, _) = f
+        let (s, v) = f
             .req(
                 "GET",
                 &format!("/api/fs?path={}", path.display()),
                 Value::Null,
             )
             .await;
-        assert_eq!(s, 400);
+        assert_eq!(s, 400, "{} вернул {s}: {v}", path.display());
     }
 }
 #[tokio::test]
