@@ -132,13 +132,21 @@ impl BlockReason {
     }
 }
 
+/// Separators that divide the components of a stored path.
+///
+/// Platform-dependent on purpose. Windows accepts both and writes the
+/// backslash, so both have to count there. On Unix a backslash is an ordinary
+/// character in a file name — `a\b.jpg` is one file, not a file `b.jpg` in a
+/// directory `a` — and treating it as a separator would silently mis-name
+/// entries the archive legitimately contains.
+const SEPARATORS: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+
 /// Split a stored path into its directory and its file name.
 ///
-/// Paths are kept as strings once they are in the database, and Windows
-/// writes them with backslashes — so splitting on `/` alone would hand the
-/// whole path back as the file name on half the machines this runs on.
+/// Paths become strings once they are in the database, so this is string work
+/// rather than `Path` work, and it has to know which separators count.
 pub fn split_path(path: &str) -> (&str, &str) {
-    match path.rfind(['/', '\\']) {
+    match path.rfind(SEPARATORS) {
         Some(i) => (&path[..i], &path[i + 1..]),
         None => ("", path),
     }
@@ -154,9 +162,9 @@ pub fn dir_name(path: &str) -> &str {
     split_path(path).0
 }
 
-/// Path components, on either separator, with empty ones dropped.
+/// Path components, with empty ones dropped.
 pub fn path_parts(path: &str) -> Vec<&str> {
-    path.split(['/', '\\']).filter(|s| !s.is_empty()).collect()
+    path.split(SEPARATORS).filter(|s| !s.is_empty()).collect()
 }
 
 /// True for names we never descend into or index.
@@ -211,18 +219,32 @@ mod path_tests {
     use super::*;
 
     #[test]
-    fn either_separator_splits_a_stored_path() {
+    fn a_stored_path_splits_at_its_last_separator() {
         assert_eq!(split_path("/foto/2019/a.jpg"), ("/foto/2019", "a.jpg"));
+        assert_eq!(split_path("a.jpg"), ("", "a.jpg"));
+        assert_eq!(path_parts("/mnt/disk3/foto/"), ["mnt", "disk3", "foto"]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_backslash_in_a_unix_name_stays_part_of_the_name() {
+        // Legal on every Unix filesystem. Counting it as a separator would
+        // show the wrong name for a file the archive really contains.
+        assert_eq!(
+            split_path(r"/foto/2019/a\b.jpg"),
+            ("/foto/2019", r"a\b.jpg")
+        );
+        assert_eq!(path_parts(r"/foto/a\b"), ["foto", r"a\b"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_accepts_both_separators() {
         assert_eq!(
             split_path(r"D:\Фото\2019\a.jpg"),
             (r"D:\Фото\2019", "a.jpg")
         );
-        assert_eq!(split_path("a.jpg"), ("", "a.jpg"));
-    }
-
-    #[test]
-    fn components_drop_the_empty_ones_on_either_separator() {
-        assert_eq!(path_parts("/mnt/disk3/foto/"), ["mnt", "disk3", "foto"]);
+        assert_eq!(split_path("D:/Фото/a.jpg"), ("D:/Фото", "a.jpg"));
         assert_eq!(path_parts(r"D:\foto\2019"), ["D:", "foto", "2019"]);
     }
 }

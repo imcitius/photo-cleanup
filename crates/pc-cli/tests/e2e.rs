@@ -244,7 +244,7 @@ fn quarantine_refuses_a_destination_on_another_filesystem() {
     let dog = by_name(&bundles, "Dogshow Previews.lrdata");
     // /dev is a different filesystem on both macOS and Linux.
     let err = pc_apply::quarantine_dest(dog, Some(Path::new("/dev"))).unwrap_err();
-    assert!(err.to_string().contains("другой файловой системе"), "{err}");
+    assert!(err.to_string().contains("different filesystem"), "{err}");
 }
 
 #[test]

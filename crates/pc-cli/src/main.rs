@@ -594,8 +594,8 @@ fn cmd_clean(db: &Db, a: CleanArgs) -> Result<()> {
         println!("  skipped: {s}");
     }
     println!(
-        "\nМесто пока не освободилось — данные лежат в карантине.\n\
-         Освободить: photo-cleanup derived purge --older-than 7d --yes"
+        "\nNo space has come back yet — the data is in quarantine.\n\
+         To reclaim it: photo-cleanup derived purge --older-than 7d --yes"
     );
     Ok(())
 }
@@ -759,9 +759,9 @@ fn cmd_plan(
         println!("  refused: {path} — {why}");
     }
     println!(
-        "\nМесто пока не освободилось — файлы в карантине.\n\
-         Вернуть: photo-cleanup derived undo --journal <id>\n\
-         Освободить: photo-cleanup derived purge --older-than 7d --yes"
+        "\nNo space has come back yet — the files are in quarantine.\n\
+         To bring one back: photo-cleanup derived undo --journal <id>\n\
+         To reclaim it: photo-cleanup derived purge --older-than 7d --yes"
     );
     Ok(())
 }

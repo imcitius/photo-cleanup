@@ -99,8 +99,19 @@ export function duration(seconds: number) {
   return `${Math.floor(m / 60)} ${ui.hoursShort} ${m % 60} ${ui.minutesShort}`;
 }
 
-/** The last component of a path, whichever separator the server uses. */
-export const basename = (p: string) => p.split(/[/\\]/).pop() || p;
+/** A drive letter or a UNC prefix: the only paths that use backslashes. */
+const WINDOWS_PATH = /^(?:[A-Za-z]:[\\/]|\\\\)/;
+
+/**
+ * The last component of a path, as the server writes it.
+ *
+ * A Windows server sends backslashes; a Unix one sends slashes, and there a
+ * backslash is an ordinary character in a file name — `a\b.jpg` is one file.
+ * So the backslash counts as a separator only for a path that announces
+ * itself as a Windows one.
+ */
+export const basename = (p: string) =>
+  (WINDOWS_PATH.test(p) ? p.split(/[/\\]/) : p.split("/")).pop() || p;
 
 /** Colour for a finished job's badge. */
 export const jobTone = (state: string) =>

@@ -171,6 +171,15 @@ pub fn checked_dir(path: &str) -> Result<PathBuf> {
             );
         }
         cur.push(part);
+        // A prefix or a bare root is not a directory entry and cannot be a
+        // symlink: `C:` on its own has no metadata to read, and asking for it
+        // fails outright. Only the named components are worth checking.
+        if matches!(
+            part,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
         let md = std::fs::symlink_metadata(&cur)
             .with_context(|| pc_core::tf!("не прочитать {0}", "cannot read {0}", cur.display()))?;
         if md.file_type().is_symlink() {

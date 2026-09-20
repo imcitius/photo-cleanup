@@ -108,10 +108,13 @@ pub fn quarantine_dest(b: &Bundle, override_root: Option<&Path>) -> Result<PathB
             let dev = pc_core::dev_of_nearest_existing(root)?;
             if dev != b.dev as u64 {
                 bail!(
-                    "карантин {} находится на другой файловой системе, чем {} — \
-                     перенос превратился бы в полное копирование. Укажите путь на том же диске.",
-                    root.display(),
-                    b.path
+                    "{}",
+                    pc_core::tf!(
+                        "карантин {0} находится на другой файловой системе, чем {1} — перенос превратился бы в полное копирование. Укажите путь на том же диске.",
+                        "quarantine {0} is on a different filesystem from {1} — the move would become a full copy. Give a path on the same disk.",
+                        root.display(),
+                        b.path
+                    )
                 );
             }
             Ok(root.join(&b.disk).join(rel))
@@ -142,9 +145,13 @@ pub fn quarantine_dest_for(
             let dev = pc_core::dev_of_nearest_existing(root)?;
             if dev != disk.dev {
                 bail!(
-                    "карантин {} на другой файловой системе, чем {path} — \
-                     перенос превратился бы в копирование",
-                    root.display()
+                    "{}",
+                    pc_core::tf!(
+                        "карантин {0} на другой файловой системе, чем {1} — перенос превратился бы в копирование",
+                        "quarantine {0} is on a different filesystem from {1} — the move would become a copy",
+                        root.display(),
+                        path
+                    )
                 );
             }
             Ok(root.join(&disk.label).join(rel))
