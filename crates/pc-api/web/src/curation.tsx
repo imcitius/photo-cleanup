@@ -187,15 +187,23 @@ export function ImageViewer({
               src={`/api/file/${image.file_id}/preview`}
               alt={image.name}
               style={{ transform: `translate(${pan.x}px, ${pan.y}px)` }}
-              onError={() =>
-                setError(
-                  t(
-                    "ne_udalos_prochitat_polnyy_kadr_fayl",
-                    image.name,
-                    image.file_id,
-                  ),
-                )
-              }
+              // An <img> cannot read why the server refused, and "could not
+              // read the frame" alone leaves the question the user actually
+              // has — is the file broken? — unanswered. So ask again and
+              // show what the server says.
+              onError={async () => {
+                const fallback = t(
+                  "ne_udalos_prochitat_polnyy_kadr_fayl",
+                  image.name,
+                  image.file_id,
+                );
+                try {
+                  await api(`/file/${image.file_id}/preview`);
+                  setError(fallback);
+                } catch (e) {
+                  setError(`${fallback} — ${(e as Error).message}`);
+                }
+              }}
             />
             <figcaption>
               {image.name}

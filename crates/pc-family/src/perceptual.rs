@@ -192,13 +192,47 @@ pub fn derivation_plausible(a: &FileInfo, b: &FileInfo, ssim: f64, p: &Params) -
         return ssim >= p.ssim_min;
     }
 
-    // Same geometry, same format. Two frames of a sequence live here too, so
-    // the bar is a re-encode of identical content, not a resemblance.
+    // Same geometry, same format. Two frames of a burst live here too, and a
+    // similarity score cannot separate them reliably: two expressions a
+    // quarter-second apart scored 0.971 against a bar of 0.970 on a real
+    // archive, and the tool offered to delete one of them.
+    //
+    // What does separate them is how the camera names its files. One exposure
+    // gets one number — a raw and its JPEG share the stem — so two different
+    // stems straight out of a camera are two presses of the shutter, whatever
+    // they look like. That is a fact about the files, not a threshold.
+    if straight_from_camera(a) && straight_from_camera(b) && a.stem() != b.stem() {
+        return false;
+    }
+
     let same_moment = match (a.taken_at, b.taken_at) {
         (Some(x), Some(y)) => (x - y).abs() <= 1,
         _ => true,
     };
     same_moment && ssim >= p.ssim_min_same_shape
+}
+
+/// True when nothing claims to have made this file from another one.
+///
+/// An export carries the editor in `Software` or names its source in XMP. A
+/// file with camera metadata and neither of those came off the card.
+fn straight_from_camera(f: &FileInfo) -> bool {
+    const EDITORS: [&str; 6] = [
+        "lightroom",
+        "photoshop",
+        "capture one",
+        "camera raw",
+        "gimp",
+        "affinity",
+    ];
+    f.camera_model.is_some()
+        && f.derived_from.is_none()
+        && f.dng_original_raw.is_none()
+        && !f
+            .software
+            .as_deref()
+            .map(str::to_lowercase)
+            .is_some_and(|s| EDITORS.iter().any(|e| s.contains(e)))
 }
 
 /// Check every candidate against the pixels.
@@ -317,6 +351,56 @@ mod tests {
             taken_at: Some(taken),
             ..Default::default()
         }
+    }
+
+    /// A frame as the camera wrote it: a name, a body, nothing derived.
+    fn from_camera(name: &str, taken: i64) -> FileInfo {
+        FileInfo {
+            name: format!("{name}.JPG"),
+            path: format!("/foto/{name}.JPG"),
+            width: 6192,
+            height: 4128,
+            container: "jpeg".into(),
+            taken_at: Some(taken),
+            camera_model: Some("ILCE-6700".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn two_frames_of_a_burst_are_not_one_photograph() {
+        // Real numbers from an archive: two expressions a moment apart, 0.971
+        // against a bar of 0.970. The tool offered to delete one of them.
+        let p = Params::default();
+        let a = from_camera("DSC04122", 1_770_000_000);
+        let b = from_camera("DSC04123", 1_770_000_000);
+        assert!(
+            !derivation_plausible(&a, &b, 0.971, &p),
+            "кадры серии приняты за один снимок"
+        );
+        // Even a near-perfect score does not make one camera file into another.
+        assert!(!derivation_plausible(&a, &b, 0.999, &p));
+    }
+
+    #[test]
+    fn a_camera_jpeg_beside_its_raw_still_belongs_to_the_same_shot() {
+        // One exposure, one number: the stem is shared, so the rule above
+        // must not touch this pair.
+        let p = Params::default();
+        let jpeg = from_camera("DSC04122", 1_770_000_000);
+        let mut twin = from_camera("DSC04122", 1_770_000_000);
+        twin.name = "DSC04122.ARW".into();
+        assert!(derivation_plausible(&jpeg, &twin, 0.98, &p));
+    }
+
+    #[test]
+    fn an_export_under_a_new_name_is_still_a_rendition() {
+        // Renamed by a person, made by an editor: not two shutter presses.
+        let p = Params::default();
+        let original = from_camera("DSC04122", 1_770_000_000);
+        let mut export = from_camera("beach-sunset", 1_770_000_000);
+        export.software = Some("Adobe Lightroom Classic 13.2".into());
+        assert!(derivation_plausible(&original, &export, 0.98, &p));
     }
 
     #[test]
