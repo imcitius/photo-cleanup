@@ -762,7 +762,16 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     );
                     continue;
                 }
-                items.push(json!({"journal_id":e.id,"path":e.dst,"dst":"Окончательное удаление","original":e.src,"size":e.size,"file_count":e.file_count}));
+                let mut item = json!({"journal_id":e.id,"path":e.dst,"dst":"Окончательное удаление","original":e.src,"size":e.size,"file_count":e.file_count});
+                // The entry already counts what travelled with the frame, so
+                // the companions are read off it rather than looked for on
+                // disk — and counted once.
+                if let Some(rest) = manifest_companions(&e, |_| {
+                    json!(pc_core::tr!("Окончательное удаление", "Deleted for good"))
+                }) {
+                    item["companions"] = rest;
+                }
+                items.push(item);
                 actions.push(Action::Purge(e));
             }
         }
@@ -845,7 +854,11 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     );
                     continue;
                 }
-                items.push(json!({"journal_id":e.id,"path":e.dst,"dst":e.src,"size":e.size,"file_count":e.file_count}));
+                let mut item = json!({"journal_id":e.id,"path":e.dst,"dst":e.src,"size":e.size,"file_count":e.file_count});
+                if let Some(rest) = manifest_companions(&e, |m| json!(m.src)) {
+                    item["companions"] = rest;
+                }
+                items.push(item);
                 actions.push(Action::Undo(e));
             }
         }
@@ -884,6 +897,11 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
     // before moving the photograph, not after a partially successful rename.
     let mut blocked = std::collections::HashSet::new();
     for item in &mut items {
+        // An item that brought its own list has it from the journal, which
+        // knows what actually moved; the disk beside the file does not.
+        if item.get("companions").is_some() {
+            continue;
+        }
         let src = item["path"].as_str().unwrap_or("");
         let dst = item["dst"].as_str().unwrap_or("");
         if !FsPath::new(src).is_file() {
@@ -1490,6 +1508,27 @@ pub async fn date(
         tx.commit()?;
         Ok(json!({"ok":true}))
     })
+}
+
+/// What travelled with the frame, as the journal recorded it, for a preview
+/// of undoing or deleting that operation. `None` for entries written before
+/// the journal kept a list, which are still read off the disk.
+fn manifest_companions(
+    e: &pc_db::JournalEntry,
+    dst_of: impl Fn(&pc_db::Moved) -> Value,
+) -> Option<Value> {
+    if e.manifest.is_empty() {
+        return None;
+    }
+    Some(json!(e
+        .manifest
+        .iter()
+        .filter(|m| m.src != e.src)
+        .map(|m| {
+            let size = std::fs::metadata(&m.dst).map(|md| md.len()).unwrap_or(0);
+            json!({"path": m.dst, "dst": dst_of(m), "size": size})
+        })
+        .collect::<Vec<_>>()))
 }
 
 fn companion_destination(src: &FsPath, dst: &FsPath, side: &FsPath) -> PathBuf {

@@ -952,3 +952,53 @@ async fn an_orphan_comes_out_of_quarantine_the_way_it_went_in() {
     assert_eq!(rows[0]["status"], "done");
     assert_eq!(rows[0]["dst"], home.display().to_string());
 }
+
+#[tokio::test]
+async fn a_purge_takes_the_sidecar_with_the_frame_and_leaves_nothing_behind() {
+    let f = Fixture::new();
+    let img = image::RgbImage::from_fn(240, 180, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+    });
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+        .encode_image(&img)
+        .unwrap();
+    for n in ["a.jpg", "a copy.jpg"] {
+        std::fs::write(f.archive.join(n), &encoded).unwrap();
+        std::fs::write(f.archive.join(n.replace(".jpg", ".xmp")), b"edits").unwrap();
+    }
+    let id = f
+        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+    let id = f.start("families", json!({})).await;
+    assert_eq!(f.wait(id).await["state"], "done");
+
+    let plan = f.preview("plan-apply", json!({"roles":["copy"]})).await;
+    assert_eq!(plan["items"].as_array().unwrap().len(), 1, "{plan}");
+    assert_eq!(f.apply(&plan).await["state"], "done");
+
+    // The holding period is counted in whole seconds, and nothing is purged
+    // on the same one it arrived.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let purge = f
+        .preview("derived-purge", json!({"older_than_secs":0}))
+        .await;
+    assert_eq!(purge["items"].as_array().unwrap().len(), 1, "{purge}");
+    assert_eq!(purge["total_files"], 2, "снимок и его спутник: {purge}");
+    let done = f.apply(&purge).await;
+    assert_eq!(done["state"], "done", "{done}");
+
+    for gone in [
+        purge["items"][0]["path"].as_str().unwrap().to_string(),
+        purge["items"][0]["companions"][0]["path"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    ] {
+        assert!(!Path::new(&gone).exists(), "осталось в карантине: {gone}");
+    }
+    // And what was kept is untouched.
+    assert!(f.archive.join("a.jpg").exists());
+    assert!(f.archive.join("a.xmp").exists());
+}

@@ -284,9 +284,11 @@ mod prune_tests {
             format!("/foto{}a.jpg", std::path::MAIN_SEPARATOR)
         );
         // A directory went in whole, so everything under it comes back whole.
+        // The head is quoted as it was stored; only the joints are ours.
+        let sep = std::path::MAIN_SEPARATOR;
         assert_eq!(
             quarantine_origin(&format!("/foto/{q}/Library.lrdata/sub/cache")).unwrap(),
-            ["", "foto", "Library.lrdata", "sub", "cache"].join(std::path::MAIN_SEPARATOR_STR)
+            format!("/foto{sep}Library.lrdata{sep}sub{sep}cache")
         );
         // Not in quarantine, or nothing after the folder: no guessing.
         assert_eq!(quarantine_origin("/foto/a.jpg"), None);
@@ -295,7 +297,7 @@ mod prune_tests {
         // Quarantine inside quarantine: the way out is the innermost one.
         assert_eq!(
             quarantine_origin(&format!("/foto/{q}/dir/{q}/a.jpg")).unwrap(),
-            ["", "foto", QUARANTINE_DIR, "dir", "a.jpg"].join(std::path::MAIN_SEPARATOR_STR)
+            format!("/foto/{q}/dir{sep}a.jpg")
         );
     }
 }
@@ -332,10 +334,14 @@ pub fn quarantine_origin(path: &str) -> Option<String> {
     // A trailing component is the folder itself, with nothing inside it to
     // bring home.
     let (head_end, tail_start) = found?;
-    let tail = trim_leading_separators(&path[tail_start..]);
-    if tail.is_empty() {
+    // The head keeps the spelling it was stored with — a drive letter, a
+    // verbatim prefix, whatever the walk wrote. The tail is plain names, so
+    // it is rejoined with this platform's separator rather than left mixed.
+    let rest = trim_leading_separators(&path[tail_start..]);
+    if rest.is_empty() {
         return None;
     }
+    let tail = path_parts(rest).join(std::path::MAIN_SEPARATOR_STR);
     let head = path[..head_end].trim_end_matches(SEPARATORS);
     let sep = std::path::MAIN_SEPARATOR;
     // An absolute path keeps its leading separator; a relative one has none.
