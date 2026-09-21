@@ -853,10 +853,12 @@ version = "0.2.15"
 dependencies = [
  "anyhow",
  "blake3",
+ "libc",
  "serde",
  "tempfile",
  "thiserror",
  "walkdir",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

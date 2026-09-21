@@ -214,6 +214,15 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
             ),
         );
     }
+    // The gate above is this server's own memory. The archive can also be
+    // written to from the command line, or by a second server on the same
+    // database, and neither of them can see that memory — so the writing job
+    // takes a lock the operating system keeps, for as long as it runs.
+    let writer = match pc_core::lock::take_writer(&st.db_path, &req.kind) {
+        Ok(lock) => lock,
+        Err(e) if e.is::<pc_core::lock::Busy>() => return service::error(409, &format!("{e:#}")),
+        Err(e) => return service::error(500, &format!("{e:#}")),
+    };
     let result = (|| -> Result<i64> {
         let db = st.db.lock().unwrap();
         db.conn.execute(
@@ -275,8 +284,11 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
         // after. Whoever sees "done" tries the next job immediately, and in
         // the other order that press met a gate the finished job was still
         // holding — a 409 for work that was over. The reverse gap is harmless:
-        // the row says "running" for an instant longer than it runs.
+        // the row says "running" for an instant longer than it runs. Both
+        // gates go at once: the one in this memory and the one the system
+        // keeps for every process.
         *st.jobs.active.lock().unwrap() = None;
+        drop(writer);
         pause_between_letting_go_and_saying_so();
         if let Ok(db) = Db::open(&st.db_path) {
             let err = result.err().map(|e| format!("{e:#}"));

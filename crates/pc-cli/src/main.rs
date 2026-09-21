@@ -355,6 +355,38 @@ struct UndoArgs {
     journal: i64,
 }
 
+/// What this command is about to do to the archive, or `None` when it only
+/// reads. Named in the lock file, so whoever is refused learns why.
+fn writing_work(c: &Command) -> Option<&'static str> {
+    match c {
+        Command::Scan(_) => Some("scan"),
+        Command::Index(_) => Some("index"),
+        Command::Derived(DerivedCmd::Clean(_)) => Some("moving derived data to quarantine"),
+        Command::Derived(DerivedCmd::Purge(_)) => Some("deleting from quarantine"),
+        Command::Derived(DerivedCmd::Undo(_)) => Some("restoring from quarantine"),
+        Command::Families(FamiliesCmd::Build(_)) => Some("building groups"),
+        Command::Categories(CategoriesCmd::Build(_)) => Some("sorting by kind"),
+        Command::Series(SeriesCmd::Build(_)) => Some("finding bursts"),
+        Command::Apply(_) => Some("moving copies to quarantine"),
+        Command::Organize(OrganizeCmd::Apply(_)) => Some("sorting by date"),
+        Command::Organize(OrganizeCmd::Undo(_)) => Some("undoing a reorganisation"),
+        Command::Thumbs(_) => Some("making thumbnails again"),
+        // `plan` and `organize plan` only read; `serve` takes the lock for
+        // each job it runs, so holding it for the whole session would refuse
+        // every command line beside a server that is doing nothing.
+        Command::Plan(_)
+        | Command::Organize(OrganizeCmd::Plan(_) | OrganizeCmd::Runs)
+        | Command::Derived(DerivedCmd::List(_))
+        | Command::Families(FamiliesCmd::List(_))
+        | Command::Categories(CategoriesCmd::List | CategoriesCmd::Show(_))
+        | Command::Series(SeriesCmd::List(_))
+        | Command::Serve(_)
+        | Command::Status
+        | Command::Inspect(_)
+        | Command::Catalogs => None,
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt()
@@ -366,6 +398,14 @@ fn main() -> Result<()> {
         .without_time()
         .init();
 
+    // One writer for one archive, whichever way it is being used: a command
+    // that writes waits for nobody, so it has to be refused while the server
+    // — or another command — is in the middle of moving files. Reading is not
+    // gated, and neither is `serve`, which takes the lock per job of its own.
+    let _writer = match writing_work(&cli.command) {
+        Some(what) => Some(pc_core::lock::take_writer(&cli.db, what)?),
+        None => None,
+    };
     let db = Db::open(&cli.db)?;
 
     match cli.command {

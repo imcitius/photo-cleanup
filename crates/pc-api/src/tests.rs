@@ -1186,3 +1186,26 @@ async fn a_narrowed_plan_still_says_why_a_file_is_not_moving() {
         "сужение до группы съело объяснения: {scoped}"
     );
 }
+
+#[tokio::test]
+async fn a_job_will_not_start_while_something_else_is_writing() {
+    // The queue is this server's own memory. A command line — or a second
+    // server on the same database — writes to the same index and moves the
+    // same files, and neither can see that memory.
+    let f = Fixture::new();
+    let held = pc_core::lock::take_writer(&f.state.db_path, "index").unwrap();
+
+    let (status, v) = f
+        .req("POST", "/api/jobs", json!({"kind":"families","params":{}}))
+        .await;
+    assert_eq!(status, 409, "{v}");
+    let said = v["error"].as_str().unwrap_or_default();
+    assert!(said.contains("index"), "не сказано, кто держит: {said}");
+    // Refused before it was written down: a job nobody ran is not history.
+    let (_, jobs) = f.req("GET", "/api/jobs", Value::Null).await;
+    assert!(jobs.as_array().unwrap().is_empty(), "{jobs}");
+
+    drop(held);
+    let id = f.start("families", json!({})).await;
+    assert_eq!(f.wait(id).await["state"], "done");
+}
