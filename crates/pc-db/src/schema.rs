@@ -322,6 +322,33 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE files ADD COLUMN phash_canon  INTEGER;
     CREATE INDEX files_content_hash ON files(content_hash);
     "#,
+    // 014 — one decision per group, and the ability to know which was last.
+    //
+    // Choosing what to keep wrote a row and never took the previous one back,
+    // so a group could hold several "kept" files at once. Rebuilding then
+    // picked whichever came first, while the file the user had chosen earlier
+    // was also sitting in `manual_rejects` from the later choice — and the
+    // plan offered to move both of them. A group could empty itself.
+    //
+    // The timestamp makes "the last word wins" expressible. For decisions
+    // already taken there is no way to tell which came last, so a group with
+    // more than one is left without a manual choice at all: the tool goes
+    // back to deciding for itself, which it can explain, rather than keeping
+    // an answer nobody can account for. A file marked as kept and set aside
+    // at once is a contradiction; the marking-aside is dropped.
+    r#"
+    ALTER TABLE manual_keepers ADD COLUMN marked_at INTEGER NOT NULL DEFAULT 0;
+
+    DELETE FROM manual_keepers WHERE file_id IN (
+        SELECT k.file_id FROM manual_keepers k
+          JOIN family_members m ON m.file_id = k.file_id
+         WHERE (SELECT COUNT(*) FROM manual_keepers k2
+                  JOIN family_members m2 ON m2.file_id = k2.file_id
+                 WHERE m2.family_id = m.family_id) > 1
+    );
+
+    DELETE FROM manual_rejects WHERE file_id IN (SELECT file_id FROM manual_keepers);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

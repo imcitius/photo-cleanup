@@ -1009,7 +1009,7 @@ pub fn restore_curation(db: &Db) -> Result<()> {
     for row in jobs::rows(db,"SELECT s.file_id,m.family_id FROM manual_splits s JOIN family_members m USING(file_id) WHERE (SELECT COUNT(*) FROM family_members x WHERE x.family_id=m.family_id)>1",&[])? {
         split(db,row["family_id"].as_i64().unwrap(),row["file_id"].as_i64().unwrap())?;
     }
-    db.conn.execute_batch("UPDATE families SET keeper_file=(SELECT k.file_id FROM manual_keepers k JOIN family_members m ON m.file_id=k.file_id WHERE m.family_id=families.id LIMIT 1) WHERE EXISTS(SELECT 1 FROM manual_keepers k JOIN family_members m ON m.file_id=k.file_id WHERE m.family_id=families.id); UPDATE series SET best_file=(SELECT k.file_id FROM manual_best k JOIN series_members m ON m.file_id=k.file_id WHERE m.series_id=series.id LIMIT 1) WHERE EXISTS(SELECT 1 FROM manual_best k JOIN series_members m ON m.file_id=k.file_id WHERE m.series_id=series.id);")?;
+    db.conn.execute_batch("UPDATE families SET keeper_file=(SELECT k.file_id FROM manual_keepers k JOIN family_members m ON m.file_id=k.file_id WHERE m.family_id=families.id ORDER BY k.marked_at DESC, k.file_id DESC LIMIT 1) WHERE EXISTS(SELECT 1 FROM manual_keepers k JOIN family_members m ON m.file_id=k.file_id WHERE m.family_id=families.id); UPDATE series SET best_file=(SELECT k.file_id FROM manual_best k JOIN series_members m ON m.file_id=k.file_id WHERE m.series_id=series.id LIMIT 1) WHERE EXISTS(SELECT 1 FROM manual_best k JOIN series_members m ON m.file_id=k.file_id WHERE m.series_id=series.id);")?;
     Ok(())
 }
 pub async fn split_family(
@@ -1111,9 +1111,7 @@ pub async fn prefer_folder(State(st): State<Arc<AppState>>, Json(v): Json<Value>
         let tx = db.conn.unchecked_transaction()?;
         let mut changed = 0u64;
         for (family, (file, _)) in &best {
-            if db.set_family_keeper(*family, *file)? {
-                db.conn
-                    .execute("INSERT OR IGNORE INTO manual_keepers VALUES(?1)", [file])?;
+            if db.set_manual_keeper(*family, *file)? {
                 changed += 1;
             }
         }
@@ -1274,11 +1272,7 @@ pub async fn keep_only(
             );
         }
         let tx = db.conn.unchecked_transaction()?;
-        db.set_family_keeper(id, keep)?;
-        db.conn
-            .execute("INSERT OR IGNORE INTO manual_keepers VALUES(?1)", [keep])?;
-        db.conn
-            .execute("DELETE FROM manual_rejects WHERE file_id = ?1", [keep])?;
+        db.set_manual_keeper(id, keep)?;
         let mut marked = 0u64;
         for m in members.iter().filter(|m| **m != keep) {
             db.conn.execute(
@@ -1336,14 +1330,10 @@ pub async fn keep_folder_only(State(st): State<Arc<AppState>>, Json(v): Json<Val
         let tx = db.conn.unchecked_transaction()?;
         let (mut groups, mut marked) = (0u64, 0u64);
         for (family, (file, _)) in &keep {
-            if !db.set_family_keeper(*family, *file)? {
+            if !db.set_manual_keeper(*family, *file)? {
                 continue;
             }
             groups += 1;
-            db.conn
-                .execute("INSERT OR IGNORE INTO manual_keepers VALUES(?1)", [file])?;
-            db.conn
-                .execute("DELETE FROM manual_rejects WHERE file_id = ?1", [file])?;
             for (fam, other, _, _) in &rows {
                 if fam == family && other != file {
                     db.conn.execute(

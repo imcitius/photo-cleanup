@@ -400,11 +400,7 @@ pub async fn set_keeper(
                 )
             );
         }
-        db.conn.execute("DELETE FROM manual_keepers WHERE file_id IN (SELECT file_id FROM family_members WHERE family_id=?1)",[id])?;
-        db.conn.execute(
-            "INSERT OR IGNORE INTO manual_keepers VALUES(?1)",
-            [body.file_id],
-        )?;
+        db.set_manual_keeper(id, body.file_id)?;
         tx.commit()?;
         Ok(serde_json::json!({"ok":true}))
     })

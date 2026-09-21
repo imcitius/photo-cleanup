@@ -709,6 +709,52 @@ impl Db {
         Ok(())
     }
 
+    /// How many files of this group are still in the archive.
+    pub fn family_present_count(&self, family_id: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM family_members fm JOIN files f ON f.id = fm.file_id
+              WHERE fm.family_id = ?1 AND f.state = 'present'",
+            [family_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The file this group keeps, if it has settled on one.
+    pub fn family_keeper(&self, family_id: i64) -> Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            "SELECT keeper_file FROM families WHERE id = ?1",
+            [family_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Write down which file of a group the user chose to keep.
+    ///
+    /// One decision per group, and the last one stands. Every other member
+    /// loses the mark, the chosen file loses any "set aside" mark it carried,
+    /// and the group's keeper moves at the same time: a half-applied decision
+    /// is how a group ends up with two kept files, or with none.
+    ///
+    /// Runs inside the caller's transaction — every caller already holds one,
+    /// because the decision usually comes with other changes beside it.
+    pub fn set_manual_keeper(&self, family_id: i64, file_id: i64) -> Result<bool> {
+        if !self.set_family_keeper(family_id, file_id)? {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "DELETE FROM manual_keepers WHERE file_id IN
+               (SELECT file_id FROM family_members WHERE family_id = ?1)",
+            [family_id],
+        )?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO manual_keepers(file_id, marked_at) VALUES(?1, ?2)",
+            params![file_id, crate::pc_core_now()],
+        )?;
+        self.conn
+            .execute("DELETE FROM manual_rejects WHERE file_id = ?1", [file_id])?;
+        Ok(true)
+    }
+
     /// Point a family at a different member as its best version.
     /// Returns false when the file is not part of that family.
     pub fn set_family_keeper(&self, family_id: i64, file_id: i64) -> Result<bool> {
@@ -781,7 +827,9 @@ impl Db {
     /// has to ask for its rejects by that group.
     pub fn rejected_rows_scoped(&self, family: Option<i64>) -> Result<Vec<PlanRow>> {
         let mut st = self.conn.prepare(
-            "SELECT f.id, f.path, f.size, f.width, f.height, f.mtime, f.inode, f.dev, f.disk
+            "SELECT f.id, f.path, f.size, f.width, f.height, f.mtime, f.inode, f.dev, f.disk,
+                    COALESCE((SELECT fm.family_id FROM family_members fm
+                               WHERE fm.file_id = f.id LIMIT 1), 0)
                FROM manual_rejects r
                JOIN files f ON f.id = r.file_id
               WHERE f.state = 'present'
@@ -792,7 +840,10 @@ impl Db {
         let rows = st
             .query_map([family], |r| {
                 Ok(PlanRow {
-                    family_id: 0,
+                    // Carried so the plan can see that a group would be
+                    // emptied: a hand-made decision is about one file, but it
+                    // still takes that file out of a group.
+                    family_id: r.get(9)?,
                     file_id: r.get(0)?,
                     role: "unknown".into(),
                     path: r.get(1)?,

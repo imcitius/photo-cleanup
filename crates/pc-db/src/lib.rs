@@ -124,6 +124,12 @@ impl Db {
     }
 }
 
+/// The clock, in one place, so the database layer does not reach for it in
+/// five.
+pub(crate) fn pc_core_now() -> i64 {
+    pc_core::time::now_unix()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,3 +195,4 @@ mod tests {
         db.reset_index().unwrap();
     }
 }
+

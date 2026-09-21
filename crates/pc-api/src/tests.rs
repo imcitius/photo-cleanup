@@ -792,3 +792,106 @@ async fn a_parent_component_is_refused_whatever_the_path_looks_like() {
         assert_eq!(s, 400, "{path} вернул {s}: {v}");
     }
 }
+
+#[tokio::test]
+async fn a_group_keeps_the_last_decision_and_never_empties_itself() {
+    // Deciding twice used to leave both marks standing: the group ended up
+    // with two kept files, the plan took every member, and the group was
+    // left with nothing on disk. The last word wins, and whatever happens,
+    // one file stays.
+    let f = Fixture::new();
+    let img = image::RgbImage::from_fn(240, 180, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+    });
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+        .encode_image(&img)
+        .unwrap();
+    for n in ["a.jpg", "a copy.jpg", "a copy 2.jpg"] {
+        std::fs::write(f.archive.join(n), &encoded).unwrap();
+    }
+    let id = f
+        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+    let id = f.start("families", json!({})).await;
+    assert_eq!(f.wait(id).await["state"], "done");
+
+    let (_, groups) = f.req("GET", "/api/families?limit=10", Value::Null).await;
+    let group = groups["families"].as_array().unwrap()[0]["id"]
+        .as_i64()
+        .unwrap();
+    let (_, before) = f
+        .req("GET", &format!("/api/families/{group}"), Value::Null)
+        .await;
+    let ids: Vec<i64> = before["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["file_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 3, "{before}");
+
+    for file in [ids[0], ids[1]] {
+        let (s, v) = f
+            .req(
+                "POST",
+                &format!("/api/families/{group}/keep-only"),
+                json!({ "file_id": file }),
+            )
+            .await;
+        assert_eq!(s, 200, "{v}");
+    }
+    // Rebuilding the groups must not resurrect the first decision.
+    let id = f.start("families", json!({})).await;
+    assert_eq!(f.wait(id).await["state"], "done");
+
+    {
+        let db = f.state.db.lock().unwrap();
+        let marks = jobs::rows(
+            &db,
+            "SELECT file_id FROM manual_keepers ORDER BY file_id",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(marks.len(), 1, "решений в базе больше одного: {marks:?}");
+        assert_eq!(marks[0]["file_id"], ids[1]);
+        let rejects = jobs::rows(
+            &db,
+            "SELECT file_id FROM manual_rejects WHERE file_id = ?1",
+            &[&ids[1]],
+        )
+        .unwrap();
+        assert!(rejects.is_empty(), "оставленный файл помечен лишним");
+    }
+
+    let (_, after) = f
+        .req("GET", &format!("/api/families/{group}"), Value::Null)
+        .await;
+    let keepers: Vec<i64> = after["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["is_keeper"].as_bool() == Some(true))
+        .map(|m| m["file_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(keepers, vec![ids[1]], "{after}");
+
+    let plan = f
+        .preview("plan-apply", json!({"roles":["copy"],"family_id":group}))
+        .await;
+    let planned: Vec<i64> = plan["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["file_id"].as_i64().unwrap())
+        .collect();
+    assert!(
+        planned.len() < ids.len(),
+        "план забирает всю группу: {plan}"
+    );
+    assert!(
+        !planned.contains(&ids[1]),
+        "план забирает оставленный: {plan}"
+    );
+}

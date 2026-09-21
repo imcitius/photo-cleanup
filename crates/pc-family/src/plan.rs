@@ -88,6 +88,10 @@ pub struct Scope {
     pub keeper_folder: Option<String>,
 }
 
+fn keeper_id_of(db: &Db, family: i64) -> i64 {
+    db.family_keeper(family).unwrap_or(None).unwrap_or(0)
+}
+
 /// What a file has to match to be called a copy of another: the whole frame
 /// in colour, falling back to the old grey square only for rows written
 /// before that evidence existed.
@@ -283,6 +287,51 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
         });
     }
 
+    // Nothing may empty a group.
+    //
+    // Every single move is checked on its own — the file it is redundant to
+    // must be there, and must still hold the same picture. That says nothing
+    // about the plan as a whole: two files can each be safe to move because
+    // of the other, and a group that once held two photographs holds none.
+    // It has happened here, from contradictory hand-made marks: a file
+    // recorded as kept and set aside at the same time.
+    //
+    // So the last word belongs to the group. Of the files it would lose, one
+    // stays — the one the group keeps, or failing that the largest — and the
+    // refusal says why.
+    let mut leaving: HashMap<i64, Vec<usize>> = HashMap::new();
+    for (i, c) in plan.candidates.iter().enumerate() {
+        if c.family_id != 0 {
+            leaving.entry(c.family_id).or_default().push(i);
+        }
+    }
+    let mut rescued: Vec<usize> = Vec::new();
+    for (family, taken) in &leaving {
+        let present = db.family_present_count(*family)?;
+        if taken.len() as i64 >= present && present > 0 {
+            let keep = *taken
+                .iter()
+                .max_by_key(|&&i| {
+                    let c = &plan.candidates[i];
+                    (c.file_id == keeper_id_of(db, *family), c.size)
+                })
+                .unwrap();
+            rescued.push(keep);
+        }
+    }
+    rescued.sort_unstable();
+    for i in rescued.into_iter().rev() {
+        let c = plan.candidates.remove(i);
+        plan.refusals.push(Refusal {
+            path: c.path,
+            why: pc_core::tr!(
+                "в группе не осталось бы ни одного файла",
+                "the group would be left with nothing"
+            )
+            .into(),
+        });
+    }
+
     plan.candidates.sort_by_key(|c| std::cmp::Reverse(c.size));
     plan.refusals.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(plan)
@@ -434,5 +483,122 @@ mod keeper_tests {
         let plan = compute(&db, &Policy::default()).unwrap();
         assert_eq!(plan.candidates.len(), 1, "{:?}", plan.candidates);
         assert!(plan.candidates[0].path.contains("backup"));
+    }
+}
+
+#[cfg(test)]
+mod emptying_tests {
+    use super::*;
+    use pc_db::files::NewFile;
+
+    fn file(db: &Db, run: i64, path: &str, pixels: u8) -> i64 {
+        db.upsert_file(
+            &NewFile {
+                path: path.into(),
+                name: pc_core::base_name(path).into(),
+                disk: "disk1".into(),
+                size: 1000,
+                mtime: 1,
+                container: Some("jpeg".into()),
+                pixel_hash: Some(vec![pixels; 32]),
+                content_hash: Some(vec![pixels; 32]),
+                phash: Some(1),
+                thumb_key: Some("k".into()),
+                ..Default::default()
+            },
+            run,
+        )
+        .unwrap()
+    }
+
+    /// The audit's finding: choosing A, then choosing B, left both marks in
+    /// place. The group then kept whichever came first while the other was
+    /// also set aside — and the plan offered to move every file it had.
+    #[test]
+    fn two_choices_in_a_row_leave_one_decision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("pc.db")).unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+
+        let a = file(&db, run, "/foto/a.jpg", 1);
+        let b = file(&db, run, "/foto/copy.jpg", 1);
+        let family = db
+            .insert_family("linked", None, None, Some(a), run)
+            .unwrap();
+        for (f, role) in [(a, "original"), (b, "copy")] {
+            db.insert_family_member(family, f, role, None, 1.0, "")
+                .unwrap();
+        }
+
+        db.set_manual_keeper(family, a).unwrap();
+        db.conn
+            .execute(
+                "INSERT OR IGNORE INTO manual_rejects(file_id, marked_at) VALUES(?1, 1)",
+                [b],
+            )
+            .unwrap();
+        // The user changes their mind: B is the one to keep.
+        db.set_manual_keeper(family, b).unwrap();
+        db.conn
+            .execute(
+                "INSERT OR IGNORE INTO manual_rejects(file_id, marked_at) VALUES(?1, 2)",
+                [a],
+            )
+            .unwrap();
+
+        let kept: Vec<i64> = db
+            .conn
+            .prepare("SELECT file_id FROM manual_keepers")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(kept, vec![b], "в группе осталось два решения: {kept:?}");
+
+        let plan = compute(&db, &Policy::default()).unwrap();
+        assert!(
+            plan.candidates.len() < 2,
+            "уезжает вся группа: {:?}",
+            plan.candidates.iter().map(|c| &c.path).collect::<Vec<_>>()
+        );
+    }
+
+    /// Even when the marks contradict each other — which old archives carry —
+    /// the group keeps a file and says why.
+    #[test]
+    fn contradictory_marks_still_leave_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("pc.db")).unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+
+        let a = file(&db, run, "/foto/a.jpg", 1);
+        let b = file(&db, run, "/foto/copy.jpg", 1);
+        let family = db
+            .insert_family("linked", None, None, Some(a), run)
+            .unwrap();
+        for (f, role) in [(a, "original"), (b, "copy")] {
+            db.insert_family_member(family, f, role, None, 1.0, "")
+                .unwrap();
+        }
+        // Straight into the tables, the way an older version left them.
+        for f in [a, b] {
+            db.conn
+                .execute(
+                    "INSERT OR IGNORE INTO manual_rejects(file_id, marked_at) VALUES(?1, 1)",
+                    [f],
+                )
+                .unwrap();
+        }
+
+        let plan = compute(&db, &Policy::default()).unwrap();
+        assert_eq!(plan.candidates.len(), 1, "{:?}", plan.candidates);
+        assert!(
+            plan.refusals
+                .iter()
+                .any(|r| r.why.contains("nothing") || r.why.contains("ни одного")),
+            "{:?}",
+            plan.refusals
+        );
     }
 }
