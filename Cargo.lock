@@ -776,7 +776,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "pc-api"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "pc-apply"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "image",
@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "pc-cli"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -849,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "pc-core"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "pc-db"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "pc-core",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "pc-family"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "image",
@@ -894,7 +894,7 @@ dependencies = [
 
 [[package]]
 name = "pc-hash"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "image",
@@ -902,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "pc-image"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "pc-lightroom"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "pc-core",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "pc-organize"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "pc-core",
@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "pc-walk"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "pc-core",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "pc-work"
-version = "0.2.15"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "image",
