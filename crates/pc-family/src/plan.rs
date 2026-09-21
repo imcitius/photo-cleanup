@@ -59,6 +59,15 @@ pub struct Candidate {
 pub struct Refusal {
     pub path: String,
     pub why: String,
+    /// Which file and group this is about. A refusal is half the answer a
+    /// plan gives — "these move, these do not, and here is why" — so a plan
+    /// narrowed to one group or one folder has to narrow its refusals the
+    /// same way rather than drop them. Deciding that from the text of the
+    /// path would be guesswork; these are the facts it was built from.
+    pub file_id: i64,
+    pub family_id: i64,
+    /// The file the group keeps, for narrowing by the folder that keeps it.
+    pub group_keeper: String,
 }
 
 #[derive(Debug, Default)]
@@ -146,6 +155,9 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
             if members.len() < 2 {
                 plan.refusals.push(Refusal {
                     path: m.path.clone(),
+                    file_id: m.file_id,
+                    family_id: m.family_id,
+                    group_keeper: keeper.path.clone(),
                     why: pc_core::tr!(
                         "единственный файл в семействе",
                         "the only file in its group"
@@ -176,6 +188,9 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
                 if !same {
                     plan.refusals.push(Refusal {
                         path: m.path.clone(),
+                        file_id: m.file_id,
+                        family_id: m.family_id,
+                        group_keeper: keeper.path.clone(),
                         why: pc_core::tf!(
                             "не совпадает с сохраняемым файлом: {0}",
                             "does not match the file being kept: {0}",
@@ -198,6 +213,9 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
                 };
                 plan.refusals.push(Refusal {
                     path: m.path.clone(),
+                    file_id: m.file_id,
+                    family_id: m.family_id,
+                    group_keeper: keeper.path.clone(),
                     why: pc_core::tf!(
                         "файл в каталоге Lightroom{0}{1}",
                         "the file is in a Lightroom catalogue{0}{1}",
@@ -269,6 +287,9 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
                 .unwrap_or_default();
             plan.refusals.push(Refusal {
                 path: m.path.clone(),
+                file_id: m.file_id,
+                family_id: m.family_id,
+                group_keeper: m.group_keeper.clone().unwrap_or_default(),
                 why: pc_core::tf!(
                     "отклонён вручную, но файл в каталоге Lightroom{0}",
                     "rejected by hand, but the file is in a Lightroom catalogue{0}",
@@ -294,6 +315,13 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
             group_keeper: m.group_keeper.clone().unwrap_or_default(),
         });
     }
+
+    // One answer per file. The automatic pass can refuse a file as "not a
+    // copy of what is kept" and the person can set that same file aside by
+    // hand a moment later; showing both would have the plan say it moves and
+    // does not move at once. The decision made by a person is the answer.
+    let chosen: BTreeSet<i64> = plan.candidates.iter().map(|c| c.file_id).collect();
+    plan.refusals.retain(|r| !chosen.contains(&r.file_id));
 
     // Nothing may empty a group.
     //
@@ -332,6 +360,9 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
         let c = plan.candidates.remove(i);
         plan.refusals.push(Refusal {
             path: c.path,
+            file_id: c.file_id,
+            family_id: c.family_id,
+            group_keeper: c.group_keeper,
             why: pc_core::tr!(
                 "в группе не осталось бы ни одного файла",
                 "the group would be left with nothing"

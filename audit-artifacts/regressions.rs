@@ -14,7 +14,9 @@ fn add(db: &Db, run: i64, p: &Path) -> i64 {
 fn candidate(id: i64, p: &Path) -> pc_family::plan::Candidate {
     pc_family::plan::Candidate { file_id: id, family_id: 0, path: p.display().to_string(),
         size: fs::metadata(p).unwrap().len() as i64, role: pc_family::Role::Unknown,
-        keeper_id: 0, keeper_path: String::new(), reason: String::new(), manual: true }
+        keeper_id: 0, keeper_path: String::new(), reason: String::new(), manual: true,
+        // Added after the audit: the field exists now, the assertions do not change.
+        group_keeper: String::new() }
 }
 #[test]
 fn a01_different_rgb_pixels_must_not_pass_same_picture() {

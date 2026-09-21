@@ -621,7 +621,11 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 // already narrowed to this group when they were read.
                 plan.candidates
                     .retain(|c| c.family_id == family || c.manual);
-                plan.refusals.clear();
+                // A refusal is the other half of the answer: "these move,
+                // these do not, and here is why". Narrowing used to throw
+                // them away, so a Lightroom-protected copy or a version that
+                // no longer matches simply vanished from the screen.
+                plan.refusals.retain(|r| r.family_id == family);
             }
             // ...or to one folder. A folder that copies another is cleared in
             // one go rather than in a thousand presses; what leaves is only
@@ -629,7 +633,7 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             if let Some(dir) = r.params.get("folder").and_then(Value::as_str) {
                 plan.candidates
                     .retain(|c| pc_core::dir_name(&c.path) == dir);
-                plan.refusals.clear();
+                plan.refusals.retain(|r| pc_core::dir_name(&r.path) == dir);
             }
             // The groups this folder keeps: their copies go, wherever they
             // are. This is what follows from calling a folder the main one.
@@ -640,7 +644,8 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 // just set aside for this folder.
                 plan.candidates
                     .retain(|c| pc_core::dir_name(&c.group_keeper) == dir);
-                plan.refusals.clear();
+                plan.refusals
+                    .retain(|r| pc_core::dir_name(&r.group_keeper) == dir);
             }
             for refusal in plan.refusals {
                 add_refusal(refusal.path, refusal.why);

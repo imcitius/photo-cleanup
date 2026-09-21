@@ -1101,3 +1101,88 @@ async fn a_folder_decision_reaches_the_plan_that_folder_asks_for() {
         "{scoped}"
     );
 }
+
+#[tokio::test]
+async fn a_narrowed_plan_still_says_why_a_file_is_not_moving() {
+    // Acting on one group shows that group's plan. Refusals used to be
+    // dropped from it wholesale, so a copy that no longer matches the file
+    // being kept disappeared from the screen entirely: nothing moved, and
+    // nothing said why.
+    let f = Fixture::new();
+    let a = image::RgbImage::from_fn(240, 180, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 60])
+    });
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+        .encode_image(&a)
+        .unwrap();
+    for n in ["a.jpg", "a copy.jpg"] {
+        std::fs::write(f.archive.join(n), &encoded).unwrap();
+    }
+    // A third file joins the group by provenance without sharing a pixel.
+    let other = image::RgbImage::from_fn(240, 180, |x, y| {
+        image::Rgb([(y % 256) as u8, 30, (x % 256) as u8])
+    });
+    other.save(f.archive.join("scan.bmp")).unwrap();
+
+    let id = f
+        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+    f.state
+        .db
+        .lock()
+        .unwrap()
+        .conn
+        .execute("UPDATE meta SET xmp_original_id = 'one-source'", [])
+        .unwrap();
+    let id = f.start("families", json!({})).await;
+    assert_eq!(f.wait(id).await["state"], "done");
+
+    let (_, groups) = f.req("GET", "/api/families?limit=10", Value::Null).await;
+    let group = groups["families"][0]["id"].as_i64().unwrap();
+    let (_, listed) = f
+        .req("GET", &format!("/api/families/{group}"), Value::Null)
+        .await;
+    let bmp = listed["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "scan.bmp")
+        .unwrap_or_else(|| panic!("{listed}"))["file_id"]
+        .as_i64()
+        .unwrap();
+
+    // Keep the one that shares no pixels with the rest: the others stop being
+    // copies of what is kept, and the plan has to say so. Only the kept file
+    // changes — nobody has set the others aside, so a refusal is the only
+    // thing the plan can say about them.
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/families/{group}/keeper"),
+            json!({ "file_id": bmp }),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+
+    let whole = f.preview("plan-apply", json!({"roles":["copy"]})).await;
+    let why = |p: &Value| {
+        p["refusals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["path"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+    };
+    assert!(!why(&whole).is_empty(), "{whole}");
+
+    let scoped = f
+        .preview("plan-apply", json!({"roles":["copy"],"family_id":group}))
+        .await;
+    assert_eq!(
+        why(&scoped),
+        why(&whole),
+        "сужение до группы съело объяснения: {scoped}"
+    );
+}
