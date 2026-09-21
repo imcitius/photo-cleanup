@@ -136,20 +136,6 @@ pub fn read_for_probe(path: &Path, size: u64) -> Result<Read1> {
     })
 }
 
-/// Full content hash, computed only when a file is about to be acted on.
-pub fn full_hash(path: &Path) -> Result<[u8; 32]> {
-    let mut f = File::open(path)?;
-    let mut h = blake3::Hasher::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        match f.read(&mut buf)? {
-            0 => break,
-            n => h.update(&buf[..n]),
-        };
-    }
-    Ok(*h.finalize().as_bytes())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,13 +192,5 @@ mod tests {
         std::fs::write(&p, vec![b'x'; 500_000]).unwrap();
         let size = std::fs::metadata(&p).unwrap().len();
         assert!(read_for_probe(&p, size).is_err());
-    }
-
-    #[test]
-    fn full_hash_matches_a_direct_hash_of_the_bytes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = jpeg_file(tmp.path(), "a.jpg", 5000);
-        let want = blake3::hash(&std::fs::read(&p).unwrap());
-        assert_eq!(full_hash(&p).unwrap(), *want.as_bytes());
     }
 }

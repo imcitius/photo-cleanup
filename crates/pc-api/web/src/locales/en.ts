@@ -8,7 +8,6 @@ import type { Shape } from "./shape";
 import { ui as ru, messages as ruMessages } from "./ru";
 
 export const ui = {
-  app: "photo-cleanup",
   title: "photo-cleanup — photo archive",
   // Formatting vocabulary. Numbers and dates use the locale tag; these are
   // the words around them.
@@ -166,14 +165,6 @@ export const ui = {
   copy: "Exact copies",
   resize: "Smaller versions",
   previews: "Lightroom previews and caches",
-  file: "File",
-  files: "Files",
-  size: "Size",
-  path: "Path",
-  source: "Source",
-  destination: "Destination",
-  reason: "Reason",
-  protected: "Protected",
   keeper: "Kept file",
   setKeeper: "Keep this one",
   setKeeperHelp:
@@ -190,7 +181,6 @@ export const ui = {
   groupApplyNothing:
     "This group holds no exact copies — there is nothing to move. Different versions of a shot stay where they are.",
   compare: "Compare",
-  compareHelp: "Pick two files to compare",
   previousFrame: "Previous frame",
   nextFrame: "Next frame",
   pinForCompare: "Pin for comparison",
@@ -226,11 +216,6 @@ export const ui = {
   orphanDelete: "Delete for good",
   notACopyOfKept:
     "Not a copy of the file being kept: the pixels differ. Keep the file it is a copy of instead.",
-  folderHasNoCopies:
-    "The plan finds no copies in this folder — it looks like the originals live here. To take away what duplicates them elsewhere, press “keep this folder everywhere”.",
-  moveFolder: "move this folder\u2019s copies",
-  moveFolderHelp:
-    "Shows how many files in this folder the plan calls copies, and moves them all to quarantine at once. The journal puts them back.",
   preferFolder: "keep this folder everywhere",
   preferFolderHelp:
     "In every group that holds a file from this folder, that file becomes the kept one. The choice is remembered as yours and survives a rebuild.",
@@ -248,7 +233,6 @@ export const ui = {
   seriesPickHelp:
     "Frames are in shooting order. ★ picks the best one, “To quarantine” marks the ones you do not want — the marks pile up and go to the move plan, where you see them all again.",
   preview: "Plan preview",
-  previewHint: "Check the list, the size and the destinations first.",
   move: "Move to quarantine",
   apply: "Run the plan",
   undo: "Restore",
@@ -257,11 +241,9 @@ export const ui = {
   purgeWord: "DELETE",
   purgeWarning:
     "This is forever. Deleting from quarantine cannot be undone — there will be nowhere to restore the files from except your own backup.",
-  noPlan: "Choose the options and open the preview.",
   noCandidates: "Nothing to move",
   refusals: "Refusals and protected files",
   willStay: "Stays in the archive",
-  willMove: "Goes to quarantine",
   manual: "Corrected by hand",
   manualHint: "A correction made by hand survives the next pass.",
   onlyPhotos:
@@ -292,8 +274,6 @@ export const messages = {
   nalozhenie: "Overlay",
   vpisat: "Fit",
   prozrachnost: "Opacity",
-  v_masshtabe_1_1_peretaskivayte_kadr_panoramirovanie_sinhronnoe_dl:
-    "At 1:1 drag the frame: panning is shared. A raw file shows its embedded preview.",
   ne_udalos_prochitat_polnyy_kadr_fayl:
     "Could not read the full frame: {0} (file #{1})",
   rol: "Role",
@@ -349,11 +329,9 @@ export const messages = {
   pereklyuchit_temu: "Switch theme",
   fotografii_poryadok_spokoystvie: "PHOTOGRAPHS. ORDER. PEACE OF MIND.",
   zadacha: "Job #",
-  zavershena_s_otkazami: "Finished with refusals",
   propuscheno_faylov: "files skipped — {0}",
   i_eschyo: "…and {0} more",
   skryt_rezultat_zadachi: "Hide the job result",
-  pokazat_otkazy: "Show refusals · ",
   proverit_zhurnal: "Check the journal →",
   snachala_plan_zatem_deystvie: "The plan first. Then the action.",
   photo_cleanup_lokalno_na_vashem_servere:
@@ -575,7 +553,6 @@ export const messages = {
   perenesyono_v_karantin: "Moved to quarantine: {0}. The journal puts it back.",
   papka_teper_hranimaya:
     "Groups changed: {0}. The kept files are now the ones in {1}",
-  iz_papki_uedet: "From {2}, going to quarantine: {0} files · {1}",
   dubli_etih_grupp:
     "Duplicates of these groups: {0} files · {1}. They live in other folders and go to quarantine.",
   kopiy_v_serii: "{0} files here are copies, of {1} photographs",

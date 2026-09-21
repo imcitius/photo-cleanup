@@ -34,8 +34,6 @@ pub struct Curated {
 pub struct CurationIndex {
     by_path: HashMap<String, Option<i64>>,
     by_tail: HashMap<String, Option<i64>>,
-    /// Tails that more than one catalogued file shares; too ambiguous to use.
-    ambiguous: HashMap<String, bool>,
 }
 
 impl CurationIndex {
@@ -45,14 +43,14 @@ impl CurationIndex {
             let tail = tail_key(&path);
             if let Some(prev) = idx.by_tail.get(&tail) {
                 // Two different catalogued files with the same tail: keep the
-                // better rating and remember that the key is not unique.
+                // better rating. Which of them a lookup meant is unknowable,
+                // and it does not change the answer — see `lookup`.
                 let best = match (prev, &rating) {
                     (Some(a), Some(b)) => Some(*a.max(b)),
                     (Some(a), None) => Some(*a),
                     (None, b) => *b,
                 };
-                idx.by_tail.insert(tail.clone(), best);
-                idx.ambiguous.insert(tail, true);
+                idx.by_tail.insert(tail, best);
             } else {
                 idx.by_tail.insert(tail, rating);
             }
@@ -72,7 +70,8 @@ impl CurationIndex {
                 exact: true,
             });
         }
-        // An ambiguous tail still protects: over-protecting costs the user a
+        // A tail shared by several catalogued files still protects, with the
+        // strongest rating of them: over-protecting costs the user a
         // decision, under-protecting costs them a photograph.
         self.by_tail.get(&tail_key(path)).map(|rating| Curated {
             rating: *rating,

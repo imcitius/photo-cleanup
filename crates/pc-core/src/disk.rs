@@ -14,7 +14,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::volume::device_of;
-use crate::QUARANTINE_DIR;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Disk {
@@ -28,10 +27,6 @@ pub struct Disk {
 }
 
 impl Disk {
-    pub fn quarantine_root(&self) -> PathBuf {
-        self.mount.join(QUARANTINE_DIR)
-    }
-
     /// Path of `src` relative to this disk's mount point, used to mirror the
     /// original layout inside the quarantine tree.
     pub fn relative<'a>(&self, src: &'a Path) -> &'a Path {
@@ -139,14 +134,6 @@ mod tests {
         let b = map.resolve(tmp.path()).unwrap();
         assert_eq!(a, b);
         assert_eq!(map.known().count(), 1);
-    }
-
-    #[test]
-    fn quarantine_is_on_the_same_mount() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut map = DiskMap::new();
-        let disk = map.resolve(tmp.path()).unwrap();
-        assert!(disk.quarantine_root().starts_with(&disk.mount));
     }
 
     #[test]

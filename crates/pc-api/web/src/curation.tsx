@@ -1009,10 +1009,11 @@ export function Families({
                             {folderNote.move && (
                               <>
                                 <p>
+                                  {/* Only the folder-keeps-these-groups scope
+                                      has a button; narrowing by the folder a
+                                      file sits in stays an HTTP capability. */}
                                   {t(
-                                    folderNote.move.scope === "keeper_folder"
-                                      ? "dubli_etih_grupp"
-                                      : "iz_papki_uedet",
+                                    "dubli_etih_grupp",
                                     number(folderNote.move.files),
                                     bytes(folderNote.move.bytes),
                                     m.dir,

@@ -1990,9 +1990,6 @@ details > summary:hover {
 .event > summary > .num {
   margin-left: auto;
 }
-.event-actions {
-  padding: 10px 0;
-}
 .modal {
   border: 1px solid var(--line);
   border-radius: 12px;

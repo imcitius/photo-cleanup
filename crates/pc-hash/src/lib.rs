@@ -2,9 +2,13 @@
 //!
 //! Three separate questions get three separate answers:
 //!
-//!  * are these the same bytes            -> `blake3`
+//!  * are these the same frame            -> `content_hash`
 //!  * are these the same pixels           -> `pixel_hash`
 //!  * do these look like the same picture -> `phash` / `dhash`, then `ssim`
+//!
+//! Whether two files are the same *bytes* is not asked here: at the moment of
+//! a move the two files are read and compared, which is worth more than a
+//! number recorded some time ago.
 //!
 //! The perceptual hashes are filters, never proof. A pair they bring together
 //! is only promoted to a duplicate after `ssim` agrees, because a pHash
@@ -21,10 +25,6 @@ use image::{imageops::FilterType, GrayImage};
 pub const HASH_SIDE: u32 = 32;
 /// Side of the low-frequency block kept from the DCT: 8x8 gives 64 bits.
 const DCT_KEEP: usize = 8;
-
-pub fn blake3(bytes: &[u8]) -> [u8; 32] {
-    *blake3::hash(bytes).as_bytes()
-}
 
 /// Hash of the whole frame as it is shown: colour, native resolution, aspect.
 ///

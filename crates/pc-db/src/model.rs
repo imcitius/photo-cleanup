@@ -397,9 +397,9 @@ impl Db {
 
     pub fn journal_begin(&self, e: &NewJournalEntry<'_>) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO journal(run_id, target_kind, target_id, op, src, dst, size,
+            "INSERT INTO journal(run_id, target_id, op, src, dst, size,
                                  file_count, status, applied_at, manifest)
-             VALUES (?1,'derived-bundle',?2,?3,?4,?5,?6,?7,'pending',?8,?9)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9)",
             params![
                 e.run_id,
                 e.target_id,

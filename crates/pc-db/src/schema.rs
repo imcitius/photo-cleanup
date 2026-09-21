@@ -365,6 +365,27 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE journal ADD COLUMN manifest TEXT;
     "#,
+    // 016 — columns that were never filled, and one that was filled with a
+    // word that stopped being true.
+    //
+    // `family_members.tier`, `families.key_value` and `files.full_hash` were
+    // laid down for ideas that took a different shape: evidence became roles
+    // and hashes, the group key became a kind alone, and identity is proved
+    // by `content_hash` or by the bytes themselves at the moment of the move.
+    // Nothing has ever written them.
+    //
+    // `journal.target_kind` was written as 'derived-bundle' for everything,
+    // photographs and reorganisations included, so a row stated a kind it was
+    // not. Nothing read it; what the row is about is in `op`. The index it
+    // shared is rebuilt on the id alone.
+    r#"
+    DROP INDEX IF EXISTS journal_target;
+    ALTER TABLE journal        DROP COLUMN target_kind;
+    ALTER TABLE family_members DROP COLUMN tier;
+    ALTER TABLE families       DROP COLUMN key_value;
+    ALTER TABLE files          DROP COLUMN full_hash;
+    CREATE INDEX journal_target ON journal(target_id);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -394,6 +415,84 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bring a connection up to `version` and no further, the way a database
+    /// left by an older release looks.
+    fn database_of_version(version: usize) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);")
+            .unwrap();
+        for (idx, sql) in MIGRATIONS.iter().take(version).enumerate() {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_version(version) VALUES (?1)",
+                [idx as i64 + 1],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn dropping_columns_keeps_everything_else_in_place() {
+        // Migration 016 takes away four columns nothing ever wrote to. A
+        // database that has been in use since before it is exactly what must
+        // survive that, so this one is filled the way a working archive fills
+        // it and then brought up to date.
+        let conn = database_of_version(15);
+        conn.execute_batch(
+            "INSERT INTO runs(id, started_at, roots, tool_version)
+                  VALUES (1, 100, '[\"/archive\"]', 'old');
+             INSERT INTO files(id, path, name, disk, dev, inode, nlink, size, mtime,
+                               indexed_run, full_hash)
+                  VALUES (1, '/archive/a.jpg', 'a.jpg', 'root', 1, 2, 1, 10, 5, 1, X'00ff');
+             INSERT INTO families(id, key_kind, key_value, keeper_file, built_run)
+                  VALUES (1, 'burst', 'whatever', 1, 1);
+             INSERT INTO family_members(family_id, file_id, role, tier)
+                  VALUES (1, 1, 'original', 'strong');
+             INSERT INTO journal(id, run_id, target_kind, target_id, op, src, size,
+                                 file_count, status, applied_at)
+                  VALUES (1, 1, 'derived-bundle', 1, 'quarantine-file', '/archive/a.jpg',
+                          10, 1, 'done', 100);",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let path: String = conn
+            .query_row("SELECT path FROM files WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(path, "/archive/a.jpg");
+        let role: String = conn
+            .query_row("SELECT role FROM family_members", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(role, "original");
+        let (op, target): (String, i64) = conn
+            .query_row("SELECT op, target_id FROM journal", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((op.as_str(), target), ("quarantine-file", 1));
+        // The columns are gone, and the journal can still be looked up by the
+        // id its index was rebuilt on.
+        for sql in [
+            "SELECT full_hash FROM files",
+            "SELECT tier FROM family_members",
+            "SELECT key_value FROM families",
+            "SELECT target_kind FROM journal",
+        ] {
+            assert!(conn.prepare(sql).is_err(), "колонка осталась: {sql}");
+        }
+        assert!(conn
+            .prepare("SELECT id FROM journal WHERE target_id = 1")
+            .is_ok());
+        let violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
+    }
 
     #[test]
     fn migrate_is_idempotent() {
