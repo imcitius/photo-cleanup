@@ -1115,6 +1115,13 @@ fn cmd_organize(db: &Db, a: &OrganizeArgs, execute: bool) -> Result<()> {
             String::new()
         }
     );
+    if report.litter > 0 {
+        println!(
+            "Service files ({}) from emptied directories went to quarantine; \
+             they come back with the undo.",
+            report.litter
+        );
+    }
     for (path, why) in report.refused.iter().take(10) {
         println!("  not moved: {path} — {why}");
     }

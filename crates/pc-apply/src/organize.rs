@@ -25,6 +25,9 @@ pub struct OrganizeReport {
     pub bytes: u64,
     pub sidecars: u64,
     pub pruned_dirs: u64,
+    /// Service files carried into quarantine out of directories the run
+    /// emptied. Not deleted: quarantined, and undone with the run.
+    pub litter: u64,
     pub refused: Vec<(String, String)>,
 }
 
@@ -184,14 +187,99 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
     }
 
     let roots: BTreeSet<PathBuf> = db.all_run_roots()?.into_iter().map(PathBuf::from).collect();
+    sweep_litter(db, run_id, &source_dirs, &roots, &mut report)?;
     report.pruned_dirs = prune_empty(&source_dirs, &roots, usize::MAX);
     Ok(report)
+}
+
+/// Service files the system leaves behind: Finder's note about a folder, and
+/// the AppleDouble half of a file that is no longer beside it.
+fn is_litter(name: &str) -> bool {
+    name == ".DS_Store" || name.starts_with("._")
+}
+
+/// Carry the service files out of the directories the run emptied.
+///
+/// Such a directory cannot be removed while they are in it, and they are not
+/// ours to delete: an AppleDouble can hold a resource fork, and this tool
+/// deletes nothing. So they move into quarantine beside the directory, with a
+/// journal entry of the same run — the husk can go, and `organize undo` brings
+/// them back with everything else.
+fn sweep_litter(
+    db: &Db,
+    run_id: i64,
+    dirs: &BTreeSet<PathBuf>,
+    keep: &BTreeSet<PathBuf>,
+    report: &mut OrganizeReport,
+) -> Result<()> {
+    for dir in dirs {
+        if keep.contains(dir) {
+            continue;
+        }
+        let Ok(rd) = fs::read_dir(dir) else { continue };
+        let entries: Vec<_> = rd.flatten().collect();
+        // Only a directory left with nothing but service files, and only its
+        // own files — a subdirectory means the reorganisation is not done here.
+        let swept = !entries.is_empty()
+            && entries.iter().all(|e| {
+                e.file_type().is_ok_and(|t| t.is_file())
+                    && e.file_name().to_str().is_some_and(is_litter)
+            });
+        if !swept {
+            continue;
+        }
+        let Ok(home) = crate::beside(dir) else {
+            continue;
+        };
+        for e in entries {
+            let src = e.path();
+            let dst = home.join(e.file_name());
+            let src_s = src.to_string_lossy().into_owned();
+            if dst.exists() {
+                report.refused.push((
+                    src_s,
+                    pc_core::tf!("цель занята: {0}", "destination taken: {0}", dst.display()),
+                ));
+                continue;
+            }
+            let dst_s = dst.to_string_lossy().into_owned();
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0) as i64;
+            let jid = db.journal_begin(&pc_db::NewJournalEntry {
+                run_id,
+                op: "organize",
+                target_id: None,
+                src: &src_s,
+                dst: Some(&dst_s),
+                size,
+                file_count: 1,
+            })?;
+            match rename_with_parents(&src, &dst) {
+                Ok(()) => {
+                    db.journal_finish(
+                        jid,
+                        JournalStatus::Done,
+                        Some(pc_core::tr!(
+                            "служебный файл из опустевшего каталога",
+                            "a service file from an emptied directory"
+                        )),
+                    )?;
+                    report.litter += 1;
+                }
+                Err(err) => {
+                    db.journal_finish(jid, JournalStatus::Failed, Some(&err.to_string()))?;
+                    report.refused.push((src_s, err.to_string()));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Remove directories the reorganisation emptied, deepest first.
 ///
 /// `remove_dir` refuses a directory that still holds anything, so this can
-/// only ever take away husks. It stops at the mount point and at the roots
+/// only ever take away husks — a directory with a forgotten `.DS_Store` in it
+/// stays, and its service files go to quarantine in `sweep_litter` first. It stops at the mount point and at the roots
 /// the archive was scanned from: an empty `foto/` is still where the archive
 /// lives, and finding it gone would be alarming even though nothing was lost.
 pub(crate) fn prune_empty(
@@ -209,25 +297,6 @@ pub(crate) fn prune_empty(
         let mut cur = dir.clone();
         let mut climbed = 0;
         while climbed < levels && cur != mount && !keep.contains(&cur) && cur.parent().is_some() {
-            // An AppleDouble or a .DS_Store left alone would keep an
-            // otherwise empty directory alive forever; nothing else is
-            // removed, and only inside a directory we just emptied.
-            let only_litter = fs::read_dir(&cur).ok().is_some_and(|rd| {
-                let entries: Vec<_> = rd.flatten().collect();
-                !entries.is_empty()
-                    && entries.iter().all(|e| {
-                        let n = e.file_name();
-                        let n = n.to_string_lossy();
-                        n == ".DS_Store" || n.starts_with("._")
-                    })
-            });
-            if only_litter {
-                if let Ok(rd) = fs::read_dir(&cur) {
-                    for e in rd.flatten() {
-                        let _ = fs::remove_file(e.path());
-                    }
-                }
-            }
             if fs::remove_dir(&cur).is_err() {
                 break;
             }
@@ -269,6 +338,66 @@ pub fn undo_run(db: &Db, run_id: i64) -> Result<(u64, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_service_file_is_quarantined_not_deleted_and_comes_back() {
+        // An AppleDouble can carry a resource fork, and Finder's folder note
+        // is still the user's byte. The reorganisation used to delete both to
+        // get the empty directory removed — the one promise this tool makes is
+        // that it never deletes anything.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("foto");
+        let dir = root.join("2019");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".DS_Store"), b"finder").unwrap();
+        fs::write(dir.join("._unrelated"), b"resource fork").unwrap();
+
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[root.display().to_string()], "test").unwrap();
+        let mut report = OrganizeReport::default();
+        let dirs: BTreeSet<PathBuf> = [dir.clone()].into_iter().collect();
+        let keep: BTreeSet<PathBuf> = [root.clone()].into_iter().collect();
+        sweep_litter(&db, run, &dirs, &keep, &mut report).unwrap();
+        assert_eq!(report.litter, 2, "{:?}", report.refused);
+        assert_eq!(prune_empty(&dirs, &keep, usize::MAX), 1);
+        assert!(!dir.exists(), "опустевший каталог должен уйти");
+
+        let home = root.join(pc_core::QUARANTINE_DIR).join("2019");
+        assert_eq!(
+            fs::read(home.join("._unrelated")).unwrap(),
+            b"resource fork"
+        );
+
+        // And the run walks backwards whole: the service files came in on the
+        // same journal, so the undo brings them home.
+        let entries = db.journal_by_run_op(run, "organize").unwrap();
+        assert_eq!(entries.len(), 2);
+        for e in entries {
+            crate::undo(&db, e.id).unwrap();
+        }
+        assert_eq!(fs::read(dir.join(".DS_Store")).unwrap(), b"finder");
+        assert_eq!(fs::read(dir.join("._unrelated")).unwrap(), b"resource fork");
+    }
+
+    #[test]
+    fn a_directory_that_still_holds_something_of_yours_stays() {
+        // Service files go only out of a directory that has nothing else left.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("2019");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".DS_Store"), b"finder").unwrap();
+        fs::write(dir.join("notes.txt"), b"mine").unwrap();
+
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+        let mut report = OrganizeReport::default();
+        let dirs: BTreeSet<PathBuf> = [dir.clone()].into_iter().collect();
+        sweep_litter(&db, run, &dirs, &BTreeSet::new(), &mut report).unwrap();
+        assert_eq!(report.litter, 0);
+        assert_eq!(prune_empty(&dirs, &BTreeSet::new(), usize::MAX), 0);
+        assert!(dir.join(".DS_Store").exists());
+        assert!(dir.join("notes.txt").exists());
+    }
 
     #[test]
     fn a_scanned_root_is_never_taken_away_even_when_it_empties() {

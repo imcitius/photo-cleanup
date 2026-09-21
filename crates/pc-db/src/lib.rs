@@ -195,4 +195,3 @@ mod tests {
         db.reset_index().unwrap();
     }
 }
-
