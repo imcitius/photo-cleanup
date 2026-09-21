@@ -1291,6 +1291,73 @@ pub async fn keep_only(
     })
 }
 
+/// The same decision, for every group this folder has a hand in.
+///
+/// One press settles one group; an archive holds ten thousand. When the
+/// answer is always the same — these scans are the ones to keep, the exports
+/// beside them are not — it should be said once. For every group holding a
+/// file in this folder, that file becomes the kept one and every other
+/// version is set aside.
+pub async fn keep_folder_only(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Response {
+    mutate(&st, |db| {
+        let dir = v["dir"]
+            .as_str()
+            .filter(|d| !d.is_empty())
+            .context(pc_core::tr!("Не указана папка", "No folder given"))?
+            .to_string();
+
+        let rows: Vec<(i64, i64, String, f64)> = {
+            let mut st = db.conn.prepare(
+                "SELECT fm.family_id, fm.file_id, f.path, COALESCE(fm.quality, 0)
+                   FROM family_members fm JOIN files f ON f.id = fm.file_id
+                  WHERE f.state = 'present'",
+            )?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+
+        // The best file the folder holds, per group. No pixel test here: the
+        // whole point is the groups where the pixels differ and only a person
+        // can choose.
+        let mut keep: std::collections::HashMap<i64, (i64, f64)> = std::collections::HashMap::new();
+        for (family, file, path, quality) in &rows {
+            if pc_core::dir_name(path) != dir {
+                continue;
+            }
+            let e = keep.entry(*family).or_insert((*file, *quality));
+            if *quality > e.1 {
+                *e = (*file, *quality);
+            }
+        }
+
+        let tx = db.conn.unchecked_transaction()?;
+        let (mut groups, mut marked) = (0u64, 0u64);
+        for (family, (file, _)) in &keep {
+            if !db.set_family_keeper(*family, *file)? {
+                continue;
+            }
+            groups += 1;
+            db.conn
+                .execute("INSERT OR IGNORE INTO manual_keepers VALUES(?1)", [file])?;
+            db.conn
+                .execute("DELETE FROM manual_rejects WHERE file_id = ?1", [file])?;
+            for (fam, other, _, _) in &rows {
+                if fam == family && other != file {
+                    db.conn.execute(
+                        "INSERT OR IGNORE INTO manual_rejects(file_id, marked_at) VALUES(?1, ?2)",
+                        rusqlite::params![other, pc_core::time::now_unix()],
+                    )?;
+                    marked += 1;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(json!({"groups": groups, "marked": marked, "dir": dir}))
+    })
+}
+
 /// Take back that choice: the group goes back to being undecided.
 pub async fn keep_all_versions(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
     mutate(&st, |db| {

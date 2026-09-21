@@ -519,6 +519,14 @@ main {
   font-size: 10px;
 }
 
+/* A version the user set aside: still there, already decided about. */
+.member.set-aside {
+  opacity: 0.6;
+}
+.member.set-aside > .thumb {
+  filter: grayscale(0.6);
+}
+
 /* The answer to a folder action, beside the folder it was about. */
 .folder-note {
   margin-top: 8px;

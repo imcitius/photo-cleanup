@@ -212,6 +212,9 @@ export const ui = {
     "Mark this frame as unwanted. It joins the move plan; the file stays where it is until you approve that plan.",
   keepFrame: "Keep it",
   keepFrameHelp: "Clear the mark: the frame stays in the archive.",
+  keepFolderOnly: "and the same in every group of this folder",
+  keepFolderOnlyHelp:
+    "In every group holding a file from this folder, that file becomes the only one kept and the other versions are set aside — even when they are not exact copies.",
   keepOnly: "Keep only this one",
   keepOnlyHelp:
     "This file stays and every other version of the shot goes into the plan — including the ones that are not exact copies. This is how one photograph held as a scan and as an export gets settled.",
@@ -308,7 +311,7 @@ export const messages = {
   po_date_staryye: "Date, oldest first",
   po_papke: "Folder",
   semeystv: "groups",
-  tolko_neskolko_faylov: "Only groups with something to move",
+  tolko_neskolko_faylov: "Only groups of several files",
   spisok_semeystv: "Group list",
   postroyte_semeystva_ili_izmenite_filtry:
     "Build the duplicate groups, or change the filters.",
@@ -561,6 +564,10 @@ export const messages = {
   zadat_datu_vsemu_sobytiyu: "Set the date for the whole event",
   primer_puti_k_arhivu: "For example, /home/name/Pictures",
   mesto_po_kachestvu: "#{0} by quality",
+  ostavlen_tolko:
+    "Keeping {0}. Other versions: {1} — set aside, and they go to quarantine when the move runs.",
+  papka_tolko_eti:
+    "Groups changed: {0}. Versions set aside: {1}. In these groups the files from this folder stay.",
   nichejnyy_karantin: "Quarantine with no journal",
   ne_v_zhurnale: "not from this database",
   chto_imenno_naydeno: "What exactly was found",

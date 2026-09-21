@@ -45,6 +45,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(service::keep_all_versions),
         )
         .route("/api/keepers/prefer-folder", post(service::prefer_folder))
+        .route(
+            "/api/keepers/keep-folder-only",
+            post(service::keep_folder_only),
+        )
         .route("/api/series/{id}/best", post(service::best))
         .route("/api/series/{id}/reject-rest", post(service::reject_rest))
         .route("/api/series/{id}/keep-all", post(service::keep_all))

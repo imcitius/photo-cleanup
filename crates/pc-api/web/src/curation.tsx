@@ -582,6 +582,32 @@ export function Families({
     }
   };
 
+  // The same answer for every group this folder touches: its file stays,
+  // the other versions are set aside. Said once instead of ten thousand
+  // times.
+  const keepFolderOnly = async (dir: string) => {
+    setBusy(true);
+    setError("");
+    try {
+      const r = await post<{ groups: number; marked: number }>(
+        "/keepers/keep-folder-only",
+        { dir },
+      );
+      const next = await plannedMove("keeper_folder", dir);
+      setFolderNote({
+        dir,
+        text: t("papka_tolko_eti", number(r.groups), number(r.marked)),
+        move: next,
+      });
+      if (selected) await refreshGroup(selected.id);
+      onChange();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const keepAllVersions = async (family: Family) => {
     setBusy(true);
     setError("");
@@ -862,6 +888,20 @@ export function Families({
                   ))}
                 </dl>
               </details>
+              {/* What was decided, said in one line where the decision was
+                  made. A star on one row and marks on five others is not the
+                  same as being told what will happen. */}
+              {selected.members.some((m) => m.is_rejected) && (
+                <Notice>
+                  {t(
+                    "ostavlen_tolko",
+                    selected.members.find((m) => m.is_keeper)?.name || "",
+                    number(
+                      selected.members.filter((m) => m.is_rejected).length,
+                    ),
+                  )}
+                </Notice>
+              )}
               <div className="section-heading">
                 <span className="muted">{t("versii_snimka")}</span>
                 {selected.members.some((m) => m.is_rejected) && (
@@ -893,7 +933,7 @@ export function Families({
                     key={m.file_id}
                     tabIndex={0}
                     aria-label={m.name}
-                    className={`member ${m.role === "copy" || m.role === "resize" ? "derived" : ""} ${m.is_keeper ? "kept" : ""} ${focused === m.file_id ? "focused" : ""}`}
+                    className={`member ${m.role === "copy" || m.role === "resize" ? "derived" : ""} ${m.is_keeper ? "kept" : ""} ${m.is_rejected && !m.is_keeper ? "set-aside" : ""} ${focused === m.file_id ? "focused" : ""}`}
                     onFocus={() => setFocused(m.file_id)}
                   >
                     <label className="compare-check">
@@ -952,6 +992,15 @@ export function Families({
                             onClick={() => preferFolder(m.dir)}
                           >
                             {ui.preferFolder}
+                          </button>
+                          <span className="muted">·</span>
+                          <button
+                            className="link"
+                            disabled={disabled || busy}
+                            title={ui.keepFolderOnlyHelp}
+                            onClick={() => keepFolderOnly(m.dir)}
+                          >
+                            {ui.keepFolderOnly}
                           </button>
                         </div>
                         {folderNote?.dir === m.dir && (

@@ -334,22 +334,13 @@ pub async fn families(
         "path" => "MIN(CASE WHEN f.id = fa.keeper_file THEN f.path END) ASC",
         _ => "SUM(CASE WHEN fm.role='copy' AND f.id != fa.keeper_file THEN f.size ELSE 0 END) DESC",
     };
-    // What the list is for is work that is left. A group of six files with
-    // no exact copies among them has nothing to move — the decision about it
-    // has already been made, by hand or by naming a folder — and keeping it
-    // on screen buries the ten thousand that still need one.
-    //
-    // "Copies to move" means the same thing here as it does to the plan: an
-    // exact copy of the file being kept, not merely a member carrying that
-    // role from when the group was built.
-    const MOVABLE: &str = "SUM(CASE WHEN (fm.role='copy' AND f.id<>fa.keeper_file
-                                         AND f.pixel_hash IS NOT NULL
-                                         AND f.pixel_hash=(SELECT k.pixel_hash FROM files k
-                                                            WHERE k.id=fa.keeper_file))
-                                     OR EXISTS(SELECT 1 FROM manual_rejects mr
-                                                WHERE mr.file_id=f.id)
-                                THEN 1 ELSE 0 END)>0";
-    let base = &format!("FROM families fa JOIN family_members fm ON fm.family_id=fa.id JOIN files f ON f.id=fm.file_id WHERE f.state='present' GROUP BY fa.id HAVING (?1 OR {MOVABLE}) AND (?2='' OR MAX(instr(lower(f.path),lower(?2)))>0) AND (?3='' OR MAX(fm.role=?3)) AND (?4='' OR MAX(instr(f.disk,?4))>0) AND SUM(f.size)>=?5");
+    // Several files still in the archive. A group empties itself as its
+    // copies leave — quarantined files are no longer "present" — so what
+    // remains listed is what still holds more than one file, which is
+    // exactly what still needs a decision. Groups where nothing moves
+    // *automatically* are the ones that need a person most, and hiding them
+    // was how the list lost them.
+    let base = &*"FROM families fa JOIN family_members fm ON fm.family_id=fa.id JOIN files f ON f.id=fm.file_id WHERE f.state='present' GROUP BY fa.id HAVING (?1 OR COUNT(*)>1) AND (?2='' OR MAX(instr(lower(f.path),lower(?2)))>0) AND (?3='' OR MAX(fm.role=?3)) AND (?4='' OR MAX(instr(f.disk,?4))>0) AND SUM(f.size)>=?5".to_string();
     let args: [&dyn rusqlite::ToSql; 5] = [&q.all, &q.search, &q.role, &q.disk, &q.min_bytes];
     let total: i64 = db.conn.query_row(
         &format!("SELECT COUNT(*) FROM (SELECT fa.id {base})"),
