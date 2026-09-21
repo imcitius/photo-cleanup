@@ -933,10 +933,9 @@ export function Quarantine({
     // Files sitting in quarantine folders that this database never put there
     // — left by an earlier one, and invisible everywhere else in the tool.
     orphans = useResource<Orphans>("/quarantine/orphans", revision),
-    [orphanBusy, setOrphanBusy] = useState(false),
-    [orphanWord, setOrphanWord] = useState(""),
-    [orphanNote, setOrphanNote] = useState(""),
-    [orphanError, setOrphanError] = useState(""),
+    // Reviewed and carried out like every other disk operation: the set is
+    // counted and shown before anything moves, and the journal records it.
+    [orphanPlan, setOrphanPlan] = useState<"adopt" | "purge" | null>(null),
     [days, setDays] = useState(7),
     [purge, setPurge] = useState(false),
     [view, setView] = useState<{ images: ImageRef[]; start: number } | null>(
@@ -949,26 +948,6 @@ export function Quarantine({
   const viewable: ImageRef[] = items
     .filter((j) => j.file_id !== null)
     .map((j) => ({ file_id: j.file_id!, name: j.name, thumb: j.thumb }));
-  const handleOrphans = async (remove: boolean) => {
-    setOrphanBusy(true);
-    setOrphanError("");
-    setOrphanNote("");
-    try {
-      const res = await post<{ done: number; refused: { why: string }[] }>(
-        "/quarantine/orphans",
-        remove ? { delete: true, confirmation: orphanWord } : {},
-      );
-      setOrphanNote(
-        t("nichejnye_itog", number(res.done), number(res.refused.length)),
-      );
-      setOrphanWord("");
-      orphans.reload();
-    } catch (e) {
-      setOrphanError((e as Error).message);
-    } finally {
-      setOrphanBusy(false);
-    }
-  };
   return (
     <>
       {/* Said first, because it is the part nothing else in the tool can
@@ -984,31 +963,33 @@ export function Quarantine({
             <span className="badge warning">{t("ne_v_zhurnale")}</span>
           </div>
           <p className="muted">{ui.orphanQuarantineHelp}</p>
-          {orphanError && <ErrorBox message={orphanError} />}
-          {orphanNote && <Notice>{orphanNote}</Notice>}
           <div className="toolbar">
             <Button
               kind="primary"
-              disabled={disabled || orphanBusy}
-              onClick={() => handleOrphans(false)}
+              disabled={disabled}
+              onClick={() => setOrphanPlan("adopt")}
             >
               {ui.orphanRestore}
             </Button>
-            <input
-              className="short-input"
-              aria-label={ui.purgeWord}
-              placeholder={ui.purgeWord}
-              value={orphanWord}
-              onChange={(e) => setOrphanWord(e.target.value)}
-            />
             <Button
-              kind="danger"
-              disabled={disabled || orphanBusy || !orphanWord}
-              onClick={() => handleOrphans(true)}
+              kind="danger-outline"
+              disabled={disabled}
+              onClick={() => setOrphanPlan("purge")}
             >
               {ui.orphanDelete}
             </Button>
           </div>
+          {orphanPlan && (
+            <Review
+              kind={
+                orphanPlan === "purge" ? "quarantine-purge" : "quarantine-adopt"
+              }
+              params={{}}
+              start={start}
+              disabled={disabled}
+              refresh={revision}
+            />
+          )}
           <details>
             <summary>{t("chto_imenno_naydeno")}</summary>
             <div>

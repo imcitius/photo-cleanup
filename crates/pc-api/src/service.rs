@@ -62,6 +62,8 @@ pub fn validate(r: &Request) -> Result<()> {
             | "organize-apply"
             | "organize-undo"
             | "journal-undo"
+            | "quarantine-adopt"
+            | "quarantine-purge"
     ) {
         bail!(
             "{}",
@@ -533,12 +535,17 @@ pub enum Action {
     Move(pc_organize::Move),
     Undo(pc_db::JournalEntry),
     Purge(pc_db::JournalEntry),
+    /// A file in a quarantine folder that this database never put there,
+    /// carried back to where it came from, or deleted for good.
+    Adopt(pc_db::QuarantineFound),
+    Abandon(pc_db::QuarantineFound),
 }
 impl Action {
     pub fn path(&self) -> &str {
         match self {
             Self::Copy(x) => &x.path,
             Self::Bundle(x) => &x.path,
+            Self::Adopt(x) | Self::Abandon(x) => &x.path,
             Self::Move(x) => &x.src,
             Self::Undo(x) | Self::Purge(x) => &x.src,
         }
@@ -554,6 +561,7 @@ impl Action {
             Self::Copy(x) => x.size,
             Self::Bundle(x) => x.size,
             Self::Move(x) => x.size,
+            Self::Adopt(x) | Self::Abandon(x) => x.size,
             Self::Undo(x) | Self::Purge(x) => x.size,
         }
         .max(0) as u64
@@ -756,6 +764,54 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 }
                 items.push(json!({"journal_id":e.id,"path":e.dst,"dst":"Окончательное удаление","original":e.src,"size":e.size,"file_count":e.file_count}));
                 actions.push(Action::Purge(e));
+            }
+        }
+        "quarantine-adopt" | "quarantine-purge" => {
+            // Files the journal cannot account for: left by a database that
+            // is no longer here. They are decided on as a set, like every
+            // other disk operation — reviewed, counted, and refused one by
+            // one with a reason, instead of a button that acts on whatever
+            // the last walk happened to see.
+            let purge = r.kind == "quarantine-purge";
+            for f in db.quarantine_found()?.into_iter().filter(|f| !f.known) {
+                if !FsPath::new(&f.path).exists() {
+                    add_refusal(
+                        f.path.clone(),
+                        pc_core::tr!("Файла уже нет", "The file is already gone").into(),
+                    );
+                    continue;
+                }
+                if purge {
+                    items.push(
+                        json!({"path":f.path,"dst":pc_core::tr!("Окончательное удаление","Deleted for good"),"size":f.size,"file_count":1}),
+                    );
+                    actions.push(Action::Abandon(f));
+                    continue;
+                }
+                let Some(dst) = pc_core::quarantine_origin(&f.path) else {
+                    add_refusal(
+                        f.path.clone(),
+                        pc_core::tr!(
+                            "Непонятно, откуда этот файл: он не лежит в папке карантина",
+                            "There is no telling where this came from: it is not inside a quarantine folder"
+                        )
+                        .into(),
+                    );
+                    continue;
+                };
+                if FsPath::new(&dst).exists() {
+                    add_refusal(
+                        f.path.clone(),
+                        pc_core::tf!(
+                            "На месте уже лежит файл: {0}",
+                            "A file is already back in place: {0}",
+                            dst
+                        ),
+                    );
+                    continue;
+                }
+                items.push(json!({"path":f.path,"dst":dst,"size":f.size,"file_count":1}));
+                actions.push(Action::Adopt(f));
             }
         }
         "journal-undo" | "organize-undo" => {
@@ -961,6 +1017,18 @@ pub fn apply_action(
         }
         Action::Undo(e) => pc_apply::undo(db, e.id)?,
         Action::Purge(e) => pc_apply::purge_entry_controlled(db, e.id, control)?,
+        Action::Adopt(f) => {
+            let dst = pc_core::quarantine_origin(&f.path).context(pc_core::tr!(
+                "Непонятно, откуда этот файл",
+                "There is no telling where this came from"
+            ))?;
+            pc_apply::adopt_orphan(db, run, &f.path, &dst)?;
+            db.forget_quarantine_found(&f.path)?;
+        }
+        Action::Abandon(f) => {
+            pc_apply::abandon_orphan(db, run, &f.path, control)?;
+            db.forget_quarantine_found(&f.path)?;
+        }
     }
     Ok(())
 }
@@ -1138,7 +1206,7 @@ pub async fn quarantine_orphans(State(st): State<Arc<AppState>>) -> Response {
             "items": orphans.iter().take(200).map(|f| json!({
                 "path": f.path,
                 "name": pc_core::base_name(&f.path),
-                "restore_to": restore_target(&f.path),
+                "restore_to": pc_core::quarantine_origin(&f.path),
                 "size": f.size,
                 "mtime": f.mtime,
             })).collect::<Vec<_>>(),
@@ -1146,103 +1214,6 @@ pub async fn quarantine_orphans(State(st): State<Arc<AppState>>) -> Response {
     })())
 }
 
-/// Where a quarantined file came from: one level up, out of the hidden
-/// folder it was put in. That is the only move quarantine ever makes, so it
-/// is the only one that has to be undone.
-fn restore_target(path: &str) -> String {
-    let inside = pc_core::dir_name(path);
-    let parent = pc_core::dir_name(inside);
-    format!(
-        "{parent}{}{}",
-        std::path::MAIN_SEPARATOR,
-        pc_core::base_name(path)
-    )
-}
-
-/// Put the unaccounted-for files back where they came from, or delete them.
-///
-/// Restoring refuses to overwrite: if a file of that name is back in the
-/// folder, the quarantined one stays put and is reported. Deleting asks for
-/// the word, like every other deletion here.
-pub async fn quarantine_adopt(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Response {
-    let delete = v["delete"].as_bool().unwrap_or(false);
-    let confirmed = v["confirmation"].as_str() == Some(pc_core::tr!("УДАЛИТЬ", "DELETE"));
-    mutate(&st, |db| {
-        if delete && !confirmed {
-            bail!(
-                "{}",
-                pc_core::tf!(
-                    "Для окончательного удаления введите {0}",
-                    "Type {0} to delete for good",
-                    pc_core::tr!("УДАЛИТЬ", "DELETE")
-                )
-            );
-        }
-        let found = db.quarantine_found()?;
-        let mut done = 0u64;
-        let mut refused: Vec<Value> = Vec::new();
-        // What is no longer in the quarantine folder is no longer news. The
-        // table is refreshed by a walk, and waiting for one would leave the
-        // screen claiming files that have just been dealt with.
-        let mut settled: Vec<String> = Vec::new();
-        for f in found.iter().filter(|f| !f.known) {
-            let src = std::path::Path::new(&f.path);
-            if !src.is_file() {
-                continue;
-            }
-            if delete {
-                match std::fs::remove_file(src) {
-                    Ok(()) => {
-                        settled.push(f.path.clone());
-                        done += 1;
-                    }
-                    Err(e) => refused.push(json!({"path": f.path, "why": e.to_string()})),
-                }
-                continue;
-            }
-            let dst = restore_target(&f.path);
-            if std::path::Path::new(&dst).exists() {
-                refused.push(json!({
-                    "path": f.path,
-                    "why": pc_core::tr!(
-                        "на месте уже лежит файл с таким именем",
-                        "a file of that name is already back in place"
-                    ),
-                }));
-                continue;
-            }
-            match std::fs::rename(src, &dst) {
-                Ok(()) => {
-                    settled.push(f.path.clone());
-                    done += 1;
-                }
-                Err(e) => refused.push(json!({"path": f.path, "why": e.to_string()})),
-            }
-        }
-        {
-            let tx = db.conn.unchecked_transaction()?;
-            let mut st = db
-                .conn
-                .prepare("DELETE FROM quarantine_found WHERE path = ?1")?;
-            for path in &settled {
-                st.execute([path])?;
-            }
-            drop(st);
-            tx.commit()?;
-        }
-        Ok(json!({"done": done, "refused": refused}))
-    })
-}
-
-/// Keep one file of a group and set the rest aside for the plan.
-///
-/// The tool's own reasoning stops at exact copies: a scan and the JPEG made
-/// from it are one photograph in two encodings, and it will not choose
-/// between them. The person looking at them can. This writes that choice
-/// down — the kept file becomes the kept file, and every other member of the
-/// group is marked as set aside by hand, which is the same mark the bursts
-/// screen uses and carries the same weight: the move does not ask the pixels
-/// to match, because the answer came from someone who looked.
 pub async fn keep_only(
     State(st): State<Arc<AppState>>,
     Path(id): Path<i64>,

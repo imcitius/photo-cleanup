@@ -11,7 +11,7 @@ pub use files::{
 };
 pub use model::{
     Bundle, BundleState, Catalog, JournalEntry, JournalStatus, Moved, NewBundle, NewCatalog,
-    NewJournalEntry,
+    NewJournalEntry, QuarantineFound,
 };
 pub use organize::OrganizeRow;
 
@@ -187,6 +187,79 @@ mod tests {
         // quarantine becomes a one-way trip.
         assert_eq!(count("SELECT count(*) FROM journal"), 1);
         assert_eq!(count("SELECT count(*) FROM settings"), 1);
+    }
+
+    #[test]
+    fn quarantine_belongs_to_whoever_the_journal_says_put_it_there() {
+        // A bundle of previews goes in as one directory and one journal row,
+        // while a walk finds every file inside it. Orphan quarantine offers
+        // to adopt or delete whatever the journal does not claim, so a file
+        // inside a claimed directory must not look abandoned — and neither
+        // must a sidecar, which travels in the manifest of its photograph.
+        let db = Db::open_in_memory().unwrap();
+        let run = db.start_run(&["/archive".into()], "test").unwrap();
+        let q = format!("/archive/{}", pc_core::QUARANTINE_DIR);
+        let jid = db
+            .journal_begin(&model::NewJournalEntry {
+                run_id: run,
+                op: "quarantine",
+                target_id: None,
+                src: "/archive/Library.lrdata",
+                dst: Some(&format!("{q}/Library.lrdata")),
+                size: 10,
+                file_count: 1,
+                manifest: &[],
+            })
+            .unwrap();
+        db.journal_finish(jid, model::JournalStatus::Done, None)
+            .unwrap();
+        let jid = db
+            .journal_begin(&model::NewJournalEntry {
+                run_id: run,
+                op: "quarantine-file",
+                target_id: None,
+                src: "/archive/frame.arw",
+                dst: Some(&format!("{q}/frame.arw")),
+                size: 10,
+                file_count: 2,
+                manifest: &[
+                    model::Moved {
+                        src: "/archive/frame.arw".into(),
+                        dst: format!("{q}/frame.arw"),
+                    },
+                    model::Moved {
+                        src: "/archive/frame.xmp".into(),
+                        dst: format!("{q}/frame.xmp"),
+                    },
+                ],
+            })
+            .unwrap();
+        db.journal_finish(jid, model::JournalStatus::Done, None)
+            .unwrap();
+
+        let seen: Vec<(String, i64, i64)> = [
+            format!("{q}/Library.lrdata/sub/cache"),
+            format!("{q}/frame.arw"),
+            format!("{q}/frame.xmp"),
+            format!("{q}/from-an-older-database.jpg"),
+        ]
+        .iter()
+        .map(|p| (p.clone(), 1, 0))
+        .collect();
+        db.set_quarantine_found(run, &seen).unwrap();
+
+        let found = db.quarantine_found().unwrap();
+        let known = |name: &str| {
+            found
+                .iter()
+                .find(|f| f.path.ends_with(name))
+                .unwrap_or_else(|| panic!("нет {name}"))
+                .known
+        };
+        assert!(known("cache"), "файл внутри перенесённого каталога — ничей");
+        assert!(known("frame.arw"));
+        assert!(known("frame.xmp"), "спутник — ничей");
+        assert!(!known("from-an-older-database.jpg"), "чужое признано своим");
     }
 
     #[test]

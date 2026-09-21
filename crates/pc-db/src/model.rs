@@ -545,6 +545,15 @@ impl Db {
         Ok(())
     }
 
+    /// A file that has just been dealt with is no longer news. The table is
+    /// refreshed by a walk, and waiting for one would leave the screen
+    /// claiming files that are no longer there.
+    pub fn forget_quarantine_found(&self, path: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM quarantine_found WHERE path = ?1", [path])?;
+        Ok(())
+    }
+
     /// What is in quarantine on disk, and whether the journal can undo it.
     ///
     /// A file the journal does not know about was put there by a database
@@ -557,9 +566,12 @@ impl Db {
         // from the frame it belongs to.
         let mut ours: std::collections::HashSet<String> = std::collections::HashSet::new();
         {
+            // `pending` counts too: an operation that was interrupted owns
+            // what it was moving, and calling that nobody's would offer to
+            // adopt a file its own journal row is still waiting to explain.
             let mut st = self
                 .conn
-                .prepare("SELECT dst, manifest FROM journal WHERE status = 'done'")?;
+                .prepare("SELECT dst, manifest FROM journal WHERE status IN ('done', 'pending')")?;
             let mut rows = st.query([])?;
             while let Some(r) = rows.next()? {
                 if let Some(dst) = r.get::<_, Option<String>>(0)? {
@@ -579,7 +591,7 @@ impl Db {
             .query_map([], |r| {
                 let path: String = r.get(0)?;
                 Ok(QuarantineFound {
-                    known: ours.contains(&path),
+                    known: claimed(&ours, &path),
                     path,
                     size: r.get(1)?,
                     mtime: r.get(2)?,
@@ -588,6 +600,34 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+}
+
+/// Whether the journal put this path in quarantine — itself, or as part of a
+/// directory it moved whole.
+///
+/// A bundle of Lightroom previews goes into quarantine as one directory and
+/// one journal row, while a walk finds every file inside it. Matching the
+/// path alone would call all of them abandoned. Walking up the path costs a
+/// few lookups; asking the journal about every file would cost the journal.
+fn claimed(ours: &std::collections::HashSet<String>, path: &str) -> bool {
+    if ours.contains(path) {
+        return true;
+    }
+    let mut cut = path;
+    while let Some(i) = cut.rfind(if cfg!(windows) {
+        &['/', '\\'][..]
+    } else {
+        &['/'][..]
+    }) {
+        cut = &cut[..i];
+        if cut.is_empty() {
+            break;
+        }
+        if ours.contains(cut) {
+            return true;
+        }
+    }
+    false
 }
 
 /// A manifest is stored as JSON, and an empty one as nothing at all: a row

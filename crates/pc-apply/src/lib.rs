@@ -345,6 +345,79 @@ pub(crate) fn listed(failed: &[(String, String)]) -> String {
         .join("; ")
 }
 
+/// Carry a file the journal never claimed back out of quarantine.
+///
+/// Left by a database that is no longer here: this one has no row saying how
+/// it got there, so it writes one now, and the move can be walked back like
+/// any other.
+pub fn adopt_orphan(db: &Db, run_id: i64, src: &str, dst: &str) -> Result<()> {
+    if Path::new(dst).exists() {
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "на месте уже лежит файл: {0}",
+                "a file is already back in place: {0}",
+                dst
+            )
+        );
+    }
+    let size = fs::metadata(src).map(|m| m.len()).unwrap_or(0) as i64;
+    let jid = db.journal_begin(&pc_db::NewJournalEntry {
+        run_id,
+        op: "adopt",
+        target_id: None,
+        src,
+        dst: Some(dst),
+        size,
+        file_count: 1,
+        manifest: &[pc_db::Moved {
+            src: src.to_string(),
+            dst: dst.to_string(),
+        }],
+    })?;
+    match rename_with_parents(Path::new(src), Path::new(dst)) {
+        Ok(()) => {
+            db.journal_finish(jid, JournalStatus::Done, None)?;
+            Ok(())
+        }
+        Err(e) => {
+            db.journal_finish(jid, JournalStatus::Failed, Some(&e.to_string()))?;
+            Err(e)
+        }
+    }
+}
+
+/// Delete a file the journal never claimed. There is nothing to move it back
+/// from, so the row is written first and the bytes go second.
+pub fn abandon_orphan(
+    db: &Db,
+    run_id: i64,
+    path: &str,
+    control: &pc_core::work::Control,
+) -> Result<()> {
+    let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0) as i64;
+    let jid = db.journal_begin(&pc_db::NewJournalEntry {
+        run_id,
+        op: "abandon",
+        target_id: None,
+        src: path,
+        dst: None,
+        size,
+        file_count: 1,
+        manifest: &[],
+    })?;
+    match remove_controlled(Path::new(path), control) {
+        Ok(()) => {
+            db.journal_mark_purged(jid)?;
+            Ok(())
+        }
+        Err(e) => {
+            db.journal_finish(jid, JournalStatus::Failed, Some(&format!("{e:#}")))?;
+            Err(e)
+        }
+    }
+}
+
 pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
     let entry = db.journal_entry(journal_id)?.with_context(|| {
         pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)

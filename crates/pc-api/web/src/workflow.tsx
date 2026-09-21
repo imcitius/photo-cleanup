@@ -510,7 +510,7 @@ export function Review({
       });
     return () => controller.abort();
   }, [kind, debounced, nonce, refresh]);
-  const purge = kind === "derived-purge";
+  const purge = kind === "derived-purge" || kind === "quarantine-purge";
   const apply = async () => {
     if (!plan) return;
     setSending(true);

@@ -895,3 +895,60 @@ async fn a_group_keeps_the_last_decision_and_never_empties_itself() {
         "план забирает оставленный: {plan}"
     );
 }
+
+#[tokio::test]
+async fn an_orphan_comes_out_of_quarantine_the_way_it_went_in() {
+    // Quarantine keeps the shape of what went into it, so a file deep inside
+    // a directory that was moved whole belongs deep inside that directory
+    // again — not one level up, inside the quarantine folder it never left.
+    // And it is a disk operation like any other: reviewed, tokened, and
+    // written into the journal, so it can be walked back.
+    let f = Fixture::new();
+    let hidden = f.archive.join(pc_core::QUARANTINE_DIR).join("Old.lrdata");
+    std::fs::create_dir_all(hidden.join("sub")).unwrap();
+    std::fs::write(hidden.join("sub/cache"), b"previews from another database").unwrap();
+    f.scan().await;
+
+    let (s, orphans) = f.req("GET", "/api/quarantine/orphans", Value::Null).await;
+    assert_eq!(s, 200, "{orphans}");
+    assert_eq!(orphans["files"], 1, "{orphans}");
+
+    let plan = f.preview("quarantine-adopt", json!({})).await;
+    let items = plan["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{plan}");
+    let home = f.archive.join("Old.lrdata/sub/cache");
+    assert_eq!(
+        items[0]["dst"].as_str().unwrap(),
+        home.display().to_string(),
+        "{plan}"
+    );
+
+    // Nothing moves without the reviewed plan.
+    let (s, v) = f
+        .req("POST", "/api/jobs", json!({"kind":"quarantine-adopt"}))
+        .await;
+    assert_eq!(s, 400, "{v}");
+
+    let done = f.apply(&plan).await;
+    assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(
+        std::fs::read(&home).unwrap(),
+        b"previews from another database"
+    );
+    assert!(
+        !hidden.join("sub/cache").exists(),
+        "файл остался в карантине"
+    );
+
+    // The journal holds the move, so it is undoable like everything else.
+    let db = f.state.db.lock().unwrap();
+    let rows = jobs::rows(
+        &db,
+        "SELECT src, dst, status FROM journal WHERE op = 'adopt'",
+        &[],
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["status"], "done");
+    assert_eq!(rows[0]["dst"], home.display().to_string());
+}

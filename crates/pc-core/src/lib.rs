@@ -275,10 +275,76 @@ mod prune_tests {
         assert!(is_system_junk_name("Thumbs.db"));
         assert!(!is_system_junk_name("DSC01234.ARW"));
     }
+
+    #[test]
+    fn a_way_out_of_quarantine_keeps_the_shape_of_what_went_in() {
+        let q = QUARANTINE_DIR;
+        assert_eq!(
+            quarantine_origin(&format!("/foto/{q}/a.jpg")).unwrap(),
+            format!("/foto{}a.jpg", std::path::MAIN_SEPARATOR)
+        );
+        // A directory went in whole, so everything under it comes back whole.
+        assert_eq!(
+            quarantine_origin(&format!("/foto/{q}/Library.lrdata/sub/cache")).unwrap(),
+            ["", "foto", "Library.lrdata", "sub", "cache"].join(std::path::MAIN_SEPARATOR_STR)
+        );
+        // Not in quarantine, or nothing after the folder: no guessing.
+        assert_eq!(quarantine_origin("/foto/a.jpg"), None);
+        assert_eq!(quarantine_origin(&format!("/foto/{q}")), None);
+        assert_eq!(quarantine_origin(&format!("/foto/{q}/")), None);
+        // Quarantine inside quarantine: the way out is the innermost one.
+        assert_eq!(
+            quarantine_origin(&format!("/foto/{q}/dir/{q}/a.jpg")).unwrap(),
+            ["", "foto", QUARANTINE_DIR, "dir", "a.jpg"].join(std::path::MAIN_SEPARATOR_STR)
+        );
+    }
 }
 
 /// Our own quarantine directory, so a rescan never re-reports quarantined data.
 pub const QUARANTINE_DIR: &str = ".photo-cleanup-quarantine";
+
+/// Where a path inside a quarantine folder came from.
+///
+/// Quarantine is a hidden folder beside the file, and what went in kept the
+/// shape it had: a directory moved whole still has its own tree under there.
+/// So the way home is not "one level up" — it is everything after the
+/// quarantine component, hung back on the directory that holds it.
+///
+/// `.../foto/.photo-cleanup-quarantine/Library.lrdata/sub/cache`
+/// comes home to `.../foto/Library.lrdata/sub/cache`.
+///
+/// `None` when the path is not inside a quarantine folder at all: nothing
+/// should be moved on a guess.
+pub fn quarantine_origin(path: &str) -> Option<String> {
+    // The last quarantine component wins: quarantine inside quarantine is
+    // still a path whose way out is the innermost folder. Working in byte
+    // offsets keeps the tail spelled as it was stored, separators and all.
+    let mut found = None;
+    let mut start = 0;
+    for (i, ch) in path.char_indices() {
+        if SEPARATORS.contains(&ch) {
+            if &path[start..i] == QUARANTINE_DIR {
+                found = Some((start, i + ch.len_utf8()));
+            }
+            start = i + ch.len_utf8();
+        }
+    }
+    // A trailing component is the folder itself, with nothing inside it to
+    // bring home.
+    let (head_end, tail_start) = found?;
+    let tail = trim_leading_separators(&path[tail_start..]);
+    if tail.is_empty() {
+        return None;
+    }
+    let head = path[..head_end].trim_end_matches(SEPARATORS);
+    let sep = std::path::MAIN_SEPARATOR;
+    // An absolute path keeps its leading separator; a relative one has none.
+    Some(if head.is_empty() && path.starts_with(SEPARATORS) {
+        format!("{sep}{tail}")
+    } else {
+        format!("{head}{sep}{tail}")
+    })
+}
 
 pub fn file_name_str(p: &Path) -> &str {
     p.file_name().and_then(|s| s.to_str()).unwrap_or("")

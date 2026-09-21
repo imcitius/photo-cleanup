@@ -569,7 +569,6 @@ export const messages = {
   ne_v_zhurnale: "не из этой базы",
   chto_imenno_naydeno: "Что именно найдено",
   vernyotsya_v: "Вернётся в: ",
-  nichejnye_itog: "Обработано: {0}. Отказов: {1}.",
   perenesyono_v_karantin: "Перенесено в карантин: {0}. Вернуть — в журнале.",
   papka_teper_hranimaya: "Групп изменено: {0}. Хранимыми стали файлы из {1}",
   iz_papki_uedet: "Из папки {2} уедет в карантин файлов: {0} · {1}",

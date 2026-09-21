@@ -572,7 +572,6 @@ export const messages = {
   ne_v_zhurnale: "not from this database",
   chto_imenno_naydeno: "What exactly was found",
   vernyotsya_v: "Goes back to: ",
-  nichejnye_itog: "Handled: {0}. Refused: {1}.",
   perenesyono_v_karantin: "Moved to quarantine: {0}. The journal puts it back.",
   papka_teper_hranimaya:
     "Groups changed: {0}. The kept files are now the ones in {1}",

@@ -40,6 +40,8 @@ pub fn destructive(kind: &str) -> bool {
             | "organize-apply"
             | "organize-undo"
             | "journal-undo"
+            | "quarantine-adopt"
+            | "quarantine-purge"
     )
 }
 pub fn idle(st: &AppState) -> Result<()> {
@@ -182,7 +184,9 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
         );
     }
     let purge_word = pc_core::tr!("УДАЛИТЬ", "DELETE");
-    if req.kind == "derived-purge" && req.confirmation.as_deref() != Some(purge_word) {
+    if matches!(req.kind.as_str(), "derived-purge" | "quarantine-purge")
+        && req.confirmation.as_deref() != Some(purge_word)
+    {
         return service::error(
             400,
             &pc_core::tf!(
