@@ -180,42 +180,66 @@ pub fn quarantine_file(
     let dst = crate::quarantine_dest_for(&file.path, c.file_id, db, override_root)?;
 
     let dst_str = dst.to_string_lossy().into_owned();
+
+    // Sidecars follow their photograph, or they become litter pointing at
+    // nothing. Where each of them lands is decided here, before anything
+    // moves, so the journal can say what this operation is about to do.
+    let mut planned = vec![pc_db::Moved {
+        src: c.path.clone(),
+        dst: dst_str.clone(),
+    }];
+    let mut bytes = c.size;
+    for side in companions(src) {
+        let Some(name) = side.file_name() else {
+            continue;
+        };
+        let target = dst.with_file_name(name);
+        bytes += side.metadata().map(|m| m.len()).unwrap_or(0) as i64;
+        planned.push(pc_db::Moved {
+            src: side.to_string_lossy().into_owned(),
+            dst: target.to_string_lossy().into_owned(),
+        });
+    }
+
     let jid = db.journal_begin(&pc_db::NewJournalEntry {
         run_id,
         op: "quarantine-file",
         target_id: Some(c.file_id),
         src: &c.path,
         dst: Some(&dst_str),
-        size: c.size,
-        file_count: 1,
+        size: bytes,
+        file_count: planned.len() as i64,
+        manifest: &planned,
     })?;
 
     match rename_with_parents(src, &dst) {
         Ok(()) => {
-            // Sidecars follow their photograph, or they become litter
-            // pointing at nothing.
-            let mut moved_with = 0;
-            for side in companions(src) {
-                let Some(name) = side.file_name() else {
-                    continue;
-                };
-                let target = dst.with_file_name(name);
-                if rename_with_parents(&side, &target).is_ok() {
-                    moved_with += 1;
-                }
-            }
-            let note = (moved_with > 0).then(|| {
-                pc_core::tf!(
+            let (moved, failed) = crate::carry(&planned[1..]);
+            let note = match (moved.len(), failed.as_slice()) {
+                (0, []) => None,
+                (n, []) => Some(pc_core::tf!(
                     "спутников перенесено: {0}",
                     "companions moved: {0}",
-                    moved_with
-                )
-            });
+                    n
+                )),
+                (n, f) => Some(pc_core::tf!(
+                    "спутников перенесено: {0}, не перенеслось: {1}",
+                    "companions moved: {0}, not moved: {1}",
+                    n,
+                    crate::listed(f)
+                )),
+            };
+            // The journal now says what moved, not what was meant to.
+            let done: Vec<pc_db::Moved> =
+                std::iter::once(planned[0].clone()).chain(moved).collect();
+            db.journal_set_manifest(jid, &done)?;
             db.journal_finish(jid, JournalStatus::Done, note.as_deref())?;
             // The row must stop claiming the file is still in the archive,
             // or the planner will offer the same work again forever.
             db.set_file_state(c.file_id, "quarantined")?;
-            Ok((FileOutcome::Moved, String::new()))
+            // The photograph moved; a sidecar that stayed behind is still
+            // something the run has to say out loud.
+            Ok((FileOutcome::Moved, crate::listed(&failed)))
         }
         Err(e) => {
             db.journal_finish(jid, JournalStatus::Failed, Some(&e.to_string()))?;
@@ -239,10 +263,13 @@ pub fn apply(
     let mut report = ApplyReport::default();
     for c in candidates {
         match quarantine_file(db, run_id, c, override_root) {
-            Ok((FileOutcome::Moved, _)) => {
+            Ok((FileOutcome::Moved, stuck)) => {
                 report.totals.bundles += 1;
                 report.totals.files += 1;
                 report.totals.bytes += c.size as u64;
+                if !stuck.is_empty() {
+                    report.refused.push((c.path.clone(), stuck));
+                }
             }
             Ok((FileOutcome::Refused, why)) => report.refused.push((c.path.clone(), why)),
             Err(e) => {
@@ -258,6 +285,153 @@ pub fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A photograph in the index, and the manual candidate that moves it.
+    fn one_manual_candidate(db: &Db, run: i64, path: &Path) -> Candidate {
+        let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0) as i64;
+        let file_id = db
+            .upsert_file(
+                &pc_db::NewFile {
+                    path: path.display().to_string(),
+                    name: path.file_name().unwrap().to_string_lossy().into_owned(),
+                    size,
+                    ..Default::default()
+                },
+                run,
+            )
+            .unwrap();
+        Candidate {
+            file_id,
+            family_id: 0,
+            path: path.display().to_string(),
+            size,
+            role: pc_family::Role::Copy,
+            keeper_id: 0,
+            keeper_path: String::new(),
+            reason: "выбор человека".into(),
+            manual: true,
+        }
+    }
+
+    #[test]
+    fn an_undo_brings_back_only_what_this_move_took() {
+        // A stranger's sidecar can already be sitting in quarantine: another
+        // photograph with the same stem was moved there long before. Looking
+        // for sidecars by name at undo time hands it to whoever asks last.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("archive");
+        let quarantine = dir.join(pc_core::QUARANTINE_DIR);
+        fs::create_dir_all(&quarantine).unwrap();
+        let photo = dir.join("photo.bmp");
+        fs::write(&photo, b"picture").unwrap();
+        fs::write(quarantine.join("photo.xmp"), b"someone else's edits").unwrap();
+
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
+        let c = one_manual_candidate(&db, run, &photo);
+        assert_eq!(
+            quarantine_file(&db, run, &c, None).unwrap().0,
+            FileOutcome::Moved
+        );
+        assert!(!photo.exists());
+
+        let entry = db.journal_quarantined(None).unwrap().pop().unwrap();
+        assert_eq!(entry.manifest.len(), 1, "у файла нет спутников");
+        crate::undo(&db, entry.id).unwrap();
+
+        assert_eq!(fs::read(&photo).unwrap(), b"picture");
+        assert!(
+            !dir.join("photo.xmp").exists(),
+            "откат унёс чужой спутник в архив"
+        );
+        assert_eq!(
+            fs::read(quarantine.join("photo.xmp")).unwrap(),
+            b"someone else's edits"
+        );
+    }
+
+    #[test]
+    fn a_sidecar_that_did_not_move_is_written_down_not_assumed() {
+        // The rename of a sidecar used to be attempted and forgotten. If it
+        // fails, the journal must say so — an undo that silently finds
+        // nothing to bring back is how an edit disappears.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("archive");
+        let quarantine = dir.join(pc_core::QUARANTINE_DIR);
+        fs::create_dir_all(&quarantine).unwrap();
+        let photo = dir.join("frame.arw");
+        fs::write(&photo, b"raw").unwrap();
+        fs::write(dir.join("frame.xmp"), b"my edits").unwrap();
+        // Something else already occupies the sidecar's destination, and a
+        // directory with a file in it will not be renamed over.
+        fs::create_dir_all(quarantine.join("frame.xmp")).unwrap();
+        fs::write(quarantine.join("frame.xmp").join("inside"), b"x").unwrap();
+
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
+        let c = one_manual_candidate(&db, run, &photo);
+        let (outcome, stuck) = quarantine_file(&db, run, &c, None).unwrap();
+        assert_eq!(outcome, FileOutcome::Moved);
+        assert!(
+            stuck.contains("frame.xmp"),
+            "отказ спутника молчит: {stuck:?}"
+        );
+
+        let entry = db.journal_quarantined(None).unwrap().pop().unwrap();
+        assert_eq!(
+            entry.manifest.len(),
+            1,
+            "спутник не уехал, но записан как уехавший"
+        );
+        assert_eq!(fs::read(dir.join("frame.xmp")).unwrap(), b"my edits");
+    }
+
+    #[test]
+    fn a_sidecar_in_quarantine_belongs_to_the_run_that_put_it_there() {
+        // Orphan quarantine offers to adopt or purge whatever the journal
+        // does not claim. A sidecar has no journal row of its own, so without
+        // the manifest it looked abandoned — and could be taken away from the
+        // photograph it belongs to.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("archive");
+        fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("frame.arw");
+        fs::write(&photo, b"raw").unwrap();
+        fs::write(dir.join("frame.xmp"), b"my edits").unwrap();
+
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
+        let c = one_manual_candidate(&db, run, &photo);
+        assert_eq!(
+            quarantine_file(&db, run, &c, None).unwrap().0,
+            FileOutcome::Moved
+        );
+
+        let quarantine = dir.join(pc_core::QUARANTINE_DIR);
+        let stranger = quarantine.join("from-another-database.jpg");
+        fs::write(&stranger, b"nobody's").unwrap();
+        let seen: Vec<(String, i64, i64)> = [
+            quarantine.join("frame.arw"),
+            quarantine.join("frame.xmp"),
+            stranger.clone(),
+        ]
+        .iter()
+        .map(|p| (p.display().to_string(), 1, 0))
+        .collect();
+        db.set_quarantine_found(run, &seen).unwrap();
+
+        let found = db.quarantine_found().unwrap();
+        let known = |name: &str| {
+            found
+                .iter()
+                .find(|f| f.path.ends_with(name))
+                .unwrap_or_else(|| panic!("нет {name}"))
+                .known
+        };
+        assert!(known("frame.arw"));
+        assert!(known("frame.xmp"), "спутник объявлен ничьим");
+        assert!(!known("from-another-database.jpg"));
+    }
 
     #[test]
     fn case_aliases_do_not_duplicate_one_sidecar() {

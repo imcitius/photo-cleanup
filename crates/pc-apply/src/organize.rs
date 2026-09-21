@@ -100,37 +100,53 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
             continue;
         }
 
+        // Where the photograph and each of its sidecars land is settled
+        // before the first rename: a collision may have renamed the file, and
+        // the sidecars carry the new stem with it.
+        let old_stem = src
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(stem_of)
+            .unwrap_or_default()
+            .to_string();
+        let new_stem = stem_of(m.name()).to_string();
+        let mut planned = vec![pc_db::Moved {
+            src: m.src.clone(),
+            dst: m.dst.clone(),
+        }];
+        let mut bytes = m.size;
+        for side in companions(src) {
+            let Some(name) = side.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let target = dst.with_file_name(sidecar_name(name, &old_stem, &new_stem));
+            bytes += side.metadata().map(|md| md.len()).unwrap_or(0) as i64;
+            planned.push(pc_db::Moved {
+                src: side.to_string_lossy().into_owned(),
+                dst: target.to_string_lossy().into_owned(),
+            });
+        }
+
         let jid = db.journal_begin(&pc_db::NewJournalEntry {
             run_id,
             op: "organize",
             target_id: Some(m.file_id),
             src: &m.src,
             dst: Some(&m.dst),
-            size: m.size,
-            file_count: 1,
+            size: bytes,
+            file_count: planned.len() as i64,
+            manifest: &planned,
         })?;
 
         match rename_with_parents(src, dst) {
             Ok(()) => {
-                let old_stem = src
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .map(stem_of)
-                    .unwrap_or_default()
-                    .to_string();
-                let new_stem = stem_of(m.name()).to_string();
-
-                let mut moved_with = 0;
-                for side in companions(src) {
-                    let Some(name) = side.file_name().and_then(|s| s.to_str()) else {
-                        continue;
-                    };
-                    let target = dst.with_file_name(sidecar_name(name, &old_stem, &new_stem));
-                    if rename_with_parents(&side, &target).is_ok() {
-                        moved_with += 1;
-                    }
-                }
+                let (carried, failed) = crate::carry(&planned[1..]);
+                let moved_with = carried.len() as u64;
                 report.sidecars += moved_with;
+                report.refused.extend(failed.iter().cloned());
+                let done: Vec<pc_db::Moved> =
+                    std::iter::once(planned[0].clone()).chain(carried).collect();
+                db.journal_set_manifest(jid, &done)?;
 
                 let note = match (&m.renamed_from, moved_with) {
                     (Some(old), 0) => {
@@ -147,6 +163,14 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
                         "спутников перенесено: {0}",
                         "companions moved: {0}",
                         n
+                    )),
+                };
+                let note = match failed.as_slice() {
+                    [] => note,
+                    f => Some(format!(
+                        "{}{}",
+                        note.map(|n| format!("{n}; ")).unwrap_or_default(),
+                        pc_core::tf!("не перенеслось: {0}", "not moved: {0}", crate::listed(f))
                     )),
                 };
                 db.journal_finish(jid, JournalStatus::Done, note.as_deref())?;
@@ -252,6 +276,10 @@ fn sweep_litter(
                 dst: Some(&dst_s),
                 size,
                 file_count: 1,
+                manifest: &[pc_db::Moved {
+                    src: src_s.clone(),
+                    dst: dst_s.clone(),
+                }],
             })?;
             match rename_with_parents(&src, &dst) {
                 Ok(()) => {

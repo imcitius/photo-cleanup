@@ -10,7 +10,7 @@ pub use files::{
     SeriesMemberRow, SeriesRow,
 };
 pub use model::{
-    Bundle, BundleState, Catalog, JournalEntry, JournalStatus, NewBundle, NewCatalog,
+    Bundle, BundleState, Catalog, JournalEntry, JournalStatus, Moved, NewBundle, NewCatalog,
     NewJournalEntry,
 };
 pub use organize::OrganizeRow;
@@ -170,6 +170,7 @@ mod tests {
             dst: Some("/archive/.quarantine/a.jpg"),
             size: 1000,
             file_count: 1,
+            manifest: &[],
         })
         .unwrap();
 

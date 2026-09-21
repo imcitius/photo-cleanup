@@ -276,6 +276,8 @@ pub fn quarantine(
         dst: Some(&dst_str),
         size: b.size,
         file_count: b.file_count,
+        // A bundle moves as one directory: its own path says everything.
+        manifest: &[],
     })?;
 
     match rename_with_parents(Path::new(&b.path), &dst) {
@@ -317,6 +319,32 @@ pub fn quarantine_many(
 }
 
 /// Move a quarantined bundle back where it came from.
+/// Move the rest of an operation's files and say which of them made it.
+///
+/// A sidecar that refuses to move is a fact worth keeping: it stays out of
+/// the manifest, so an undo is not surprised by a file that never left, and
+/// the journal note names it.
+pub(crate) fn carry(rest: &[pc_db::Moved]) -> (Vec<pc_db::Moved>, Vec<(String, String)>) {
+    let mut moved = Vec::new();
+    let mut failed = Vec::new();
+    for m in rest {
+        match rename_with_parents(Path::new(&m.src), Path::new(&m.dst)) {
+            Ok(()) => moved.push(m.clone()),
+            Err(e) => failed.push((m.src.clone(), e.to_string())),
+        }
+    }
+    (moved, failed)
+}
+
+/// `path — why; path — why`, for a journal note.
+pub(crate) fn listed(failed: &[(String, String)]) -> String {
+    failed
+        .iter()
+        .map(|(p, why)| format!("{p} — {why}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
     let entry = db.journal_entry(journal_id)?.with_context(|| {
         pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
@@ -338,24 +366,47 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
     ))?;
     let dst_path = PathBuf::from(&dst);
     let src_path = PathBuf::from(&entry.src);
-    let sidecars = files::companions(&dst_path);
-    rename_with_parents(&dst_path, &src_path)?;
-
     let name_of = |p: &Path| -> String {
         p.file_name()
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string()
     };
-    // Sidecars that travelled with the photograph come home with it. A
-    // reorganisation may have renamed the file out of a name collision, in
-    // which case they carry the new stem and have to be carried back.
-    let new_stem = organize::stem_of(&name_of(&dst_path)).to_string();
-    let old_stem = organize::stem_of(&name_of(&src_path)).to_string();
-    for side in sidecars {
-        if let Some(name) = side.file_name().and_then(|s| s.to_str()) {
-            let back = src_path.with_file_name(organize::sidecar_name(name, &new_stem, &old_stem));
-            let _ = rename_with_parents(&side, &back);
+
+    // The operation wrote down what it moved, so the undo carries back that
+    // list and nothing else. A file found by name in the quarantine folder
+    // may be a stranger's — one that was already there when this one arrived.
+    let mut failed: Vec<String> = Vec::new();
+    if entry.manifest.is_empty() {
+        // Written before the journal held a list: name matching is all there
+        // is, and it is why the list exists now.
+        let sidecars = files::companions(&dst_path);
+        rename_with_parents(&dst_path, &src_path)?;
+        let new_stem = organize::stem_of(&name_of(&dst_path)).to_string();
+        let old_stem = organize::stem_of(&name_of(&src_path)).to_string();
+        for side in sidecars {
+            if let Some(name) = side.file_name().and_then(|s| s.to_str()) {
+                let back =
+                    src_path.with_file_name(organize::sidecar_name(name, &new_stem, &old_stem));
+                let _ = rename_with_parents(&side, &back);
+            }
+        }
+    } else {
+        // The photograph first: if it cannot come back, nothing should move.
+        rename_with_parents(&dst_path, &src_path)?;
+        for m in entry.manifest.iter().filter(|m| m.src != entry.src) {
+            let from = Path::new(&m.dst);
+            if !from.exists() {
+                failed.push(pc_core::tf!(
+                    "{0} — файла нет в карантине",
+                    "{0} — not in quarantine any more",
+                    m.dst
+                ));
+                continue;
+            }
+            if let Err(e) = rename_with_parents(from, Path::new(&m.src)) {
+                failed.push(format!("{} — {e}", m.dst));
+            }
         }
     }
     // The directories the file came out of are ours to remove only while
@@ -370,6 +421,19 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
         );
     }
 
+    if !failed.is_empty() {
+        // The photograph is home; saying so quietly while a sidecar stayed
+        // behind is how an archive loses its edits.
+        db.journal_finish(
+            journal_id,
+            JournalStatus::Done,
+            Some(&pc_core::tf!(
+                "откат: не вернулось {0}",
+                "undo: did not come back — {0}",
+                failed.join("; ")
+            )),
+        )?;
+    }
     db.journal_mark_undone(journal_id)?;
     match (entry.op.as_str(), entry.target_id) {
         ("quarantine", Some(bid)) => db.set_bundle_state(bid, BundleState::Present)?,
@@ -433,9 +497,19 @@ pub fn purge_entry_controlled(db: &Db, id: i64, control: &pc_core::work::Control
         JournalStatus::Pending,
         Some("Окончательное удаление начато; при прерывании часть файлов уже может отсутствовать"),
     )?;
-    let sidecars = files::companions(path);
+    // Exactly what this operation moved here, when it wrote it down; for an
+    // older row, whatever carries the same name beside it.
+    let rest: Vec<PathBuf> = if e.manifest.is_empty() {
+        files::companions(path)
+    } else {
+        e.manifest
+            .iter()
+            .filter(|m| m.src != e.src)
+            .map(|m| PathBuf::from(&m.dst))
+            .collect()
+    };
     remove_controlled(path, control)?;
-    for side in sidecars {
+    for side in rest {
         remove_controlled(&side, control)?;
     }
     db.journal_mark_purged(id)?;

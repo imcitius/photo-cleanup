@@ -156,6 +156,17 @@ pub struct NewJournalEntry<'a> {
     pub dst: Option<&'a str>,
     pub size: i64,
     pub file_count: i64,
+    /// Every file this one operation moves, `src` included, fixed before the
+    /// first rename. Empty means "the entry names its own path and nothing
+    /// else" — a directory moved whole, or a row from an older version.
+    pub manifest: &'a [Moved],
+}
+
+/// One file's journey inside an operation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Moved {
+    pub src: String,
+    pub dst: String,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +180,8 @@ pub struct JournalEntry {
     pub status: JournalStatus,
     pub applied_at: i64,
     pub target_id: Option<i64>,
+    /// What actually moved, when the operation wrote it down.
+    pub manifest: Vec<Moved>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -385,8 +398,8 @@ impl Db {
     pub fn journal_begin(&self, e: &NewJournalEntry<'_>) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO journal(run_id, target_kind, target_id, op, src, dst, size,
-                                 file_count, status, applied_at)
-             VALUES (?1,'derived-bundle',?2,?3,?4,?5,?6,?7,'pending',?8)",
+                                 file_count, status, applied_at, manifest)
+             VALUES (?1,'derived-bundle',?2,?3,?4,?5,?6,?7,'pending',?8,?9)",
             params![
                 e.run_id,
                 e.target_id,
@@ -395,10 +408,21 @@ impl Db {
                 e.dst,
                 e.size,
                 e.file_count,
-                pc_core::time::now_unix()
+                pc_core::time::now_unix(),
+                manifest_json(e.manifest)
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Replace the planned list with what the operation really managed to
+    /// move, before it is finished.
+    pub fn journal_set_manifest(&self, id: i64, moved: &[Moved]) -> Result<()> {
+        self.conn.execute(
+            "UPDATE journal SET manifest=?1, file_count=?2 WHERE id=?3",
+            params![manifest_json(moved), moved.len() as i64, id],
+        )?;
+        Ok(())
     }
 
     pub fn journal_finish(&self, id: i64, status: JournalStatus, note: Option<&str>) -> Result<()> {
@@ -444,6 +468,10 @@ impl Db {
                     status: JournalStatus::parse(&status),
                     applied_at: r.get("applied_at")?,
                     target_id: r.get("target_id")?,
+                    manifest: r
+                        .get::<_, Option<String>>("manifest")?
+                        .and_then(|j| serde_json::from_str(&j).ok())
+                        .unwrap_or_default(),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -523,23 +551,47 @@ impl Db {
     /// that is no longer here. It is not rubbish and not indexed either: it
     /// simply belongs to nobody until someone says what to do with it.
     pub fn quarantine_found(&self) -> Result<Vec<QuarantineFound>> {
-        let mut st = self.conn.prepare(
-            "SELECT q.path, q.size, q.mtime,
-                    EXISTS(SELECT 1 FROM journal j
-                            WHERE j.dst = q.path AND j.status = 'done') AS known
-               FROM quarantine_found q
-              ORDER BY q.path",
-        )?;
+        // Everything the journal put there, sidecars included: a `.xmp` that
+        // travelled with its photograph has no journal row of its own, and
+        // calling it nobody's would offer it to be adopted or purged apart
+        // from the frame it belongs to.
+        let mut ours: std::collections::HashSet<String> = std::collections::HashSet::new();
+        {
+            let mut st = self
+                .conn
+                .prepare("SELECT dst, manifest FROM journal WHERE status = 'done'")?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                if let Some(dst) = r.get::<_, Option<String>>(0)? {
+                    ours.insert(dst);
+                }
+                if let Some(json) = r.get::<_, Option<String>>(1)? {
+                    if let Ok(moved) = serde_json::from_str::<Vec<Moved>>(&json) {
+                        ours.extend(moved.into_iter().map(|m| m.dst));
+                    }
+                }
+            }
+        }
+        let mut st = self
+            .conn
+            .prepare("SELECT path, size, mtime FROM quarantine_found ORDER BY path")?;
         let rows = st
             .query_map([], |r| {
+                let path: String = r.get(0)?;
                 Ok(QuarantineFound {
-                    path: r.get(0)?,
+                    known: ours.contains(&path),
+                    path,
                     size: r.get(1)?,
                     mtime: r.get(2)?,
-                    known: r.get::<_, i64>(3)? != 0,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+}
+
+/// A manifest is stored as JSON, and an empty one as nothing at all: a row
+/// with no list is exactly a row from before this was written down.
+fn manifest_json(moved: &[Moved]) -> Option<String> {
+    (!moved.is_empty()).then(|| serde_json::to_string(moved).unwrap_or_default())
 }

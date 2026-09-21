@@ -349,6 +349,22 @@ const MIGRATIONS: &[&str] = &[
 
     DELETE FROM manual_rejects WHERE file_id IN (SELECT file_id FROM manual_keepers);
     "#,
+    // 015 — what exactly moved, written down before anything moves.
+    //
+    // A journal row held the photograph alone. Its sidecars travelled after
+    // it, unrecorded, and an undo went looking for them by name in the
+    // destination directory — so a stranger's `photo.xmp` that happened to
+    // sit in quarantine was carried into someone else's folder, and a
+    // sidecar whose rename had quietly failed was never missed.
+    //
+    // `manifest` is the list of `src`/`dst` pairs of one operation: written
+    // before the first rename, rewritten afterwards with the pairs that
+    // actually moved. Undo and purge follow it instead of guessing. Rows
+    // written before this migration have none, and keep the old behaviour —
+    // it is all they have.
+    r#"
+    ALTER TABLE journal ADD COLUMN manifest TEXT;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {
