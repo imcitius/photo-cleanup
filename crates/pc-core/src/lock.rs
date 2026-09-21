@@ -60,9 +60,7 @@ pub fn take_writer(db_path: &Path, what: &str) -> Result<WriterLock> {
         })?;
 
     if !try_lock(&file)? {
-        let mut held = String::new();
-        // Reading is not blocked by the lock, so the holder's note is there.
-        let _ = File::open(&path).and_then(|mut f| f.read_to_string(&mut held));
+        let held = note_of(&path);
         let held = held.trim();
         return Err(Busy(if held.is_empty() {
             crate::tr!(
@@ -87,10 +85,27 @@ pub fn take_writer(db_path: &Path, what: &str) -> Result<WriterLock> {
         crate::time::now_unix()
     );
     let _ = file.set_len(0);
-    let _ = file.seek(SeekFrom::Start(0));
+    let _ = file.seek(SeekFrom::Start(NOTE_AT));
     let _ = file.write_all(note.as_bytes());
     let _ = file.flush();
     Ok(WriterLock { _file: file })
+}
+
+/// The first byte is the lock itself; the note lives after it.
+///
+/// Windows locks a range of bytes against reading as well, so a note inside
+/// the locked range could not be read by the process being refused — which is
+/// the only process that ever needs it. One byte is locked, and the words go
+/// past it, where any reader may look.
+const NOTE_AT: u64 = 1;
+
+fn note_of(path: &Path) -> String {
+    let mut held = String::new();
+    let _ = File::open(path).and_then(|mut f| {
+        f.seek(SeekFrom::Start(NOTE_AT))?;
+        f.read_to_string(&mut held)
+    });
+    held
 }
 
 #[cfg(unix)]
@@ -126,8 +141,9 @@ fn try_lock(file: &File) -> Result<bool> {
             file.as_raw_handle() as _,
             LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
             0,
-            !0,
-            !0,
+            // One byte, at offset zero: see `NOTE_AT`.
+            1,
+            0,
             &mut overlapped,
         )
     };
@@ -164,6 +180,17 @@ mod tests {
         drop(held);
         let mine = take_writer(&db, "перенос копий");
         assert!(mine.is_ok(), "{:#}", mine.unwrap_err());
+    }
+
+    #[test]
+    fn the_holders_note_can_be_read_while_the_lock_is_held() {
+        // Windows locks a byte range against reading too, so the note has to
+        // live outside the range the lock uses — otherwise the only process
+        // that needs to read it is the one process that cannot.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("test.db");
+        let _held = take_writer(&db, "перенос копий").unwrap();
+        assert!(note_of(&lock_path(&db)).contains("перенос копий"));
     }
 
     #[test]
