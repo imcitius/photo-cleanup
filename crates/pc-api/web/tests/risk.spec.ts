@@ -31,6 +31,12 @@ async function archiveOf(request: APIRequestContext, name: string) {
   return archive;
 }
 
+// One server serves every test here, so each starts from an empty index:
+// otherwise a plan sees the archives of the tests before it.
+test.beforeEach(async ({ request }) => {
+  await request.post("/api/reset", { data: { confirmation: "RESET" } });
+});
+
 async function job(
   request: APIRequestContext,
   kind: string,
@@ -126,4 +132,84 @@ test("quarantine left by an older database comes home to where it came from", as
   // And it is a move like any other: the journal can take it back.
   const journal = await (await request.get("/api/journal")).json();
   expect(journal.some((j: { op: string }) => j.op === "adopt")).toBe(true);
+});
+
+test("deleting for good takes the bytes, and only after the word", async ({
+  page,
+  request,
+}) => {
+  // The other purge test answers a made-up server. This one watches the file.
+  const archive = await archiveOf(request, "purge");
+  await page.goto("/#quarantine");
+  const data = await jpeg(page, 60);
+  writeFileSync(join(archive, "frame.jpg"), Buffer.from(data, "base64"));
+  writeFileSync(join(archive, "frame copy.jpg"), Buffer.from(data, "base64"));
+  await job(request, "index", { roots: [archive], min_size: 0 });
+  await job(request, "families", {});
+
+  const plan = await (
+    await request.post("/api/preview", {
+      data: { kind: "plan-apply", params: { roles: ["copy"] } },
+    })
+  ).json();
+  expect(plan.total_files).toBe(1);
+  const quarantined = plan.items[0].dst;
+  await request.post("/api/jobs", {
+    data: {
+      kind: "plan-apply",
+      params: { roles: ["copy"] },
+      plan_token: plan.token,
+      confirmation: "DELETE",
+    },
+  });
+  await expect.poll(() => existsSync(quarantined)).toBe(true);
+
+  // The holding period is counted in whole seconds, and nothing is offered
+  // for deletion on the same second it arrived.
+  await expect
+    .poll(
+      async () =>
+        (
+          await (
+            await request.post("/api/preview", {
+              data: { kind: "derived-purge", params: { older_than_secs: 0 } },
+            })
+          ).json()
+        ).total_files,
+      { timeout: 5000 },
+    )
+    .toBe(1);
+  await page.reload();
+  await page
+    .getByRole("spinbutton", { name: "Held for at least, days" })
+    .fill("0");
+  await page
+    .getByRole("button", { name: "Check before deleting", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Delete for good", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("checkbox").check();
+  // The wrong word is not the word.
+  await dialog.getByRole("textbox").fill("delete");
+  await expect(
+    dialog.getByRole("button", { name: "Delete for good", exact: true }),
+  ).toBeDisabled();
+  expect(existsSync(quarantined)).toBe(true);
+
+  await dialog.getByRole("textbox").fill("DELETE");
+  await dialog
+    .getByRole("button", { name: "Delete for good", exact: true })
+    .click();
+  await expect.poll(() => existsSync(quarantined)).toBe(false);
+  // What was kept is untouched, and the journal says the entry is purged.
+  expect(existsSync(join(archive, "frame.jpg"))).toBe(true);
+  const journal = await (await request.get("/api/journal")).json();
+  expect(
+    journal.some(
+      (j: { status: string; dst: string | null }) =>
+        j.dst === quarantined && j.status === "purged",
+    ),
+  ).toBe(true);
 });
