@@ -442,6 +442,11 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
                 .get("container")
                 .and_then(serde_json::Value::as_str);
             let report = pc_work::thumbs::rebuild(&db, &st.thumbs, all, container, control)?;
+            // Files that could not be read are refusals like any other, so
+            // the job page names them instead of quietly counting them.
+            for (path, why) in &report.refused {
+                control.refuse(path, why);
+            }
             // The phase line is what the job page shows when it is over.
             control.begin(&report.describe(), 0, 0)?;
             Ok(())

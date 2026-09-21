@@ -21,6 +21,11 @@ use rayon::prelude::*;
 /// Below this the square holds one tone and no picture.
 const FLAT: f32 = 8.0;
 
+/// How many refusals are kept with their reason. A volume that went away
+/// takes every file with it, and sixty thousand identical lines say no more
+/// than the first few — but the count still has to be right.
+const KEPT_REASONS: usize = 50;
+
 #[derive(Debug, Default)]
 pub struct Report {
     pub checked: u64,
@@ -29,6 +34,8 @@ pub struct Report {
     /// the thumbnail that was stored.
     pub still_flat: u64,
     pub failed: u64,
+    /// Path and reason for the first refusals, in the order they happened.
+    pub refused: Vec<(String, String)>,
 }
 
 impl Report {
@@ -41,6 +48,13 @@ impl Report {
             self.still_flat,
             self.failed
         )
+    }
+
+    /// The reasons, for a report that has room for them.
+    pub fn reasons(&self) -> impl Iterator<Item = String> + '_ {
+        self.refused
+            .iter()
+            .map(|(path, why)| format!("{path} — {why}"))
     }
 }
 
@@ -69,6 +83,21 @@ struct Fixed {
 
 fn bits_to_i64(v: u64) -> i64 {
     i64::from_le_bytes(v.to_le_bytes())
+}
+
+/// What the filesystem said, in words that tell the cases apart: a file that
+/// was moved or deleted, a file behind permissions, and a disk that answered
+/// with something else are three different problems on a NAS.
+fn unreadable(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => {
+            pc_core::tr!("файла нет на месте", "the file is not there").into()
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            pc_core::tr!("нет доступа к файлу", "no permission to read it").into()
+        }
+        _ => e.to_string(),
+    }
 }
 
 /// Whether the stored thumbnail is worth keeping.
@@ -127,6 +156,14 @@ pub fn rebuild(
     let checked = AtomicU64::new(0);
     let failed = AtomicU64::new(0);
     let still_flat = AtomicU64::new(0);
+    let refused: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+    let refuse = |path: &str, why: String| {
+        failed.fetch_add(1, Ordering::Relaxed);
+        let mut kept = refused.lock().unwrap();
+        if kept.len() < KEPT_REASONS {
+            kept.push((path.to_string(), why));
+        }
+    };
     // (file id, key) for the ones that were made again.
     let made: Vec<Fixed> = rows
         .par_iter()
@@ -140,11 +177,20 @@ pub fn rebuild(
                 return None;
             }
             let path = std::path::Path::new(&row.path);
-            let size = std::fs::metadata(path).ok()?.len();
+            // A file that is not there is not a file that needs nothing: on a
+            // NAS it usually means the volume went away, and passing over it
+            // in silence made the report say everything was fine.
+            let size = match std::fs::metadata(path) {
+                Ok(md) => md.len(),
+                Err(e) => {
+                    refuse(&row.path, unreadable(&e));
+                    return None;
+                }
+            };
             let read = match pc_image::read_for_probe(path, size) {
-                Ok(r) => r,
-                Err(_) => {
-                    failed.fetch_add(1, Ordering::Relaxed);
+                Ok(e) => e,
+                Err(e) => {
+                    refuse(&row.path, format!("{e:#}"));
                     return None;
                 }
             };
@@ -152,8 +198,8 @@ pub fn rebuild(
             let probe =
                 match pc_image::probe_parts(path, &read.head, read.preview.as_deref(), &name) {
                     Ok(p) => p,
-                    Err(_) => {
-                        failed.fetch_add(1, Ordering::Relaxed);
+                    Err(e) => {
+                        refuse(&row.path, format!("{e:#}"));
                         return None;
                     }
                 };
@@ -162,8 +208,8 @@ pub fn rebuild(
             }
             let key = match store.put(&probe.thumb.jpeg) {
                 Ok(key) => key,
-                Err(_) => {
-                    failed.fetch_add(1, Ordering::Relaxed);
+                Err(e) => {
+                    refuse(&row.path, format!("{e:#}"));
                     return None;
                 }
             };
@@ -239,5 +285,50 @@ pub fn rebuild(
         rebuilt: made.len() as u64,
         still_flat: still_flat.load(Ordering::Relaxed),
         failed: failed.load(Ordering::Relaxed),
+        refused: refused.into_inner().unwrap_or_default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_that_is_not_there_is_a_refusal_not_a_silence() {
+        // On a NAS a missing path usually means the volume went away, and
+        // the pass used to step over it without a word: the report said
+        // "checked 1, rebuilt 0, unreadable 0" — everything fine, nothing
+        // done. The count has to say what happened, and the reason has to
+        // name the file.
+        let tmp = tempfile::tempdir().unwrap();
+        let photo = tmp.path().join("photo.bmp");
+        std::fs::write(&photo, b"pretend").unwrap();
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+        db.upsert_file(
+            &pc_db::NewFile {
+                path: photo.display().to_string(),
+                name: "photo.bmp".into(),
+                // The pass only looks at files the index has read before.
+                phash: Some(1),
+                ..Default::default()
+            },
+            run,
+        )
+        .unwrap();
+        std::fs::remove_file(&photo).unwrap();
+
+        let store = ThumbStore::new(tmp.path().join("thumbs"));
+        let report = rebuild(&db, &store, true, None, &Control::default()).unwrap();
+        assert_eq!(report.checked, 1);
+        assert_eq!(report.rebuilt, 0);
+        assert_eq!(report.failed, 1, "пропавший файл посчитан исправным");
+        assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
+        assert_eq!(report.refused[0].0, photo.display().to_string());
+        assert!(
+            report.refused[0].1.contains("not there") || report.refused[0].1.contains("не место"),
+            "причина не названа: {:?}",
+            report.refused[0]
+        );
+    }
 }

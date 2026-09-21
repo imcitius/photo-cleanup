@@ -547,6 +547,15 @@ fn main() -> Result<()> {
                 &pc_core::work::Control::default(),
             )?;
             println!("{}", report.describe());
+            for line in report.reasons() {
+                println!("  {line}");
+            }
+            if report.failed as usize > report.refused.len() {
+                println!(
+                    "  … and {} more",
+                    report.failed as usize - report.refused.len()
+                );
+            }
             Ok(())
         }
         Command::Catalogs => cmd_catalogs(&db),

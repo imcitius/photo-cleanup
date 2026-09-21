@@ -965,6 +965,7 @@ dependencies = [
  "pc-walk",
  "rayon",
  "rusqlite",
+ "tempfile",
  "tracing",
  "windows-sys 0.59.0",
 ]
