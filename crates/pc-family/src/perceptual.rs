@@ -537,7 +537,7 @@ mod turn_tests {
             id,
             // Regional hashes far apart, so the crop rule does not answer
             // first and the turn is what has to find these two.
-            crops: [id as u64 * 0xFFFF_0000_1234_5678; 5],
+            crops: [(id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15); 5],
             path: format!("/foto/{name}"),
             name: name.into(),
             camera_model: Some("ILCE-7M3".into()),
