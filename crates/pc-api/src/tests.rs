@@ -1209,3 +1209,145 @@ async fn a_job_will_not_start_while_something_else_is_writing() {
     let id = f.start("families", json!({})).await;
     assert_eq!(f.wait(id).await["state"], "done");
 }
+
+#[tokio::test]
+async fn a_marked_folder_makes_its_tree_the_originals_and_clears_the_copies() {
+    // The one sentence the other screens cannot say: "the originals are in
+    // here". It is about a tree, so it has to reach a file two folders down,
+    // and it has to survive the archive being read again.
+    let f = Fixture::new();
+    let shots = f.archive.join("shots/2014/june");
+    let mirror = f.archive.join("mirror/2014");
+    std::fs::create_dir_all(&shots).unwrap();
+    std::fs::create_dir_all(&mirror).unwrap();
+    let img = image::RgbImage::from_fn(320, 240, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+    });
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+        .encode_image(&img)
+        .unwrap();
+    std::fs::write(shots.join("DSC_0001.JPG"), &encoded).unwrap();
+    std::fs::write(mirror.join("DSC_0001.JPG"), &encoded).unwrap();
+
+    let id = f
+        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+    let id = f.start("families", json!({})).await;
+    assert_eq!(f.wait(id).await["state"], "done");
+
+    // The tree is walked, not typed: a folder holding nothing but one folder
+    // is passed through, so the first press lands on something real.
+    let (s, root) = f.req("GET", "/api/tree", Value::Null).await;
+    assert_eq!(s, 200, "{root}");
+    assert_eq!(root["files"], 2, "{root}");
+    let first = root["directories"][0]["path"].as_str().unwrap().to_string();
+    assert_eq!(first, f.archive.display().to_string(), "{root}");
+
+    let at = |p: &str| format!("/api/tree?path={}", urlencoding(p));
+    let (_, level) = f.req("GET", &at(&first), Value::Null).await;
+    let names: Vec<&str> = level["directories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["mirror/2014", "shots/2014/june"], "{level}");
+
+    let shots_dir = shots.display().to_string();
+    let (_, leaf) = f.req("GET", &at(&shots_dir), Value::Null).await;
+    assert_eq!(leaf["here"], 1, "{leaf}");
+    assert_eq!(leaf["entries"][0]["name"], "DSC_0001.JPG", "{leaf}");
+    assert_eq!(leaf["entries"][0]["original"], false, "{leaf}");
+
+    // Marked one level above the photographs: the rule has to reach them.
+    let marked = f.archive.join("shots").display().to_string();
+    let (s, v) = f
+        .req("POST", "/api/originals", json!({"path": marked}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["groups"], 1, "{v}");
+    assert_eq!(v["marks"], json!([marked]), "{v}");
+
+    let keeper: String = f
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .conn
+        .query_row(
+            "SELECT f.path FROM families fa JOIN files f ON f.id = fa.keeper_file",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        keeper.starts_with(&marked),
+        "хранимым остался файл вне отмеченной папки: {keeper}"
+    );
+
+    let (_, leaf) = f.req("GET", &at(&shots_dir), Value::Null).await;
+    assert_eq!(leaf["entries"][0]["original"], true, "{leaf}");
+    assert_eq!(leaf["covered"], json!(marked), "{leaf}");
+
+    // What follows from the mark: the copy elsewhere, and only it.
+    let plan = f
+        .preview("plan-apply", json!({"roles":["copy"],"originals":true}))
+        .await;
+    assert_eq!(plan["total_files"], 1, "{plan}");
+    let going = plan["items"][0]["path"].as_str().unwrap().to_string();
+    assert!(going.starts_with(&mirror.display().to_string()), "{plan}");
+    let done = f.apply(&plan).await;
+    assert_eq!(done["state"], "done", "{done}");
+    assert!(!mirror.join("DSC_0001.JPG").exists());
+    assert!(shots.join("DSC_0001.JPG").exists());
+
+    // And taking it back leaves nothing marked behind.
+    let (s, v) = f
+        .req(
+            "POST",
+            "/api/originals",
+            json!({"path": marked, "marked": false}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["marks"], json!([]), "{v}");
+}
+
+#[tokio::test]
+async fn a_plan_of_the_originals_is_empty_when_no_folder_is_marked() {
+    // The accident this must never have: a mark taken back, and a plan that
+    // quietly widens from "the copies of these folders" to "the archive".
+    let f = Fixture::new();
+    let img = image::RgbImage::from_fn(240, 180, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 30])
+    });
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+        .encode_image(&img)
+        .unwrap();
+    for n in ["a.jpg", "a copy.jpg"] {
+        std::fs::write(f.archive.join(n), &encoded).unwrap();
+    }
+    let id = f
+        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+    let id = f.start("families", json!({})).await;
+    assert_eq!(f.wait(id).await["state"], "done");
+
+    let whole = f.preview("plan-apply", json!({"roles":["copy"]})).await;
+    assert_eq!(whole["total_files"], 1, "{whole}");
+    let scoped = f
+        .preview("plan-apply", json!({"roles":["copy"],"originals":true}))
+        .await;
+    assert_eq!(scoped["total_files"], 0, "{scoped}");
+}
+
+/// Percent-encoding for the one character a temporary path can contain that a
+/// query string reads as something else. The fixture's paths are otherwise
+/// plain, so a full encoder would be more machinery than the question needs.
+fn urlencoding(path: &str) -> String {
+    path.replace('%', "%25").replace(' ', "%20")
+}

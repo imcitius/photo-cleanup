@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { post, useResource } from "./api";
 import { Button, ErrorBox, Icon, Loading, Modal, Notice } from "./components";
 import { Families, SeriesPage, Categories } from "./curation";
+import { Tree } from "./tree";
 import {
   Overview,
   Setup,
@@ -23,6 +24,7 @@ const navigation: { section: string; items: [Page, string][] }[] = [
     items: [
       ["overview", "grid"],
       ["setup", "folder"],
+      ["tree", "folder"],
       ["families", "layers"],
       ["series", "series"],
       ["categories", "image"],
@@ -151,6 +153,16 @@ function App() {
           start={jobs.start}
           disabled={!!jobs.active}
           onSettings={settings.reload}
+        />
+      );
+      break;
+    case "tree":
+      content = (
+        <Tree
+          revision={jobs.revision}
+          disabled={!!jobs.active}
+          start={jobs.start}
+          onChange={jobs.refresh}
         />
       );
       break;

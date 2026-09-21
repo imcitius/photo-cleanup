@@ -163,6 +163,29 @@ pub fn dir_name(path: &str) -> &str {
     split_path(path).0
 }
 
+/// True when `path` is the directory `dir` or lies anywhere beneath it.
+///
+/// Prefix comparison alone is not this question: `/foto/2014-old` starts with
+/// `/foto/2014` and is a different folder. The separator has to be there, or
+/// the path has to be the folder itself.
+///
+/// A trailing separator on `dir` is ignored, so a folder named by hand as
+/// `/foto/` and one read from the index as `/foto` mean the same thing.
+pub fn under(path: &str, dir: &str) -> bool {
+    let dir = dir.trim_end_matches(SEPARATORS);
+    // The root of a Unix filesystem trims away to nothing, and everything is
+    // under it. An empty `dir` from anywhere else means "no folder given",
+    // and the caller has to say what that means; here it covers everything,
+    // which is what an unnarrowed scope is.
+    if dir.is_empty() {
+        return true;
+    }
+    let Some(rest) = path.strip_prefix(dir) else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with(SEPARATORS)
+}
+
 /// A path with its leading separators removed, as after stripping a root off
 /// the front of one. Platform-aware for the same reason as `split_path`.
 pub fn trim_leading_separators(path: &str) -> &str {
@@ -230,6 +253,22 @@ mod path_tests {
         assert_eq!(split_path("/foto/2019/a.jpg"), ("/foto/2019", "a.jpg"));
         assert_eq!(split_path("a.jpg"), ("", "a.jpg"));
         assert_eq!(path_parts("/mnt/disk3/foto/"), ["mnt", "disk3", "foto"]);
+    }
+
+    #[test]
+    fn a_folder_contains_itself_and_what_lies_below_it() {
+        assert!(under("/foto/2014", "/foto/2014"));
+        assert!(under("/foto/2014/DSC_0001.JPG", "/foto/2014"));
+        assert!(under("/foto/2014/raw/DSC_0001.NEF", "/foto/2014"));
+        assert!(under("/foto/2014/DSC_0001.JPG", "/foto/2014/"));
+        assert!(under("/foto/2014/DSC_0001.JPG", "/"));
+    }
+
+    #[test]
+    fn a_name_that_merely_starts_the_same_is_a_different_folder() {
+        assert!(!under("/foto/2014-old/DSC_0001.JPG", "/foto/2014"));
+        assert!(!under("/foto/2015/DSC_0001.JPG", "/foto/2014"));
+        assert!(!under("/foto", "/foto/2014"));
     }
 
     #[cfg(not(windows))]

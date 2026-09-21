@@ -29,6 +29,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/jobs/{id}/events", get(jobs::events))
         .route("/api/preview", post(service::preview))
         .route("/api/fs", get(service::fs))
+        .route("/api/tree", get(service::tree))
+        .route(
+            "/api/originals",
+            get(service::originals).post(service::set_original_folder),
+        )
         .route("/api/catalogs", get(service::catalogs))
         .route("/api/journal", get(service::journal))
         .route("/api/runs", get(service::runs))

@@ -6,12 +6,12 @@ pub mod organize;
 pub mod schema;
 
 pub use files::{
-    FamilyRow, FileInfo, FileRow, IndexStats, MemberRow, NewFile, NewMeta, PlanRow,
-    SeriesMemberRow, SeriesRow,
+    FamilyBadge, FamilyRow, FileInfo, FileRow, IndexStats, MemberRow, NewFile, NewMeta, PlanRow,
+    SeriesMemberRow, SeriesRow, TreeFile,
 };
 pub use model::{
-    Bundle, BundleState, Catalog, JournalEntry, JournalStatus, Moved, NewBundle, NewCatalog,
-    NewJournalEntry, QuarantineFound,
+    Bundle, BundleState, Catalog, JournalEntry, JournalStatus, KeeperSource, Moved, NewBundle,
+    NewCatalog, NewJournalEntry, QuarantineFound,
 };
 pub use organize::OrganizeRow;
 

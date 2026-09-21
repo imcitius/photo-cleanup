@@ -4,6 +4,7 @@ pub mod categories;
 pub mod curation;
 pub mod folders;
 pub mod links;
+pub mod originals;
 pub mod perceptual;
 pub mod plan;
 pub mod quality;
@@ -266,6 +267,9 @@ pub fn build_controlled(
     // was settled into has to be settled again — otherwise the sequence
     // scatters back across folders on the next run.
     folders::settle_keepers(db)?;
+    // And a folder named as holding the originals is a standing rule, not a
+    // press: files indexed since it was named are inside it too.
+    originals::settle(db)?;
     db.conn.execute_batch("COMMIT")?;
 
     Ok(report)

@@ -101,6 +101,10 @@ pub struct Scope {
     /// "clear out this folder" but "the originals are here, take away what
     /// duplicates them, wherever it lies".
     pub keeper_folder: Option<String>,
+    /// The same question asked of a tree rather than a directory: groups whose
+    /// kept file lies anywhere beneath one of these folders. This is what the
+    /// marks on the archive tree narrow a plan by, and there can be several.
+    pub keeper_under: Vec<String>,
 }
 
 fn keeper_id_of(db: &Db, family: i64) -> i64 {
@@ -119,10 +123,18 @@ pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
 }
 
 pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
+    // One folder narrows in SQL; several cannot, and the rows are filtered by
+    // the kept file afterwards either way. The narrowing is an economy, not
+    // the answer — it saves reading the archive twice for a press on one
+    // group, and buys nothing at all when the whole archive is the scope.
+    let keeper_prefix = scope
+        .keeper_folder
+        .clone()
+        .or_else(|| (scope.keeper_under.len() == 1).then(|| scope.keeper_under[0].clone()));
     let rows = db.plan_rows_scoped(
         scope.family,
         scope.folder.as_deref(),
-        scope.keeper_folder.as_deref(),
+        keeper_prefix.as_deref(),
     )?;
     let protected = if policy.respect_lightroom {
         CurationIndex::build(db.lightroom_protected()?)

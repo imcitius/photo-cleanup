@@ -296,9 +296,59 @@ export interface Category {
     thumb: string | null;
   }[];
 }
+/** One folder of the archive tree, as the browser walks it. */
+export interface TreeDir {
+  name: string;
+  path: string;
+  /** Files anywhere beneath it, and what they weigh. */
+  files: number;
+  bytes: number;
+  /** This exact folder carries a mark of its own. */
+  marked: boolean;
+  /** The mark that covers it — itself, or one further up. */
+  covered: string | null;
+}
+
+/** One indexed file sitting directly in the folder being shown. */
+export interface TreeEntry {
+  file_id: number;
+  name: string;
+  path: string;
+  size: number;
+  width: number | null;
+  height: number | null;
+  thumb: string | null;
+  skipped_reason: string | null;
+  family_id: number | null;
+  /** How many files the group holds; 1 means nothing to choose between. */
+  members: number;
+  is_keeper: boolean;
+  role: string | null;
+  role_label: string | null;
+  /** True when a mark on this folder or one above it makes it an original. */
+  original: boolean;
+}
+
+export interface TreeView {
+  path: string;
+  parent: string | null;
+  marked: boolean;
+  covered: string | null;
+  /** Every folder marked in the archive, not only the ones shown here. */
+  marks: string[];
+  files: number;
+  bytes: number;
+  /** Files directly in this folder, and how many of them were sent. */
+  here: number;
+  shown: number;
+  directories: TreeDir[];
+  entries: TreeEntry[];
+}
+
 export type Page =
   | "overview"
   | "setup"
+  | "tree"
   | "families"
   | "series"
   | "categories"

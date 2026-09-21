@@ -28,6 +28,28 @@ impl BundleState {
     }
 }
 
+/// Who chose the file a group keeps.
+///
+/// Both kinds sit in `manual_keepers`, because both outrank what the tool
+/// worked out on its own. They differ in what may undo them: a rule is undone
+/// by taking the rule back, a person's answer only by that person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeeperSource {
+    /// Pressed on one group, on the groups screen.
+    Hand,
+    /// Follows from a folder named as holding the originals.
+    Folder,
+}
+
+impl KeeperSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hand => "hand",
+            Self::Folder => "folder",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalStatus {
     Pending,

@@ -2473,3 +2473,90 @@ kbd {
   min-height: 23px;
   margin-top: 5px;
 }
+
+/* The archive tree: one folder open at a time.
+   A row is a target for walking into and a target for deciding about, and
+   the two must not be one button — a press meant as "open this" that instead
+   renamed ten thousand groups is exactly the accident this screen invites. */
+.tree-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  height: 100%;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--subtle);
+  font-size: 12px;
+}
+.tree-row.marked {
+  border-left: 3px solid var(--accent);
+  padding-left: 10px;
+}
+.tree-open {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tree-open > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.tree-open strong {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.tree-open:hover strong {
+  color: var(--accent);
+}
+.tree-open .muted {
+  font-size: 11px;
+}
+.tree-row .folder-note {
+  flex-basis: 100%;
+}
+.tree-bar {
+  justify-content: space-between;
+}
+.tree-crumbs {
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 12px;
+}
+.mark-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mark-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.mark-row > .link {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+}
+/* A file that is an original because of where it lies. */
+.photo-card.original {
+  border-color: var(--accent);
+}
+.tree-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}

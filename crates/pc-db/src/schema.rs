@@ -386,6 +386,27 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE files          DROP COLUMN full_hash;
     CREATE INDEX journal_target ON journal(target_id);
     "#,
+    // 017 — folders named as holding the originals.
+    //
+    // Going through ten thousand groups one at a time is the work this saves,
+    // and naming one folder at a time barely saves it: an archive is a tree,
+    // and the answer "the originals are in here" is about a tree, not about
+    // one directory of it.
+    r#"
+    -- Folders the user has said hold the archive's originals. The mark is a
+    -- standing rule, not a one-off press: it covers everything beneath the
+    -- folder at any depth, and it is applied again every time the groups are
+    -- rebuilt, so files indexed later are covered too.
+    CREATE TABLE original_folders(
+        path      TEXT    PRIMARY KEY,
+        marked_at INTEGER NOT NULL
+    );
+
+    -- Who chose this kept file. A mark on a folder and a press on one file
+    -- write to the same table, and taking a folder's mark back has to undo
+    -- the first without touching the second.
+    ALTER TABLE manual_keepers ADD COLUMN source TEXT NOT NULL DEFAULT 'hand';
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

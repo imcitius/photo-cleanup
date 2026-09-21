@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension, Row};
 
-use crate::Db;
+use crate::{Db, KeeperSource};
 
 #[derive(Debug, Clone, Default)]
 pub struct NewFile {
@@ -764,8 +764,27 @@ impl Db {
     /// Runs inside the caller's transaction — every caller already holds one,
     /// because the decision usually comes with other changes beside it.
     pub fn set_manual_keeper(&self, family_id: i64, file_id: i64) -> Result<bool> {
+        self.set_manual_keeper_from(family_id, file_id, KeeperSource::Hand)
+    }
+
+    /// The same, saying where the decision came from.
+    ///
+    /// A press on one file and a mark on a folder both end up here, and they
+    /// are not equally revocable: taking a folder's mark back has to undo
+    /// what the folder decided and leave what a person decided alone. So the
+    /// row says which it was.
+    pub fn set_manual_keeper_from(
+        &self,
+        family_id: i64,
+        file_id: i64,
+        source: KeeperSource,
+    ) -> Result<bool> {
+        let previous = self.family_keeper(family_id)?;
         if !self.set_family_keeper(family_id, file_id)? {
             return Ok(false);
+        }
+        if let Some(previous) = previous.filter(|p| *p != file_id) {
+            self.trade_roles(family_id, previous, file_id)?;
         }
         self.conn.execute(
             "DELETE FROM manual_keepers WHERE file_id IN
@@ -773,12 +792,230 @@ impl Db {
             [family_id],
         )?;
         self.conn.execute(
-            "INSERT OR REPLACE INTO manual_keepers(file_id, marked_at) VALUES(?1, ?2)",
-            params![file_id, crate::pc_core_now()],
+            "INSERT OR REPLACE INTO manual_keepers(file_id, marked_at, source) VALUES(?1, ?2, ?3)",
+            params![file_id, crate::pc_core_now(), source.as_str()],
         )?;
         self.conn
             .execute("DELETE FROM manual_rejects WHERE file_id = ?1", [file_id])?;
         Ok(true)
+    }
+
+    /// Hand the outgoing keeper's role to the incoming one, and its own back.
+    ///
+    /// A copy is a copy *of the file being kept*. The roles were settled when
+    /// the group was built, against whichever file it kept then: the keeper
+    /// held whatever it is — a raw frame, an unknown — and the file beside it
+    /// was called a copy of that. Changing which one is kept turns the
+    /// sentence around, and leaving the old words in place says the opposite
+    /// of what is true: the file now set aside is described as the one
+    /// everything else duplicates, and no plan will ever offer to move it.
+    ///
+    /// Only when the two hold the same picture. That is the only case where
+    /// the claim "this is a copy of that" survives being reversed; between a
+    /// scan and the export made from it, neither is a copy of the other and
+    /// the roles stay as they were.
+    fn trade_roles(&self, family_id: i64, old: i64, new: i64) -> Result<()> {
+        let identity = |id: i64| -> rusqlite::Result<Option<Vec<u8>>> {
+            self.conn.query_row(
+                "SELECT COALESCE(content_hash, pixel_hash) FROM files WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+        };
+        let (before, after) = (identity(old)?, identity(new)?);
+        if before.is_none() || before != after {
+            return Ok(());
+        }
+        let role_of = |id: i64| -> rusqlite::Result<Option<String>> {
+            self.conn
+                .query_row(
+                    "SELECT role FROM family_members WHERE family_id = ?1 AND file_id = ?2",
+                    params![family_id, id],
+                    |r| r.get(0),
+                )
+                .optional()
+        };
+        let (Some(old_role), Some(new_role)) = (role_of(old)?, role_of(new)?) else {
+            return Ok(());
+        };
+        for (id, role) in [(old, new_role), (new, old_role)] {
+            self.conn.execute(
+                "UPDATE family_members SET role = ?3 WHERE family_id = ?1 AND file_id = ?2",
+                params![family_id, id, role],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Whether a group's kept file was chosen by a person rather than by a
+    /// standing rule. A rule never overrules a person.
+    pub fn keeper_chosen_by_hand(&self, family_id: i64) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM manual_keepers k
+               JOIN family_members m ON m.file_id = k.file_id
+              WHERE m.family_id = ?1 AND k.source = 'hand'",
+            [family_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Every file the index holds, as the folder tree needs it.
+    ///
+    /// The whole archive in one query, because that is the question: the size
+    /// of a folder is the size of everything beneath it, and nothing smaller
+    /// than the whole subtree answers it. An archive of sixty thousand files
+    /// is a few megabytes of paths — less than one of its photographs — and
+    /// walking it in memory takes milliseconds, where asking SQLite once per
+    /// folder would take a query per click and still not have the totals.
+    pub fn tree_files(&self) -> Result<Vec<TreeFile>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, path, size, width, height, thumb_key, skipped_reason
+               FROM files WHERE state = 'present' ORDER BY path",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok(TreeFile {
+                    id: r.get(0)?,
+                    path: r.get(1)?,
+                    size: r.get(2)?,
+                    width: r.get(3)?,
+                    height: r.get(4)?,
+                    thumb_key: r.get(5)?,
+                    skipped_reason: r.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// What each of these files is to its group, for the tree's file list.
+    ///
+    /// Asked for one folder's worth of files at a time, so the list can say
+    /// which of them a group keeps and which are copies of something else
+    /// without a query per row.
+    pub fn family_badges(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, FamilyBadge>> {
+        let mut out = std::collections::HashMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let places = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut st = self.conn.prepare(&format!(
+            "SELECT fm.file_id, fm.family_id, fm.role, fa.keeper_file,
+                    (SELECT COUNT(*) FROM family_members x WHERE x.family_id = fm.family_id)
+               FROM family_members fm
+               JOIN families fa ON fa.id = fm.family_id
+              WHERE fm.file_id IN ({places})"
+        ))?;
+        let rows = st.query_map(rusqlite::params_from_iter(ids), |r| {
+            let file_id: i64 = r.get(0)?;
+            Ok((
+                file_id,
+                FamilyBadge {
+                    family_id: r.get(1)?,
+                    role: r.get(2)?,
+                    is_keeper: r.get::<_, Option<i64>>(3)? == Some(file_id),
+                    members: r.get(4)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (id, badge) = row?;
+            out.insert(id, badge);
+        }
+        Ok(out)
+    }
+
+    /// Folders the user has named as holding the archive's originals.
+    pub fn original_folders(&self) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT path FROM original_folders ORDER BY path")?;
+        let rows = st
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(rows)
+    }
+
+    /// Say that this folder — and everything beneath it — holds originals.
+    ///
+    /// A folder already covered by a mark further up is not written down
+    /// again: the tree would then carry two rows saying the same thing, and
+    /// taking the inner one back would look like it had changed something.
+    /// Marks *below* this one are absorbed for the same reason.
+    ///
+    /// Runs inside the caller's transaction: naming a folder and applying
+    /// what follows from it is one decision, and half of it is worse than
+    /// neither half.
+    pub fn mark_original_folder(&self, path: &str) -> Result<()> {
+        let existing = self.original_folders()?;
+        if existing.iter().any(|d| pc_core::under(path, d)) {
+            return Ok(());
+        }
+        for inner in existing.iter().filter(|d| pc_core::under(d, path)) {
+            self.conn
+                .execute("DELETE FROM original_folders WHERE path = ?1", [inner])?;
+        }
+        self.conn.execute(
+            "INSERT OR REPLACE INTO original_folders(path, marked_at) VALUES(?1, ?2)",
+            params![path, crate::pc_core_now()],
+        )?;
+        Ok(())
+    }
+
+    /// Take the mark back, and with it every kept file it chose.
+    ///
+    /// Only the ones it chose: a file the user pressed keeps its mark. What
+    /// the rule decided and nothing else now says is undone, and the groups
+    /// left without an answer fall back to their best version, which is where
+    /// they were before the folder was ever named.
+    /// Runs inside the caller's transaction, for the same reason as the mark.
+    pub fn unmark_original_folder(&self, path: &str) -> Result<usize> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM original_folders WHERE path = ?1", [path])?;
+        let still: Vec<String> = self.original_folders()?;
+        let freed: Vec<(i64, i64)> = {
+            let mut st = self.conn.prepare(
+                "SELECT k.file_id, m.family_id, f.path
+                   FROM manual_keepers k
+                   JOIN files f          ON f.id = k.file_id
+                   JOIN family_members m ON m.file_id = k.file_id
+                  WHERE k.source = 'folder'",
+            )?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter()
+                .filter(|(_, _, p)| {
+                    pc_core::under(p, path) && !still.iter().any(|d| pc_core::under(p, d))
+                })
+                .map(|(file, family, _)| (file, family))
+                .collect()
+        };
+        for (file, family) in &freed {
+            self.conn
+                .execute("DELETE FROM manual_keepers WHERE file_id = ?1", [file])?;
+            self.conn.execute(
+                "UPDATE families SET keeper_file =
+                   (SELECT file_id FROM family_members
+                     WHERE family_id = ?1 ORDER BY COALESCE(quality, 0) DESC, file_id LIMIT 1)
+                  WHERE id = ?1",
+                [family],
+            )?;
+        }
+        Ok(removed)
     }
 
     /// Point a family at a different member as its best version.
@@ -962,6 +1199,28 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+}
+
+/// One file, as the folder tree reads it.
+#[derive(Debug, Clone)]
+pub struct TreeFile {
+    pub id: i64,
+    pub path: String,
+    pub size: i64,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub thumb_key: Option<String>,
+    pub skipped_reason: Option<String>,
+}
+
+/// What a file is to the group it belongs to.
+#[derive(Debug, Clone)]
+pub struct FamilyBadge {
+    pub family_id: i64,
+    pub role: String,
+    pub is_keeper: bool,
+    /// How many files the group holds. One means there is nothing to choose.
+    pub members: i64,
 }
 
 #[derive(Debug, Clone)]

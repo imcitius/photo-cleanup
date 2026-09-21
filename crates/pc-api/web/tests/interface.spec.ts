@@ -3,6 +3,7 @@ import AxeBuilder from "@axe-core/playwright";
 const tabs = [
   "Archive overview",
   "Inventory and index",
+  "Archive tree",
   "Duplicates and versions",
   "Bursts",
   "Kinds",

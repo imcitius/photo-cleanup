@@ -20,6 +20,24 @@ and the tool says which is which rather than calling them all duplicates.
 
 ![Duplicates and versions](assets/screenshots/duplicates.png)
 
+**Takes one sentence about a folder for an answer.** Ten thousand groups is
+ten thousand presses, and the person who owns the archive usually knows one
+thing about it: the photographs live over there, and everything else is a copy
+of them. The **Archive tree** screen shows the scanned tree the way a file
+manager would — folders, what they weigh, the frames inside them — and every
+folder has a button saying "The originals are here". The mark reaches all the
+way down: any file under it counts as an original, and every group holding
+such a file keeps it. One more button then quarantines the exact copies of
+what those folders hold, wherever in the archive they lie.
+
+The mark is a rule, not a press. It is stored, it survives the groups being
+rebuilt, and it is applied again afterwards, so files indexed into that folder
+tomorrow become originals too. Taking it back undoes what it decided and
+leaves alone what you decided by hand. Other versions of a shot — a scan and
+the export made from it — are never swept up by it: only a person can tell
+those apart, so the rule moves the kept file only where the pixels match and
+reports the rest as a number.
+
 **Tells a burst from a duplicate.** Seventy frames of a horse clearing a jump
 are seventy photographs. The tool groups them, ranks them on sharpness,
 clipping and detail, and lets you flip between two frames in the same spot —

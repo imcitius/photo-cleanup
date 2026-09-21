@@ -44,6 +44,7 @@ export const ui = {
   pages: {
     overview: "Archive overview",
     setup: "Inventory and index",
+    tree: "Archive tree",
     families: "Duplicates and versions",
     series: "Bursts",
     categories: "Kinds",
@@ -58,6 +59,7 @@ export const ui = {
     overview: "Everything happening to your archive, in one place.",
     setup:
       "Choose the folders on the server. We read the archive and map it out.",
+    tree: "Walk the folders as you would in a file manager and say where the originals are.",
     families:
       "One photograph, several files: copies, exports, smaller versions. The decision stays yours.",
     series: "Moments taken seconds apart. A burst is not a duplicate.",
@@ -95,6 +97,29 @@ export const ui = {
     pending: "Needs checking",
     undone: "Undone",
     purged: "Deleted for good",
+  },
+  tree: {
+    root: "The whole archive",
+    up: "Up",
+    mark: "The originals are here",
+    markHelp:
+      "Everything in this folder and in its subfolders, at any depth, counts as an original: every group keeps the file it holds here. The mark is remembered and applied again after every rebuild — files indexed into this folder later become originals too.",
+    unmark: "Take the mark back",
+    marks: "Folders holding the originals",
+    noMarks:
+      "No folder is marked yet. Open the one the photographs themselves live in and press “The originals are here”.",
+    folders: "Folders",
+    here: "Originals here",
+    noFolders: "No folders inside",
+    noFiles: "No indexed files in this folder",
+    fromIndex:
+      "The tree is built from the index: only what has been scanned is here. Nothing on disk is touched — a mark only changes which version of a shot the archive treats as the main one.",
+    original: "original",
+    quarantine: "Move the originals’ duplicates out",
+    quarantineHelp:
+      "What goes to quarantine is the exact copies of what the marked folders hold, wherever in the archive they lie. Other versions of a shot stay: only a person can tell those apart, and the “Duplicates and versions” page is where that is done.",
+    quarantineNoMarks:
+      "Mark at least one folder as holding the originals first: until then there is nothing to move.",
   },
   loading: "Loading…",
   retry: "Try again",
@@ -263,6 +288,14 @@ export const ui = {
 } as const satisfies Shape<typeof ru>;
 
 export const messages = {
+  otmecheno_grupp:
+    "Marked. Groups holding a file here: {0}; the kept file changed in {1}.",
+  otmetka_snyata: "The mark is off.",
+  drugoy_kadr_a_ne_kopiya:
+    "In {0} groups this folder holds a different frame rather than a copy of the kept file. Those are left alone: a person settles them, on the “Duplicates and versions” page.",
+  pokazany_pervye_iz: "Showing the first {0} of {1}.",
+  vnutri_otmechennoy_papki: "Inside the marked folder {0}",
+  versiy_v_gruppe: "versions: {0}",
   net_prevyu: "No preview",
   otkryt: "Open {0}",
   vybrat_papku_na_servere: "Choose a folder on the server",
