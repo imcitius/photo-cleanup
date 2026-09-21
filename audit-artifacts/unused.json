@@ -1,0 +1,107 @@
+{
+  "method": "AST locale accesses; preserve dynamically indexed subtrees. CSS class names absent as text from all TS/TSX; manual review required.",
+  "localeLeaves": 510,
+  "dynamicSubtrees": [
+    "ui.roleHelp",
+    "ui.jobs",
+    "ui.states",
+    "ui.dateSources",
+    "ui.units",
+    "ui.pages",
+    "ui.subtitles",
+    "ui.languageNames"
+  ],
+  "unusedLocaleCandidates": [
+    {
+      "key": "ui.app",
+      "line": 6
+    },
+    {
+      "key": "ui.file",
+      "line": 163
+    },
+    {
+      "key": "ui.files",
+      "line": 164
+    },
+    {
+      "key": "ui.size",
+      "line": 165
+    },
+    {
+      "key": "ui.path",
+      "line": 166
+    },
+    {
+      "key": "ui.source",
+      "line": 167
+    },
+    {
+      "key": "ui.destination",
+      "line": 168
+    },
+    {
+      "key": "ui.reason",
+      "line": 169
+    },
+    {
+      "key": "ui.protected",
+      "line": 170
+    },
+    {
+      "key": "ui.compareHelp",
+      "line": 187
+    },
+    {
+      "key": "ui.folderHasNoCopies",
+      "line": 223
+    },
+    {
+      "key": "ui.moveFolder",
+      "line": 225
+    },
+    {
+      "key": "ui.moveFolderHelp",
+      "line": 226
+    },
+    {
+      "key": "ui.previewHint",
+      "line": 245
+    },
+    {
+      "key": "ui.noPlan",
+      "line": 254
+    },
+    {
+      "key": "ui.willMove",
+      "line": 258
+    },
+    {
+      "key": "messages.v_masshtabe_1_1_peretaskivayte_kadr_panoramirovanie_sinhronnoe_dl",
+      "line": 290
+    },
+    {
+      "key": "messages.zavershena_s_otkazami",
+      "line": 347
+    },
+    {
+      "key": "messages.pokazat_otkazy",
+      "line": 351
+    },
+    {
+      "key": "messages.iz_papki_uedet",
+      "line": 575
+    },
+    {
+      "key": "messages.dubli_etih_grupp",
+      "line": 576
+    }
+  ],
+  "cssClassCount": 177,
+  "unusedCssCandidates": [
+    {
+      "name": "event-actions",
+      "line": 1993
+    }
+  ]
+}

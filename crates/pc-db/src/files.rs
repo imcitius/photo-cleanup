@@ -23,6 +23,8 @@ pub struct NewFile {
     pub pixel_source: Option<String>,
     pub partial_hash: Option<Vec<u8>>,
     pub pixel_hash: Option<Vec<u8>>,
+    pub content_hash: Option<Vec<u8>>,
+    pub phash_canon: Option<i64>,
     pub phash: Option<i64>,
     pub dhash: Option<i64>,
     pub phash_crops: Option<Vec<u8>>,
@@ -128,13 +130,16 @@ impl Db {
         let found: Option<i64> = self
             .conn
             .query_row(
-                // A file counts as done only if it has a thumbnail to show,
-                // or a reason why it never will. Without that a frame whose
-                // thumbnail failed stays a grey square for good: every later
-                // run sees an indexed file and skips it.
+                // A file counts as done only if it has a thumbnail to show
+                // and the evidence a copy is judged by — or a reason why it
+                // never will. Without that a frame whose thumbnail failed
+                // stays a grey square for good, and an archive indexed before
+                // the evidence existed never gains it: every later run sees
+                // an indexed file and skips it.
                 "SELECT 1 FROM files
                   WHERE path = ?1 AND size = ?2 AND mtime = ?3 AND inode = ?4
-                    AND ((phash IS NOT NULL AND thumb_key IS NOT NULL)
+                    AND ((phash IS NOT NULL AND thumb_key IS NOT NULL
+                          AND content_hash IS NOT NULL)
                          OR skipped_reason IS NOT NULL)",
                 params![path, size, mtime, inode],
                 |r| r.get(0),
@@ -151,9 +156,9 @@ impl Db {
                                skipped_reason, indexed_run, first_seen_run, last_seen_run,
                                sharpness, clip_low, clip_high, entropy, contrast,
                                saturation, white_fraction, bimodality, text_rows, text_banding,
-                               chroma, tonal_range)
+                               chroma, tonal_range, content_hash, phash_canon)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
-                     ?21,?22,?22,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34)
+                     ?21,?22,?22,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36)
              ON CONFLICT(path) DO UPDATE SET
                  name=excluded.name, disk=excluded.disk, dev=excluded.dev,
                  inode=excluded.inode, nlink=excluded.nlink, size=excluded.size,
@@ -168,7 +173,8 @@ impl Db {
                  clip_low=excluded.clip_low, clip_high=excluded.clip_high,
                  entropy=excluded.entropy, contrast=excluded.contrast,
                  saturation=excluded.saturation, chroma=excluded.chroma,
-                 tonal_range=excluded.tonal_range, white_fraction=excluded.white_fraction,
+                 tonal_range=excluded.tonal_range, content_hash=excluded.content_hash,
+                 phash_canon=excluded.phash_canon, white_fraction=excluded.white_fraction,
                  bimodality=excluded.bimodality, text_rows=excluded.text_rows,
                  text_banding=excluded.text_banding",
             params![
@@ -205,7 +211,9 @@ impl Db {
                 f.text_rows,
                 f.text_banding,
                 f.chroma,
-                f.tonal_range
+                f.tonal_range,
+                f.content_hash,
+                f.phash_canon
             ],
         )?;
         Ok(self.conn.query_row(
@@ -361,7 +369,13 @@ pub struct FileInfo {
     pub pixel_source: String,
     pub partial_hash: Option<Vec<u8>>,
     pub pixel_hash: Option<Vec<u8>>,
+    /// The frame as shown, hashed whole and in colour: the evidence a copy
+    /// needs. Empty for archives indexed before it existed.
+    pub content_hash: Option<Vec<u8>>,
     pub phash: u64,
+    /// Perceptual hash of the frame's smallest-reading turn, so a rotated
+    /// duplicate meets its original.
+    pub phash_canon: u64,
     pub dhash: u64,
     pub crops: [u64; 5],
     pub thumb_key: Option<String>,
@@ -432,7 +446,8 @@ impl Db {
                     m.dng_original_raw, m.lens,
                     f.sharpness, f.clip_low, f.clip_high, f.entropy, f.contrast,
                     f.saturation, f.white_fraction, f.bimodality, f.text_rows,
-                    f.text_banding, f.chroma, f.tonal_range
+                    f.text_banding, f.chroma, f.tonal_range,
+                    f.content_hash, f.phash_canon
                FROM files f LEFT JOIN meta m ON m.file_id = f.id
               WHERE f.phash IS NOT NULL AND f.state = 'present'
               ORDER BY f.id",
@@ -475,6 +490,8 @@ impl Db {
                     text_banding: r.get(32)?,
                     chroma: r.get(33)?,
                     tonal_range: r.get(34)?,
+                    content_hash: r.get(35)?,
+                    phash_canon: r.get::<_, Option<i64>>(36)?.unwrap_or(0) as u64,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -542,6 +559,8 @@ pub struct MemberRow {
     /// What the pixels hash to. A role says what a file is; this says whether
     /// it is the same picture as the one being kept.
     pub pixel_hash: Option<Vec<u8>>,
+    /// The whole frame in colour: what "the same picture" means now.
+    pub content_hash: Option<Vec<u8>>,
     /// The user looked at this file and said it can go, whatever its role.
     pub is_rejected: bool,
     pub path: String,
@@ -629,7 +648,7 @@ impl Db {
         let mut st = self.conn.prepare(
             "SELECT fm.file_id, f.path, f.name, fm.role, f.size, f.width, f.height,
                     f.container, fm.quality, fm.breakdown, fm.evidence, f.thumb_key,
-                    f.pixel_hash, r.file_id IS NOT NULL
+                    f.pixel_hash, r.file_id IS NOT NULL, f.content_hash
                FROM family_members fm
                JOIN files f ON f.id = fm.file_id
                LEFT JOIN manual_rejects r ON r.file_id = fm.file_id
@@ -654,6 +673,7 @@ impl Db {
                     thumb_key: r.get(11)?,
                     pixel_hash: r.get(12)?,
                     is_rejected: r.get(13)?,
+                    content_hash: r.get(14)?,
                     is_keeper: Some(file_id) == keeper,
                 })
             })?
@@ -784,6 +804,7 @@ impl Db {
                     dev: r.get(7)?,
                     disk: r.get(8)?,
                     pixel_hash: None,
+                    content_hash: None,
                     is_keeper: false,
                 })
             })?
@@ -813,7 +834,7 @@ impl Db {
         let mut st = self.conn.prepare(
             "SELECT fm.family_id, fm.file_id, fm.role, f.path, f.size, f.width, f.height,
                     f.mtime, f.inode, f.dev, f.disk, f.pixel_hash,
-                    fa.keeper_file
+                    fa.keeper_file, f.content_hash
                FROM family_members fm
                JOIN files f    ON f.id = fm.file_id
                JOIN families fa ON fa.id = fm.family_id
@@ -845,6 +866,7 @@ impl Db {
                         dev: r.get(9)?,
                         disk: r.get(10)?,
                         pixel_hash: r.get(11)?,
+                        content_hash: r.get(13)?,
                         is_keeper: r.get::<_, Option<i64>>(12)? == Some(file_id),
                     })
                 },
@@ -868,6 +890,7 @@ pub struct PlanRow {
     pub dev: i64,
     pub disk: String,
     pub pixel_hash: Option<Vec<u8>>,
+    pub content_hash: Option<Vec<u8>>,
     pub is_keeper: bool,
 }
 
@@ -1135,6 +1158,7 @@ impl Db {
                     evidence: None,
                     thumb_key: r.get(11)?,
                     pixel_hash: None,
+                    content_hash: None,
                     is_rejected: false,
                     is_keeper: false,
                 })

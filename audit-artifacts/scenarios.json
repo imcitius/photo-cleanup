@@ -1,0 +1,26 @@
+{
+  "all_300_seconds": 0.926,
+  "automatic_candidates": 150,
+  "300_file_quarantine_undo_sha256_identical": true,
+  "300_file_organize_undo_sha256_identical": true,
+  "rebuild_300_thumbnails_seconds": 0.386,
+  "last_manual_choice": {
+    "expected": 12,
+    "actual_after_rebuild": 1,
+    "preserved": false
+  },
+  "manual_choice_plan_ids": [
+    12,
+    1
+  ],
+  "manual_choice_present_after_apply": 0,
+  "nested_orphan_restore": {
+    "source": "$TEMP/archive/old/.photo-cleanup-quarantine/Library Previews.lrdata/sub/cache",
+    "restore_to": "$TEMP/archive/old/.photo-cleanup-quarantine/Library Previews.lrdata/cache",
+    "response": {
+      "done": 1,
+      "refused": []
+    },
+    "still_inside_quarantine": true
+  }
+}

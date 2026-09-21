@@ -1,0 +1,41 @@
+{
+  "files": 55000,
+  "families": 11000,
+  "build": "dev opt-level=1",
+  "storage": "local temporary SQLite; absent image paths",
+  "measurements": {
+    "family_list_100": {
+      "seconds": [
+        0.0689,
+        0.0706,
+        0.0702
+      ],
+      "median": 0.0702,
+      "soft_budget_seconds": 1,
+      "within_budget": true,
+      "items": 100
+    },
+    "single_family_preview": {
+      "seconds": [
+        0.0181,
+        0.0178,
+        0.018
+      ],
+      "median": 0.018,
+      "soft_budget_seconds": 1,
+      "within_budget": true,
+      "items": 4
+    },
+    "full_44000_candidate_preview": {
+      "seconds": [
+        2.0768,
+        2.0071,
+        1.9984
+      ],
+      "median": 2.0071,
+      "soft_budget_seconds": 10,
+      "within_budget": true,
+      "items": 44000
+    }
+  }
+}

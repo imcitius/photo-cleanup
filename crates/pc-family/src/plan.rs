@@ -88,6 +88,13 @@ pub struct Scope {
     pub keeper_folder: Option<String>,
 }
 
+/// What a file has to match to be called a copy of another: the whole frame
+/// in colour, falling back to the old grey square only for rows written
+/// before that evidence existed.
+fn identity(r: &PlanRow) -> Option<&Vec<u8>> {
+    r.content_hash.as_ref().or(r.pixel_hash.as_ref())
+}
+
 pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
     compute_scoped(db, policy, &Scope::default())
 }
@@ -152,7 +159,7 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
             // refuses — every time, for ever, with the group stuck in the
             // list. So the plan asks the question here instead.
             if role == Role::Copy {
-                let same = match (&m.pixel_hash, &keeper.pixel_hash) {
+                let same = match (identity(m), identity(keeper)) {
                     (Some(a), Some(b)) => a == b,
                     _ => false,
                 };
@@ -319,6 +326,7 @@ mod tests {
             dev: 1,
             disk: "d".into(),
             pixel_hash: Some(vec![1; 32]),
+            content_hash: Some(vec![1; 32]),
             is_keeper: keeper,
         }
     }

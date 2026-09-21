@@ -1,0 +1,13 @@
+    Checking pc-core v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-core)
+    Checking pc-hash v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-hash)
+    Checking pc-image v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-image)
+    Checking pc-db v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-db)
+    Checking pc-lightroom v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-lightroom)
+    Checking pc-walk v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-walk)
+    Checking pc-family v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-family)
+    Checking pc-work v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-work)
+    Checking pc-organize v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-organize)
+    Checking pc-apply v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-apply)
+    Checking pc-api v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-api)
+    Checking pc-cli v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-cli)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 5.39s

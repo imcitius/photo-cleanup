@@ -55,16 +55,53 @@ pub fn companions(path: &Path) -> Vec<PathBuf> {
 /// index recorded. The index may be hours old; this is the last moment before
 /// something becomes hard to undo, and it is the moment worth paying for.
 pub fn same_picture(a: &Path, b: &Path) -> Result<bool> {
-    let hash = |p: &Path| -> Result<[u8; 32]> {
+    let read = |p: &Path| -> Result<(pc_image::Probe, bool)> {
         let size = fs::metadata(p)
             .with_context(|| pc_core::tf!("нет файла {0}", "no such file: {0}", p.display()))?
             .len();
         let r = pc_image::read_for_probe(p, size)?;
         let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let probe = pc_image::probe_parts(p, &r.head, r.preview.as_deref(), name)?;
-        Ok(pc_hash::pixel_hash(&probe.thumb.gray))
+        let from_preview = matches!(probe.source, pc_image::PixelSource::EmbeddedPreview { .. });
+        Ok((probe, from_preview))
     };
-    Ok(hash(a)? == hash(b)?)
+    let (pa, a_preview) = read(a)?;
+    let (pb, b_preview) = read(b)?;
+
+    // A raw file is never opened whole: what is decoded is the JPEG the
+    // camera left inside it, and two different frames can carry previews that
+    // agree. Where the pixels are only a preview, the files themselves have
+    // to match — read in full, which costs a read of two files at the one
+    // moment where the cost is obviously worth paying.
+    if a_preview || b_preview {
+        return same_bytes(a, b);
+    }
+    Ok(pa.content_hash == pb.content_hash)
+}
+
+/// Whole files, compared as they are. Sizes first, because a difference there
+/// is free to find and ends the question.
+fn same_bytes(a: &Path, b: &Path) -> Result<bool> {
+    use std::io::Read;
+    let (ma, mb) = (fs::metadata(a)?, fs::metadata(b)?);
+    if ma.len() != mb.len() {
+        return Ok(false);
+    }
+    let (mut fa, mut fb) = (fs::File::open(a)?, fs::File::open(b)?);
+    let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    loop {
+        let read_a = fa.read(&mut ba)?;
+        let read_b = fb.read(&mut bb)?;
+        if read_a != read_b {
+            return Ok(false);
+        }
+        if read_a == 0 {
+            return Ok(true);
+        }
+        if ba[..read_a] != bb[..read_b] {
+            return Ok(false);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,5 +293,55 @@ mod tests {
         let p = tmp.path().join("lonely.jpg");
         fs::write(&p, b"j").unwrap();
         assert!(companions(&p).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+    use image::{Rgb, RgbImage};
+
+    fn bmp(dir: &Path, name: &str, colour: [u8; 3]) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let img = RgbImage::from_pixel(64, 48, Rgb(colour));
+        image::DynamicImage::ImageRgb8(img).save(&path).unwrap();
+        path
+    }
+
+    /// The fault the audit found: two frames of the same brightness and
+    /// different colour reduce to one grey square, and the last check before
+    /// a move was reading exactly that square.
+    #[test]
+    fn two_colours_of_one_brightness_are_not_one_picture() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Equal luma by the usual weights: 0.299r + 0.587g + 0.114b.
+        let red = bmp(tmp.path(), "red.bmp", [200, 46, 46]);
+        let green = bmp(tmp.path(), "green.bmp", [16, 92, 46]);
+        assert!(
+            !same_picture(&red, &green).unwrap(),
+            "разные снимки признаны одним"
+        );
+    }
+
+    #[test]
+    fn the_same_picture_still_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = bmp(tmp.path(), "a.bmp", [10, 120, 200]);
+        let b = tmp.path().join("b.bmp");
+        std::fs::copy(&a, &b).unwrap();
+        assert!(same_picture(&a, &b).unwrap());
+    }
+
+    #[test]
+    fn a_smaller_version_is_not_the_original() {
+        let tmp = tempfile::tempdir().unwrap();
+        let big = bmp(tmp.path(), "big.bmp", [30, 60, 90]);
+        let small = tmp.path().join("small.bmp");
+        let img =
+            image::open(&big)
+                .unwrap()
+                .resize_exact(32, 24, image::imageops::FilterType::Triangle);
+        img.save(&small).unwrap();
+        assert!(!same_picture(&big, &small).unwrap());
     }
 }

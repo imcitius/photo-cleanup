@@ -38,7 +38,8 @@ pub fn settle_keepers(db: &Db) -> Result<u64> {
     let mut by_series: HashMap<i64, Vec<Frame>> = HashMap::new();
     {
         let mut st = db.conn.prepare(
-            "SELECT sm.series_id, sm.file_id, f.path, fm.family_id, fa.keeper_file, f.pixel_hash
+            "SELECT sm.series_id, sm.file_id, f.path, fm.family_id, fa.keeper_file,
+                    COALESCE(f.content_hash, f.pixel_hash)
                FROM series_members sm
                JOIN files f ON f.id = sm.file_id
                JOIN family_members fm ON fm.file_id = sm.file_id

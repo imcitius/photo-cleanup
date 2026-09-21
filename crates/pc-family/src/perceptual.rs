@@ -50,6 +50,9 @@ pub struct Candidate {
     pub b: usize,
     pub phash_distance: u32,
     pub via_crop: bool,
+    /// Brought together only by comparing turns of the frame: the upright
+    /// hashes call these two strangers.
+    pub via_turn: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +72,32 @@ pub struct Verified {
 pub fn candidates(files: &[FileInfo], p: &Params) -> Vec<Candidate> {
     candidates_controlled(files, p, &pc_core::work::Control::default())
 }
+/// How alike two frames are once one of them is allowed to be turned.
+///
+/// The upright comparison is tried first and answers almost every pair; the
+/// seven other turns are only reached when it fails, which happens for the
+/// handful of photographs that were rotated on their way into the archive.
+fn best_over_turns(a: &image::GrayImage, b: &image::GrayImage) -> f64 {
+    let upright = pc_hash::ssim(a, b);
+    if upright >= 0.9 {
+        return upright;
+    }
+    use image::imageops::{flip_horizontal, flip_vertical, rotate180, rotate270, rotate90};
+    let turns: [image::GrayImage; 7] = [
+        rotate90(b),
+        rotate180(b),
+        rotate270(b),
+        flip_horizontal(b),
+        flip_vertical(b),
+        rotate90(&flip_horizontal(b)),
+        rotate270(&flip_horizontal(b)),
+    ];
+    turns
+        .iter()
+        .map(|t| pc_hash::ssim(a, t))
+        .fold(upright, f64::max)
+}
+
 pub fn candidates_controlled(
     files: &[FileInfo],
     p: &Params,
@@ -89,6 +118,7 @@ pub fn candidates_controlled(
                     b: j,
                     phash_distance: d,
                     via_crop: false,
+                    via_turn: false,
                 });
                 continue;
             }
@@ -101,7 +131,26 @@ pub fn candidates_controlled(
                     b: j,
                     phash_distance: d,
                     via_crop: true,
+                    via_turn: false,
                 });
+                continue;
+            }
+            // A quarter turn moves nearly every bit of the whole-frame hash,
+            // so a photograph and its turned twin read as strangers. The
+            // canonical hash is taken over the eight turns of the frame and
+            // brings them back together; the confirmation below then has to
+            // compare the frames turned the same way.
+            if a.phash_canon != 0 && b.phash_canon != 0 {
+                let td = pc_hash::hamming(a.phash_canon, b.phash_canon);
+                if td <= p.phash_max {
+                    local.push(Candidate {
+                        a: i,
+                        b: j,
+                        phash_distance: td,
+                        via_crop: false,
+                        via_turn: true,
+                    });
+                }
             }
         }
         control.advance(0, None);
@@ -180,6 +229,25 @@ pub struct VerifyReport {
 /// or converted to another format, or re-encoded from the very same pixels.
 /// Absent any of those, two similar frames are two photographs.
 pub fn derivation_plausible(a: &FileInfo, b: &FileInfo, ssim: f64, p: &Params) -> bool {
+    derivation_plausible_turned(a, b, ssim, p, false)
+}
+
+/// As above, but told whether the two frames only met once one of them was
+/// turned.
+///
+/// The burst rule below refuses two frames that came straight from a camera
+/// under different names: they are two presses of the shutter, and no
+/// similarity score separates those reliably. A quarter-turned twin is the
+/// one case where that reasoning does not hold — a camera does not take the
+/// same photograph again sideways. Whoever turned it made a version, not a
+/// second shot.
+pub fn derivation_plausible_turned(
+    a: &FileInfo,
+    b: &FileInfo,
+    ssim: f64,
+    p: &Params,
+    via_turn: bool,
+) -> bool {
     // Two raw frames are two shutter presses. A raw file is never generated
     // from another raw file, and identical raws are caught exactly by hash.
     if a.is_raw() && b.is_raw() {
@@ -201,7 +269,7 @@ pub fn derivation_plausible(a: &FileInfo, b: &FileInfo, ssim: f64, p: &Params) -
     // gets one number — a raw and its JPEG share the stem — so two different
     // stems straight out of a camera are two presses of the shutter, whatever
     // they look like. That is a fact about the files, not a threshold.
-    if straight_from_camera(a) && straight_from_camera(b) && a.stem() != b.stem() {
+    if !via_turn && straight_from_camera(a) && straight_from_camera(b) && a.stem() != b.stem() {
         return false;
     }
 
@@ -291,12 +359,12 @@ pub fn verify_controlled(
             continue;
         };
 
-        let s = pc_hash::ssim(&ga, gb);
+        let s = best_over_turns(&ga, gb);
         if s < p.ssim_min {
             report.rejected_by_ssim += 1;
             continue;
         }
-        if !derivation_plausible(&files[c.a], &files[c.b], s, p) {
+        if !derivation_plausible_turned(&files[c.a], &files[c.b], s, p, c.via_turn) {
             report.rejected_as_series += 1;
             continue;
         }
@@ -457,5 +525,70 @@ mod tests {
         let p = Params::default();
         assert!(variance(&flat()) < p.min_variance);
         assert!(variance(&textured()) > p.min_variance);
+    }
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use super::*;
+
+    fn frame(id: i64, name: &str, phash: u64, canon: u64) -> FileInfo {
+        FileInfo {
+            id,
+            // Regional hashes far apart, so the crop rule does not answer
+            // first and the turn is what has to find these two.
+            crops: [id as u64 * 0xFFFF_0000_1234_5678; 5],
+            path: format!("/foto/{name}"),
+            name: name.into(),
+            camera_model: Some("ILCE-7M3".into()),
+            taken_at: Some(1_700_000_000),
+            container: "jpeg".into(),
+            width: 6000,
+            height: 4000,
+            phash,
+            phash_canon: canon,
+            ..Default::default()
+        }
+    }
+
+    /// Two presses of the shutter stay two photographs: that rule is what
+    /// keeps bursts from being eaten, and a turn must not become a hole in it.
+    #[test]
+    fn a_burst_is_still_two_photographs() {
+        let a = frame(1, "DSC01234.JPG", 0b1010, 0b1010);
+        let b = frame(2, "DSC01235.JPG", 0b1011, 0b1011);
+        assert!(!derivation_plausible_turned(
+            &a,
+            &b,
+            0.99,
+            &Params::default(),
+            false
+        ));
+    }
+
+    /// A camera does not take the same photograph again sideways. When the
+    /// only way two frames met was by turning one of them, someone made a
+    /// version — and the burst rule has nothing to say about it.
+    #[test]
+    fn a_turned_twin_is_a_version_not_a_second_shot() {
+        let a = frame(1, "DSC01234.JPG", 0b1010, 0b1010);
+        let b = frame(2, "rotated.JPG", 0b0101_0101, 0b1010);
+        assert!(derivation_plausible_turned(
+            &a,
+            &b,
+            0.99,
+            &Params::default(),
+            true
+        ));
+    }
+
+    /// The canonical hash is what finds them; the plain one never would.
+    #[test]
+    fn turned_frames_become_candidates() {
+        let upright = frame(1, "a.JPG", 0x0F0F_0F0F_0F0F_0F0F, 0x1234_5678_9ABC_DEF0);
+        let turned = frame(2, "b.JPG", 0xF0F0_F0F0_F0F0_F0F0, 0x1234_5678_9ABC_DEF0);
+        let found = candidates(&[upright, turned], &Params::default());
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].via_turn);
     }
 }

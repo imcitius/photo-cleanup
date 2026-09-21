@@ -1,0 +1,51 @@
+   Compiling pc-cli v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-cli)
+    Finished `test` profile [optimized + debuginfo] target(s) in 2.36s
+     Running tests/audit_regressions.rs (target/debug/deps/audit_regressions-7eb10e89692cc485)
+
+running 6 tests
+
+thread 'a01_different_rgb_pixels_must_not_pass_same_picture' (6657327) panicked at crates/pc-cli/tests/audit_regressions.rs:30:5:
+different colours were accepted as exact pixels
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a01_different_rgb_pixels_must_not_pass_same_picture ... FAILED
+
+thread 'a05_missing_source_must_count_as_failed_thumbnail_rebuild' (6657331) panicked at crates/pc-cli/tests/audit_regressions.rs:73:30:
+assertion `left == right` failed: a missing/offline file was not counted as unreadable
+  left: 0
+ right: 1
+
+Inventory done: 1 bundles, 6 B of it can be moved.
+Details: photo-cleanup derived list
+
+thread 'a06_core_quarantine_must_recheck_a_new_lightroom_lock' (6657332) panicked at crates/pc-cli/tests/audit_regressions.rs:80:117:
+called `Option::unwrap()` on a `None` value
+
+thread 'a04_undo_must_not_take_a_sidecar_it_did_not_move' (6657330) panicked at crates/pc-cli/tests/audit_regressions.rs:66:5:
+undo moved an unrelated sidecar which was never journalled
+
+thread 'a02_organize_undo_must_preserve_every_archive_file' (6657328) panicked at crates/pc-cli/tests/audit_regressions.rs:45:5:
+organize deleted an unjournalled archive file
+test a05_missing_source_must_count_as_failed_thumbnail_rebuild ... FAILED
+test a06_core_quarantine_must_recheck_a_new_lightroom_lock ... FAILED
+test a04_undo_must_not_take_a_sidecar_it_did_not_move ... FAILED
+
+thread 'a03_old_journal_must_not_change_reused_file_id_after_reset' (6657329) panicked at crates/pc-cli/tests/audit_regressions.rs:57:5:
+assertion `left == right` failed: purging old quarantine hid an unrelated new file
+  left: "purged"
+ right: "present"
+test a02_organize_undo_must_preserve_every_archive_file ... FAILED
+test a03_old_journal_must_not_change_reused_file_id_after_reset ... FAILED
+
+failures:
+
+failures:
+    a01_different_rgb_pixels_must_not_pass_same_picture
+    a02_organize_undo_must_preserve_every_archive_file
+    a03_old_journal_must_not_change_reused_file_id_after_reset
+    a04_undo_must_not_take_a_sidecar_it_did_not_move
+    a05_missing_source_must_count_as_failed_thumbnail_rebuild
+    a06_core_quarantine_must_recheck_a_new_lightroom_lock
+
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p pc-cli --test audit_regressions`

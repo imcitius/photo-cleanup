@@ -17,4 +17,5 @@ rusqlite.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+image.workspace = true
 tempfile.workspace = true

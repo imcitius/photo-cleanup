@@ -26,6 +26,68 @@ pub fn blake3(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
 
+/// Hash of the whole frame as it is shown: colour, native resolution, aspect.
+///
+/// This is the evidence behind the word "copy". `pixel_hash` cannot carry it:
+/// that one hashes a grey 128x128 square built for comparing *likeness*, and
+/// on the way to it the colour is thrown away, the aspect is squashed and the
+/// resolution is gone. A red frame and a green frame of equal brightness hash
+/// the same there; so do a photograph and its own downscaled export.
+///
+/// Here nothing is normalised away. Two files match only when they decode to
+/// the same picture, pixel for pixel — which is what the interface promises
+/// before it moves anything.
+pub fn content_hash(img: &image::DynamicImage) -> [u8; 32] {
+    let rgb = img.to_rgb8();
+    let mut h = blake3::Hasher::new();
+    h.update(b"rgb8");
+    h.update(&rgb.width().to_le_bytes());
+    h.update(&rgb.height().to_le_bytes());
+    h.update(rgb.as_raw());
+    *h.finalize().as_bytes()
+}
+
+/// The perceptual hash of whichever of the eight turns of this frame reads
+/// smallest.
+///
+/// A photograph rotated a quarter turn is the same photograph, and `phash`
+/// says the opposite: the DCT of a turned frame differs in nearly every bit,
+/// so a rotated duplicate never meets its original. The eight turns of a
+/// square — four rotations, each with its mirror — are the ones that happen
+/// in practice: a rewritten orientation tag, an import that turned the frame,
+/// a film scanned back to front.
+///
+/// Rotating the square is index arithmetic, not resampling, so this costs
+/// eight small DCTs and no image work worth measuring.
+pub fn canonical_phash(gray: &GrayImage) -> u64 {
+    let (w, h) = (gray.dimensions().0, gray.dimensions().1);
+    let at = |x: u32, y: u32| gray.get_pixel(x, y).0[0];
+    /// Where a pixel of a turned frame comes from in the upright one.
+    type Turn = fn(u32, u32, u32, u32) -> (u32, u32);
+    // One for each of the eight symmetries of a square.
+    let turns: [Turn; 8] = [
+        |x, y, _, _| (x, y),
+        |x, y, w, _| (w - 1 - x, y),
+        |x, y, _, h| (x, h - 1 - y),
+        |x, y, w, h| (w - 1 - x, h - 1 - y),
+        |x, y, _, _| (y, x),
+        |x, y, _, h| (y, h - 1 - x),
+        |x, y, w, _| (w - 1 - y, x),
+        |x, y, w, h| (w - 1 - y, h - 1 - x),
+    ];
+    turns
+        .iter()
+        .map(|turn| {
+            let turned = GrayImage::from_fn(w, h, |x, y| {
+                let (sx, sy) = turn(x, y, w, h);
+                image::Luma([at(sx.min(w - 1), sy.min(h - 1))])
+            });
+            phash(&turned)
+        })
+        .min()
+        .unwrap_or(0)
+}
+
 /// Hash of the decoded, orientation-normalised pixels.
 ///
 /// Two files that differ only in metadata — a stripped EXIF, a rewritten
@@ -256,5 +318,78 @@ mod tests {
     fn crop_distance_is_zero_for_a_picture_against_itself() {
         let a = normalise(&scene(256, 256, 13));
         assert_eq!(crop_distance(&crop_hashes(&a), &crop_hashes(&a)), 0);
+    }
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    fn flat(w: u32, h: u32, colour: [u8; 3]) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, Rgb(colour)))
+    }
+
+    /// The fault this hash exists to fix: red and green of equal brightness
+    /// are one grey square and two different photographs.
+    #[test]
+    fn colour_is_not_thrown_away() {
+        let red = flat(64, 48, [220, 20, 20]);
+        let green = flat(64, 48, [20, 220, 20]);
+        assert_ne!(
+            pixel_hash(&red.to_luma8()),
+            [0; 32],
+            "проверка бессмысленна, если хеш пуст"
+        );
+        assert_ne!(content_hash(&red), content_hash(&green));
+    }
+
+    #[test]
+    fn a_smaller_copy_is_not_the_same_content() {
+        let big = flat(400, 300, [10, 120, 200]);
+        let small = big.resize_exact(200, 150, image::imageops::FilterType::Triangle);
+        assert_ne!(content_hash(&big), content_hash(&small));
+    }
+
+    #[test]
+    fn the_same_pixels_in_another_container_still_match() {
+        // A scan held as BMP and as uncompressed TIFF decodes identically;
+        // the bytes differ, the picture does not.
+        let a = flat(120, 90, [7, 90, 30]);
+        let b = a.clone();
+        assert_eq!(content_hash(&a), content_hash(&b));
+    }
+
+    fn scene() -> GrayImage {
+        GrayImage::from_fn(128, 128, |x, y| {
+            let v = ((x * 3 + y * 7) % 200) as u8 + (x / 16) as u8;
+            image::Luma([v])
+        })
+    }
+
+    #[test]
+    fn a_quarter_turn_is_the_same_photograph() {
+        let upright = scene();
+        let turned = image::imageops::rotate90(&upright);
+        let mirrored = image::imageops::flip_horizontal(&upright);
+
+        // The plain hash sees strangers; that is the whole problem.
+        assert!(hamming(phash(&upright), phash(&turned)) > 10);
+
+        assert_eq!(canonical_phash(&upright), canonical_phash(&turned));
+        assert_eq!(canonical_phash(&upright), canonical_phash(&mirrored));
+        assert_eq!(
+            canonical_phash(&upright),
+            canonical_phash(&image::imageops::rotate180(&upright))
+        );
+    }
+
+    #[test]
+    fn two_different_scenes_still_read_apart() {
+        let a = scene();
+        let b = GrayImage::from_fn(128, 128, |x, y| {
+            image::Luma([((x * 11 + y * 2) % 255) as u8])
+        });
+        assert!(hamming(canonical_phash(&a), canonical_phash(&b)) > 8);
     }
 }

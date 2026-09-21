@@ -1,0 +1,424 @@
+   Compiling pc-core v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-core)
+   Compiling pc-hash v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-hash)
+   Compiling pc-db v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-db)
+   Compiling pc-image v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-image)
+   Compiling pc-walk v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-walk)
+   Compiling pc-lightroom v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-lightroom)
+   Compiling pc-family v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-family)
+   Compiling pc-work v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-work)
+   Compiling pc-organize v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-organize)
+   Compiling pc-apply v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-apply)
+   Compiling pc-api v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-api)
+   Compiling pc-cli v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-cli)
+    Finished `test` profile [optimized + debuginfo] target(s) in 26.60s
+     Running unittests src/lib.rs (target/debug/deps/pc_api-045bf7725f7dbdf5)
+
+running 16 tests
+test tests::a_reset_is_refused_while_a_job_holds_the_writer ... ok
+test tests::api_contract_and_embedded_production_assets ... ok
+test tests::a_parent_component_is_refused_whatever_the_path_looks_like ... ok
+test tests::one_writer_and_legacy_urls_cannot_bypass_review ... ok
+test tests::manual_dates_and_categories_survive_reindexing ... ok
+test tests::open_lightroom_at_apply_time_invalidates_a_preview ... ok
+test tests::recovery_and_directory_boundaries ... ok
+test tests::a_reset_needs_the_word_and_leaves_the_archive_and_the_journal_alone ... ok
+test tests::one_file_carries_its_evidence_and_an_unknown_one_is_a_404 ... ok
+test tests::real_index_is_readable_during_work_and_stops_between_files ... ok
+test tests::the_whole_chain_runs_as_one_job_and_reports_its_stage ... ok
+test tests::a_series_is_listed_in_shooting_order_not_in_quality_order ... ok
+test tests::a_rejected_frame_moves_beside_itself_and_comes_back ... ok
+test tests::one_group_can_be_acted_on_without_touching_the_rest ... ok
+test tests::rejected_frames_reach_the_plan_and_can_be_taken_back ... ok
+test tests::reviewed_derived_cycle_undo_and_purge_and_stale_plan ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running unittests src/lib.rs (target/debug/deps/pc_apply-e81e903c7982f25a)
+
+running 7 tests
+test organize::tests::an_unrelated_name_is_left_alone ... ok
+test organize::tests::a_sidecar_follows_its_photograph_through_a_rename ... ok
+test files::tests::case_aliases_do_not_duplicate_one_sidecar ... ok
+test files::tests::a_file_with_no_sidecars_yields_none ... ok
+test organize::tests::a_scanned_root_is_never_taken_away_even_when_it_empties ... ok
+test organize::tests::undo_cleans_up_only_what_the_reorganisation_built ... ok
+test files::tests::sidecars_are_found_next_to_their_photograph ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/pc_cli-a8c08a5ae94c2756)
+
+running 7 tests
+test families::tests::roles_print_originals_before_copies ... ok
+test families::tests::truncation_counts_characters ... ok
+test families::tests::formats_a_date_from_a_timestamp ... ok
+test format::tests::shortens_long_paths ... ok
+test format::tests::parses_durations ... ok
+test format::tests::parses_sizes ... ok
+test format::tests::truncate_counts_characters_not_bytes ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/photo_cleanup-ebf55ca4fcfb84b5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/dedup.rs (target/debug/deps/dedup-a065b6e3ff110859)
+
+running 11 tests
+test a_frame_a_lightroom_catalog_curates_is_refused ... ok
+test the_keeper_disappearing_stops_the_move ... ok
+test exact_copies_are_found_and_the_original_is_not_among_them ... ok
+test lifting_the_protection_deliberately_makes_it_a_candidate ... ok
+test a_backup_folder_never_wins_the_contest_against_the_working_copy ... ok
+test a_photograph_with_no_duplicate_is_never_proposed ... ok
+test a_file_edited_since_the_scan_is_refused_at_the_last_moment ... ok
+test undo_puts_every_moved_photograph_back ... ok
+test the_plan_empties_out_once_it_has_been_applied ... ok
+test an_undone_move_puts_the_file_back_into_the_plan ... ok
+test applying_moves_the_copies_and_leaves_everything_else_alone ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s
+
+     Running tests/e2e.rs (target/debug/deps/e2e-bc31634dd77c13e8)
+
+running 7 tests
+test catalog_backups_are_recognised_and_not_read ... ok
+test a_bundle_that_changed_since_the_scan_is_skipped ... ok
+test quarantine_refuses_a_destination_on_another_filesystem ... ok
+test preview_bundles_are_pruned_not_descended_into ... ok
+test purge_deletes_only_after_the_retention_window ... ok
+test gates_classify_every_bundle_correctly ... ok
+test quarantine_moves_only_what_is_allowed_and_undo_restores_it ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/organize.rs (target/debug/deps/organize-869f8cbc405b722c)
+
+running 6 tests
+test a_day_with_a_long_gap_becomes_two_events ... ok
+test a_folder_that_only_knows_the_month_does_not_get_a_day ... ok
+test a_second_pass_has_nothing_left_to_do ... ok
+test two_frames_with_one_sony_filename_both_survive ... ok
+test applying_moves_the_files_the_sidecars_and_the_index ... ok
+test undo_puts_every_file_back_where_it_was ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running unittests src/lib.rs (target/debug/deps/pc_core-07f3847fa77ee226)
+
+running 23 tests
+test bytes::tests::formats_each_unit ... ok
+test lang::tests::english_is_the_default_and_the_fallback ... ok
+test lang::tests::fixed_strings_follow_the_setting ... ok
+test disk::tests::relative_strips_the_mount_prefix ... ok
+test path_tests::a_backslash_in_a_unix_name_stays_part_of_the_name ... ok
+test lang::tests::formatted_strings_take_the_same_arguments_in_either_order ... ok
+test path_tests::a_stored_path_splits_at_its_last_separator ... ok
+test plural_tests::agrees_in_russian ... ok
+test prune_tests::junk_names_are_recognised ... ok
+test prune_tests::photo_libraries_are_protected ... ok
+test time::tests::civil_and_back_agree ... ok
+test time::tests::dates_are_formatted_for_the_tree_and_for_the_user ... ok
+test disk::tests::quarantine_is_on_the_same_mount ... ok
+test thumbstore::tests::a_missing_or_malformed_key_is_not_an_error ... ok
+test disk::tests::resolves_and_caches ... ok
+test thumbstore::tests::clearing_a_cache_that_was_never_written_is_not_an_error ... ok
+test volume::tests::a_files_device_is_the_device_of_its_directory ... ok
+test thumbstore::tests::no_temporary_files_are_left_behind ... ok
+test volume::tests::two_spellings_of_one_entry_share_a_key_and_two_files_do_not ... ok
+test thumbstore::tests::stores_and_reads_back ... ok
+test thumbstore::tests::identical_content_shares_one_file ... ok
+test thumbstore::tests::concurrent_duplicates_all_receive_a_thumbnail_key ... ok
+test thumbstore::tests::clearing_removes_every_thumbnail_and_leaves_the_directory ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/pc_db-5273eec6910278e2)
+
+running 3 tests
+test schema::tests::migrate_is_idempotent ... ok
+test tests::a_reset_clears_the_index_but_keeps_settings_and_the_journal ... ok
+test tests::a_reset_of_an_empty_database_is_not_an_error ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/debug/deps/pc_family-c7c27ed63a9a2c82)
+
+running 68 tests
+test categories::tests::a_colourful_photograph_with_texture_is_not_a_document ... ok
+test categories::tests::a_file_with_no_measurements_is_left_as_a_photograph ... ok
+test categories::tests::a_black_and_white_photograph_is_not_mistaken_for_a_scan ... ok
+test categories::tests::a_black_and_white_frame_is_still_recognised ... ok
+test categories::tests::a_forest_at_dusk_keeps_its_colour ... ok
+test categories::tests::a_photograph_stays_a_photograph ... ok
+test categories::tests::a_picket_fence_is_not_a_document_either ... ok
+test categories::tests::a_page_photographed_in_a_dim_room_is_left_as_a_photograph ... ok
+test categories::tests::a_lens_cap_is_still_an_empty_frame ... ok
+test categories::tests::a_sand_arena_is_not_a_document ... ok
+test categories::tests::a_photograph_that_happens_to_be_screen_sized_is_not_a_screenshot ... ok
+test categories::tests::a_scanned_page_is_recognised_with_its_reasons ... ok
+test categories::tests::a_scanned_photograph_is_not_a_document ... ok
+test categories::tests::a_screenshot_is_caught_by_its_dimensions_without_a_name ... ok
+test categories::tests::a_screenshot_is_caught_by_its_name ... ok
+test categories::tests::a_white_wall_is_not_a_document ... ok
+test categories::tests::an_archive_indexed_before_chroma_existed_still_sorts ... ok
+test categories::tests::an_empty_frame_is_flagged_rather_than_classified ... ok
+test categories::tests::cyrillic_names_are_matched_case_insensitively ... ok
+test categories::tests::the_moon_on_a_black_sky_is_not_an_empty_frame ... ok
+test curation::tests::a_symlinked_prefix_still_matches ... ok
+test curation::tests::a_reused_sony_number_in_another_folder_does_not_match ... ok
+test curation::tests::an_ambiguous_tail_keeps_the_stronger_rating ... ok
+test curation::tests::an_exact_path_matches ... ok
+test curation::tests::an_unrelated_file_does_not_match ... ok
+test curation::tests::the_unraid_share_and_the_disk_behind_it_are_the_same_file ... ok
+test perceptual::tests::a_camera_jpeg_beside_its_raw_still_belongs_to_the_same_shot ... ok
+test perceptual::tests::a_format_conversion_is_a_plausible_derivative ... ok
+test perceptual::tests::a_rescaled_copy_is_a_plausible_derivative ... ok
+test perceptual::tests::a_tripod_sequence_is_not_a_set_of_duplicates ... ok
+test perceptual::tests::an_export_under_a_new_name_is_still_a_rendition ... ok
+test perceptual::tests::blankness_is_measured_not_guessed ... ok
+test perceptual::tests::same_size_same_format_needs_a_near_perfect_match ... ok
+test perceptual::tests::two_frames_of_a_burst_are_not_one_photograph ... ok
+test perceptual::tests::two_frames_seconds_apart_are_not_merged_even_when_nearly_identical ... ok
+test perceptual::tests::default_threshold_separates_blank_from_photographic ... ok
+test plan::tests::a_family_without_a_marked_keeper_falls_back_to_the_largest ... ok
+test plan::tests::the_keeper_is_what_makes_the_rest_safe_to_move ... ok
+test plan::tests::the_default_policy_only_takes_exact_copies ... ok
+test quality::tests::a_catalogued_frame_outranks_an_identical_one_that_is_not ... ok
+test quality::tests::a_messenger_copy_scores_far_below_the_original ... ok
+test quality::tests::a_copy_in_a_backup_folder_scores_below_the_one_in_place ... ok
+test quality::tests::density_cannot_let_a_bloated_resave_win ... ok
+test quality::tests::a_raw_original_outranks_its_export ... ok
+test quality::tests::russian_path_penalties_actually_apply ... ok
+test quality::tests::the_breakdown_names_every_term_it_applied ... ok
+test roles::tests::a_dng_that_names_its_source_is_a_conversion ... ok
+test roles::tests::a_much_smaller_rendition_is_a_resize ... ok
+test roles::tests::a_raw_and_the_camera_jpeg_beside_it_are_not_duplicates ... ok
+test roles::tests::an_exact_copy_is_the_only_role_removed_by_default ... ok
+test roles::tests::the_keeper_bonus_prefers_an_original_over_an_export ... ok
+test roles::tests::two_exports_of_one_frame_have_no_original_between_them ... ok
+test series::tests::a_blown_frame_is_punished_even_when_sharp ... ok
+test series::tests::a_long_gap_starts_a_new_series ... ok
+test series::tests::a_pixel_shift_set_is_recognised_and_protected ... ok
+test series::tests::a_single_frame_is_not_a_series ... ok
+test series::tests::bracketing_is_told_apart_by_its_exposure_spread ... ok
+test series::tests::frames_from_different_cameras_never_join ... ok
+test series::tests::frames_seconds_apart_form_one_series ... ok
+test series::tests::ranking_is_deterministic_when_scores_tie ... ok
+test series::tests::the_sharpest_frame_wins ... ok
+test series::tests::two_unrelated_shots_moments_apart_are_not_a_series ... ok
+test unionfind::tests::merges_transitively ... ok
+test plan::keeper_tests::a_copy_of_something_else_is_not_offered ... ok
+test folders::tests::a_different_photograph_is_never_swapped_in ... ok
+test plan::keeper_tests::a_copy_of_the_kept_file_still_is_one ... ok
+test folders::tests::a_burst_is_kept_in_the_folder_that_holds_most_of_it ... ok
+test folders::tests::a_keeper_the_user_chose_is_never_moved ... ok
+
+test result: ok. 68 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running unittests src/lib.rs (target/debug/deps/pc_hash-fd3871c421828106)
+
+running 19 tests
+test dct::tests::a_flat_block_has_all_its_energy_in_the_dc_term ... ok
+test dct::tests::a_gradient_puts_energy_in_the_low_frequencies ... ok
+test ssim::tests::two_blank_images_are_not_compared_by_structure_alone ... ok
+test ssim::tests::an_image_matches_itself_exactly ... ok
+test ssim::tests::different_scenes_score_low ... ok
+test ssim::tests::a_recompressed_copy_stays_above_the_duplicate_threshold ... ok
+test tests::a_flat_image_is_not_mistaken_for_structure ... ok
+test ssim::tests::mismatched_sizes_are_compared_at_a_common_size ... ok
+test tests::pixel_hash_ignores_nothing_it_should_not ... ok
+test tests::identical_pixels_hash_identically ... ok
+test tests::pixel_hash_separates_different_pictures ... ok
+test ssim::tests::a_downscaled_copy_still_scores_high ... ok
+test tests::dhash_and_phash_fail_differently ... ok
+test tests::dhash_agrees_with_itself_and_differs_across_scenes ... ok
+test tests::crop_distance_is_zero_for_a_picture_against_itself ... ok
+test tests::phash_separates_unrelated_pictures ... ok
+test tests::a_crop_is_caught_by_the_regional_hashes ... ok
+test tests::phash_survives_a_direct_rescale_without_normalising_first ... ok
+test tests::phash_survives_the_rescale_that_defines_a_t2_duplicate ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running unittests src/lib.rs (target/debug/deps/pc_image-a658ea92ebe655d3)
+
+running 41 tests
+test jpeg::tests::finds_the_end_marker ... ok
+test jpeg::tests::rejects_non_jpeg_and_truncated_input ... ok
+test jpeg::tests::reads_dimensions_past_other_segments ... ok
+test meta::tests::parses_exif_timestamps_and_rejects_nonsense ... ok
+test meta::tests::reads_dates_out_of_the_filenames_this_archive_uses ... ok
+test meta::tests::epoch_arithmetic_matches_known_dates ... ok
+test meta::tests::finds_an_xmp_packet_inside_surrounding_bytes ... ok
+test meta::tests::handles_derived_from_written_as_a_nested_element ... ok
+test meta::tests::extracts_the_adobe_provenance_chain ... ok
+test metrics::tests::a_flat_frame_has_almost_no_entropy_and_no_contrast ... ok
+test metrics::tests::a_detailed_frame_has_high_entropy ... ok
+test metrics::tests::a_tiny_image_does_not_panic ... ok
+test metrics::tests::clipping_is_measured_at_both_ends ... ok
+test sniff::tests::a_wrong_extension_does_not_decide_the_container ... ok
+test read::tests::a_small_jpeg_is_read_whole ... ok
+test read::tests::a_non_image_is_rejected_after_reading_only_its_head ... ok
+test sniff::tests::detects_riff_and_isobmff_which_need_a_second_field ... ok
+test read::tests::full_hash_matches_a_direct_hash_of_the_bytes ... ok
+test sniff::tests::detects_the_containers_in_this_archive ... ok
+test sniff::tests::short_and_unknown_input_is_not_an_image ... ok
+test thumb::predictor_tests::a_predictor_over_compressed_pixels_is_left_to_the_decoder ... ok
+test read::tests::the_partial_hash_separates_files_that_differ_at_either_end ... ok
+test thumb::predictor_tests::a_file_with_no_predictor_is_left_alone ... ok
+test thumb::predictor_tests::a_predictor_claimed_over_uncompressed_pixels_is_ignored ... ok
+test metrics::tests::a_grey_wall_is_not_a_document_either ... ok
+test tiff::tests::a_wrong_length_is_corrected_by_the_end_marker ... ok
+test tiff::tests::accept_preview_rejects_bytes_that_are_not_a_jpeg ... ok
+test tiff::tests::finds_both_previews_and_prefers_the_large_one ... ok
+test tiff::tests::non_tiff_and_bigtiff_yield_nothing_instead_of_panicking ... ok
+test tiff::tests::ranges_can_be_read_from_the_header_alone ... ok
+test tiff::tests::the_preview_is_chosen_by_pixels_not_by_byte_length ... ok
+test tiff::tests::truncated_and_garbage_input_never_panics ... ok
+test metrics::tests::a_sharp_subject_on_a_blurred_background_is_not_called_blurry ... ok
+test metrics::tests::a_blurred_frame_scores_below_the_sharp_one ... ok
+test metrics::tests::a_photograph_does_not_read_as_a_document ... ok
+test metrics::tests::a_picket_fence_is_busy_everywhere_rather_than_in_lines ... ok
+test metrics::tests::a_printed_page_reads_as_ink_on_paper ... ok
+test thumb::tests::orientation_is_applied_so_rotated_copies_agree ... ok
+test thumb::tests::the_encoded_thumbnail_can_be_read_back ... ok
+test thumb::tests::thumbnail_fits_the_box_and_keeps_aspect ... ok
+test metrics::tests::subsampling_keeps_large_frames_comparable ... ok
+
+test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running unittests src/lib.rs (target/debug/deps/pc_lightroom-df31253d54ea10ba)
+
+running 5 tests
+test tests::joins_paths_with_and_without_slashes ... ok
+test tests::unknown_schema_is_an_error_not_a_pass ... ok
+test tests::a_catalog_without_the_images_table_still_yields_its_masters ... ok
+test tests::reads_ratings_when_the_catalog_has_them ... ok
+test tests::reads_a_minimal_catalog ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/pc_organize-795b9097ac8c9468)
+
+running 14 tests
+test date::tests::a_bare_month_without_a_year_above_it_means_nothing ... ok
+test date::tests::exif_wins_over_everything_else ... ok
+test date::tests::a_dead_camera_clock_is_not_a_date ... ok
+test date::tests::an_event_directory_reads_back_at_the_time_it_was_named_with ... ok
+test events::tests::the_second_event_of_a_day_is_named_by_its_start ... ok
+test events::tests::a_day_of_shooting_stays_one_event ... ok
+test date::tests::the_path_answers_at_the_precision_it_knows ... ok
+test events::tests::nothing_in_gives_nothing_out ... ok
+test events::tests::a_long_silence_separates_two_occasions ... ok
+test date::tests::mtime_is_the_last_resort_and_is_marked_as_a_guess ... ok
+test plan::tests::a_file_without_an_extension_still_gets_a_name ... ok
+test plan::tests::a_name_is_kept_unless_something_already_holds_it ... ok
+test plan::tests::a_raw_and_its_jpeg_keep_one_stem_even_when_it_changes ... ok
+test plan::tests::uncertain_dates_go_to_their_own_corner ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/pc_walk-dd164b7c8912c98f)
+
+running 7 tests
+test classify::tests::backup_paths_are_detected ... ok
+test classify::tests::ordinary_directories_are_not_bundles ... ok
+test classify::tests::catalog_data_is_recognised_and_is_not_regenerable ... ok
+test classify::tests::distinguishes_smart_previews_from_previews ... ok
+test classify::tests::helper_bundles_are_recognised ... ok
+test classify::tests::handles_catalog_names_with_spaces ... ok
+test walk_tests::a_photos_library_is_recorded_but_never_entered ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/pc_work-8385d9b5bd210003)
+
+running 9 tests
+test permit::tests::a_permit_is_returned_when_dropped ... ok
+test scan::tests::catalog_data_is_always_blocked ... ok
+test scan::tests::orphaned_previews_are_removable ... ok
+test scan::tests::previews_get_a_rebuild_hint ... ok
+test scan::tests::an_open_catalog_blocks_its_previews ... ok
+test scan::tests::rebuild_hint_scales_to_hours ... ok
+test priority::tests::a_worker_is_always_left_and_never_zero ... ok
+test priority::tests::the_pool_runs_work_on_the_requested_number_of_threads ... ok
+test permit::tests::never_lets_more_than_n_through_at_once ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pc_api
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pc_apply
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pc_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pc_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pc_db
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pc_family
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pc_hash
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pc_image
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pc_lightroom
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pc_organize
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pc_walk
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pc_work
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

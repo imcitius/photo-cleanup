@@ -806,6 +806,7 @@ name = "pc-apply"
 version = "0.2.15"
 dependencies = [
  "anyhow",
+ "image",
  "pc-core",
  "pc-db",
  "pc-family",
@@ -906,6 +907,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "pc-core",
+ "pc-hash",
  "quick-xml",
  "serde",
  "tempfile",

@@ -106,6 +106,11 @@ fn has_camera_exif(f: &FileInfo) -> bool {
 ///
 /// `quality` decides which of several byte-identical members survives as the
 /// real thing and which become copies.
+/// What this file has to match, byte for byte, to be called a copy.
+fn identity(f: &FileInfo) -> Option<&Vec<u8>> {
+    f.content_hash.as_ref().or(f.pixel_hash.as_ref())
+}
+
 pub fn assign(files: &[FileInfo], members: &[usize], quality: &[f64]) -> Vec<Role> {
     let mut roles = vec![Role::Unknown; members.len()];
     if members.is_empty() {
@@ -119,11 +124,24 @@ pub fn assign(files: &[FileInfo], members: &[usize], quality: &[f64]) -> Vec<Rol
         if claimed[pos] {
             continue;
         }
-        let Some(hash) = files[members[pos]].pixel_hash.as_ref() else {
-            continue;
+        // The evidence for "copy" is the whole frame in colour at its own
+        // size. The grey square that decides *likeness* cannot carry this
+        // word: a red frame and a green one of equal brightness are the same
+        // square, and so is a photograph beside its own downscaled export.
+        //
+        // An archive indexed before that hash existed falls back to the old
+        // one rather than losing every group at once — it is what those rows
+        // were built with, and re-reading the files replaces it.
+        let by_content = files[members[pos]].content_hash.is_some();
+        let hash = match identity(&files[members[pos]]) {
+            Some(h) => h,
+            None => continue,
         };
         let twins: Vec<usize> = (0..members.len())
-            .filter(|&q| files[members[q]].pixel_hash.as_ref() == Some(hash))
+            .filter(|&q| {
+                files[members[q]].content_hash.is_some() == by_content
+                    && identity(&files[members[q]]) == Some(hash)
+            })
             .collect();
         if twins.len() < 2 {
             continue;

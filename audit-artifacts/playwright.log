@@ -1,0 +1,29 @@
+
+> photo-cleanup-web@0.1.0 test
+> playwright test
+
+
+Running 16 tests using 1 worker
+
+(node:11947) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 [chromium] › tests/interface.spec.ts:32:1 › production page renders and every screen is clickable without an invisible overlay (1.0s)
+  ✓   2 [chromium] › tests/interface.spec.ts:58:1 › keyboard modal restores focus; themes and tablet layouts stay accessible (850ms)
+  ✓   3 [chromium] › tests/interface.spec.ts:97:1 › server errors are readable and retryable (193ms)
+  ✓   4 [chromium] › tests/interface.spec.ts:114:1 › a running job survives tab reload and requests cooperative cancellation (2.9s)
+  ✓   5 [chromium] › tests/interface.spec.ts:164:1 › interrupted work stays visible and leads to the journal (183ms)
+  ✓   6 [chromium] › tests/interface.spec.ts:187:1 › 50,000 families use a bounded DOM, filters and optimistic rollback (585ms)
+  ✓   7 [chromium] › tests/interface.spec.ts:250:1 › purge needs a reviewed plan, a checkbox and the exact confirmation word (324ms)
+  ✓   8 [chromium] › tests/pipeline.spec.ts:4:1 › real archive goes through scan, index, review, quarantine, undo and organization in the browser (4.8s)
+(node:12008) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   9 [webkit] › tests/interface.spec.ts:32:1 › production page renders and every screen is clickable without an invisible overlay (2.1s)
+  ✓  10 [webkit] › tests/interface.spec.ts:58:1 › keyboard modal restores focus; themes and tablet layouts stay accessible (1.9s)
+  ✓  11 [webkit] › tests/interface.spec.ts:97:1 › server errors are readable and retryable (525ms)
+  ✓  12 [webkit] › tests/interface.spec.ts:114:1 › a running job survives tab reload and requests cooperative cancellation (3.2s)
+  ✓  13 [webkit] › tests/interface.spec.ts:164:1 › interrupted work stays visible and leads to the journal (454ms)
+  ✓  14 [webkit] › tests/interface.spec.ts:187:1 › 50,000 families use a bounded DOM, filters and optimistic rollback (1.0s)
+  ✓  15 [webkit] › tests/interface.spec.ts:250:1 › purge needs a reviewed plan, a checkbox and the exact confirmation word (660ms)
+  ✓  16 [webkit] › tests/pipeline.spec.ts:4:1 › real archive goes through scan, index, review, quarantine, undo and organization in the browser (8.9s)
+
+  16 passed (32.5s)

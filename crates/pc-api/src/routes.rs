@@ -246,12 +246,13 @@ fn to_out(f: FamilyRow, db: &pc_db::Db) -> FamilyOut {
         .members
         .iter()
         .find(|m| m.is_keeper)
-        .and_then(|m| m.pixel_hash.clone());
+        .and_then(|m| m.content_hash.clone().or_else(|| m.pixel_hash.clone()));
     let mut members: Vec<MemberOut> = f
         .members
         .into_iter()
         .map(|m| {
-            let same_as_kept = match (&m.pixel_hash, &kept_pixels) {
+            let mine = m.content_hash.clone().or_else(|| m.pixel_hash.clone());
+            let same_as_kept = match (&mine, &kept_pixels) {
                 (Some(a), Some(b)) => a == b,
                 _ => false,
             };

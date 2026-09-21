@@ -1,0 +1,38 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/pc_api-96f90599454ab85c)
+
+running 16 tests
+test tests::a_parent_component_is_refused_whatever_the_path_looks_like ... ok
+test tests::one_writer_and_legacy_urls_cannot_bypass_review ... ok
+test tests::a_reset_is_refused_while_a_job_holds_the_writer ... ok
+test tests::api_contract_and_embedded_production_assets ... ok
+test tests::manual_dates_and_categories_survive_reindexing ... ok
+test tests::recovery_and_directory_boundaries ... ok
+test tests::open_lightroom_at_apply_time_invalidates_a_preview ... ok
+test tests::a_reset_needs_the_word_and_leaves_the_archive_and_the_journal_alone ... ok
+test tests::reviewed_derived_cycle_undo_and_purge_and_stale_plan ... ok
+test tests::one_group_can_be_acted_on_without_touching_the_rest ... FAILED
+test tests::one_file_carries_its_evidence_and_an_unknown_one_is_a_404 ... ok
+test tests::the_whole_chain_runs_as_one_job_and_reports_its_stage ... ok
+test tests::a_series_is_listed_in_shooting_order_not_in_quality_order ... ok
+test tests::real_index_is_readable_during_work_and_stops_between_files ... ok
+test tests::rejected_frames_reach_the_plan_and_can_be_taken_back ... ok
+test tests::a_rejected_frame_moves_beside_itself_and_comes_back ... ok
+
+failures:
+
+---- tests::one_group_can_be_acted_on_without_touching_the_rest stdout ----
+
+thread 'tests::one_group_can_be_acted_on_without_touching_the_rest' (6646455) panicked at crates/pc-api/src/tests.rs:69:9:
+assertion `left == right` failed: {"error":"Job #1 is already running. Wait for it, or stop it."}
+  left: 409
+ right: 202
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::one_group_can_be_acted_on_without_touching_the_rest
+
+test result: FAILED. 15 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+error: test failed, to rerun pass `-p pc-api --lib`

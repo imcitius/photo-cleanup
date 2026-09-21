@@ -26,7 +26,7 @@ export const ui = {
     export:
       "The same shot saved by an editor: a separate file, usually smaller and edited.",
     resize: "A smaller version of the same shot.",
-    copy: "The same bytes as the kept file: the only thing moved by default.",
+    copy: "The same picture as the kept file: the whole frame matched, in colour and at its own size. For raw files the bytes themselves are compared. The only thing moved by default.",
     unknown:
       "The kind is not established: no camera data, and nothing points at a source. Nothing is moved on this basis.",
   },

@@ -1,0 +1,22 @@
+   Compiling pc-api v0.2.15 (/Users/citius/Desktop/Work/photo-cleanup/crates/pc-api)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.79s
+     Running tests/audit_regressions.rs (target/debug/deps/audit_regressions-91ddeae57fd27707)
+
+running 2 tests
+
+thread 'b02_bulk_bmp_jpeg_choice_must_reach_the_folder_plan' (6668418) panicked at crates/pc-api/tests/audit_regressions.rs:44:2:
+assertion `left == right` failed: the UI's folder plan dropped the rejected BMP: {"items":[],"kind":"plan-apply","params":{"keeper_folder":"/private/var/folders/b6/ltn3hn4j3nq1n86rbg2j9zk40000gn/T/.tmpS2EMaO/archive/exports"},"refusals":[],"token":"82c18f022ebe775960fd4c0b3e4a07ccbda50788968618c07b63bd29d86a613e","total_bytes":0,"total_files":0}
+  left: Number(0)
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test b02_bulk_bmp_jpeg_choice_must_reach_the_folder_plan ... FAILED
+test b01_single_bmp_jpeg_choice_is_in_reviewed_plan ... ok
+
+failures:
+
+failures:
+    b02_bulk_bmp_jpeg_choice_must_reach_the_folder_plan
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p pc-api --test audit_regressions`

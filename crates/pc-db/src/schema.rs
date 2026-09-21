@@ -301,6 +301,27 @@ const MIGRATIONS: &[&str] = &[
         seen_run INTEGER NOT NULL
     );
     "#,
+    // 013 — what "the same picture" is allowed to mean, and which turns of it
+    // count as the same photograph.
+    //
+    // `pixel_hash` was doing both jobs and could do neither: it hashes a grey
+    // 128x128 square made for judging likeness, so colour, aspect and
+    // resolution are gone from it long before the comparison. Calling that an
+    // exact copy was a promise the evidence did not carry.
+    //
+    // `content_hash` is the frame as it is shown — colour, native size — and
+    // it is what a copy has to match now. `phash_canon` is the perceptual
+    // hash of whichever of the eight turns of the frame reads smallest, so a
+    // photograph and its quarter-turned twin finally meet.
+    //
+    // Both are filled by reading the file, so an archive indexed before this
+    // has them empty until it is read again; everything falls back to the old
+    // behaviour meanwhile.
+    r#"
+    ALTER TABLE files ADD COLUMN content_hash BLOB;
+    ALTER TABLE files ADD COLUMN phash_canon  INTEGER;
+    CREATE INDEX files_content_hash ON files(content_hash);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

@@ -57,6 +57,8 @@ struct Fixed {
     id: i64,
     key: String,
     pixel_hash: Vec<u8>,
+    content_hash: Vec<u8>,
+    phash_canon: i64,
     phash: i64,
     dhash: i64,
     crops: Vec<u8>,
@@ -174,6 +176,8 @@ pub fn rebuild(
                 id: row.id,
                 key,
                 pixel_hash: pc_hash::pixel_hash(gray).to_vec(),
+                content_hash: probe.content_hash.to_vec(),
+                phash_canon: bits_to_i64(pc_hash::canonical_phash(gray)),
                 phash: bits_to_i64(pc_hash::phash(gray)),
                 dhash: bits_to_i64(pc_hash::dhash(gray)),
                 crops,
@@ -193,6 +197,7 @@ pub fn rebuild(
         let mut up = db.conn.prepare(
             "UPDATE files SET thumb_key = ?2, pixel_hash = ?3, phash = ?4, dhash = ?5,
                               phash_crops = ?6, width = ?7, height = ?8,
+                              content_hash = ?21, phash_canon = ?22,
                               sharpness = ?9, clip_low = ?10, clip_high = ?11, entropy = ?12,
                               contrast = ?13, saturation = ?14, chroma = ?15, tonal_range = ?16,
                               white_fraction = ?17, bimodality = ?18, text_rows = ?19,
@@ -222,6 +227,8 @@ pub fn rebuild(
                 m.bimodality as f64,
                 m.text_rows as f64,
                 m.text_banding as f64,
+                f.content_hash,
+                f.phash_canon,
             ])?;
         }
     }

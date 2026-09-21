@@ -1051,8 +1051,9 @@ pub async fn prefer_folder(State(st): State<Arc<AppState>>, Json(v): Json<Value>
         let rows: Vec<Row> = {
             let mut st = db.conn.prepare(
                 "SELECT fm.family_id, fm.file_id, f.path, COALESCE(fm.quality, 0),
-                        f.pixel_hash,
-                        (SELECT k.pixel_hash FROM files k WHERE k.id = fa.keeper_file)
+                        COALESCE(f.content_hash, f.pixel_hash),
+                        (SELECT COALESCE(k.content_hash, k.pixel_hash) FROM files k
+                          WHERE k.id = fa.keeper_file)
                    FROM family_members fm
                    JOIN files f     ON f.id = fm.file_id
                    JOIN families fa ON fa.id = fm.family_id

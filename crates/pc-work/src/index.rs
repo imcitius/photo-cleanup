@@ -153,6 +153,8 @@ fn process(
             pixel_source: Some(probe.source.as_str().to_string()),
             partial_hash: Some(r.partial_hash.to_vec()),
             pixel_hash: Some(pc_hash::pixel_hash(gray).to_vec()),
+            content_hash: Some(probe.content_hash.to_vec()),
+            phash_canon: Some(bits_to_i64(pc_hash::canonical_phash(gray))),
             phash: Some(bits_to_i64(pc_hash::phash(gray))),
             dhash: Some(bits_to_i64(pc_hash::dhash(gray))),
             phash_crops: Some(crop_bytes),

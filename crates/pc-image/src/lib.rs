@@ -36,6 +36,9 @@ pub struct Probe {
     pub thumb: Thumbnail,
     /// Technical quality, measured on the decoded frame before downscaling.
     pub metrics: Metrics,
+    /// The whole frame as it is shown, hashed at its own size and in colour.
+    /// This is what "the same picture" is allowed to mean.
+    pub content_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +118,16 @@ pub fn probe_parts(
     };
 
     let metrics = metrics::measure(&pixels);
+    // Hashed the way the frame is shown, so a rewritten orientation tag is a
+    // different picture here and the same one to the perceptual side, which
+    // compares turns.
+    let content_hash = if meta.orientation <= 1 {
+        // Nothing to turn — and a full frame is tens of megabytes, so copying
+        // it just to hash it would double what every worker holds.
+        pc_hash::content_hash(&pixels)
+    } else {
+        pc_hash::content_hash(&thumb::apply_orientation(pixels.clone(), meta.orientation))
+    };
     let thumb = thumb::make(pixels, meta.orientation);
     Ok(Probe {
         container,
@@ -125,5 +138,6 @@ pub fn probe_parts(
         source,
         thumb,
         metrics,
+        content_hash,
     })
 }
