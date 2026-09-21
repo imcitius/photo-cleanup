@@ -1253,7 +1253,17 @@ async fn a_marked_folder_makes_its_tree_the_originals_and_clears_the_copies() {
         .iter()
         .map(|d| d["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["mirror/2014", "shots/2014/june"], "{level}");
+    // A collapsed name is a run of folders, and it is spelled the way the
+    // archive spells its paths: a Windows server says `mirror\2014`.
+    let sep = std::path::MAIN_SEPARATOR;
+    assert_eq!(
+        names,
+        [
+            format!("mirror{sep}2014"),
+            format!("shots{sep}2014{sep}june")
+        ],
+        "{level}"
+    );
 
     let shots_dir = shots.display().to_string();
     let (_, leaf) = f.req("GET", &at(&shots_dir), Value::Null).await;
