@@ -235,6 +235,48 @@ pub(crate) fn rename_with_parents(src: &Path, dst: &Path) -> Result<()> {
     })
 }
 
+/// The catalogue's own answer, asked at the moment of the move.
+///
+/// A scan writes down what it found — and by the time a plan is carried out,
+/// Lightroom may have been opened, or the originals a smart preview stands in
+/// for may have gone. The saved verdict cannot know that; only the disk can.
+/// This is the check every path takes, HTTP and command line alike, so that
+/// "the catalogue is open" is a property of the operation and not of one
+/// interface to it.
+pub fn lightroom_gate(b: &Bundle) -> Result<()> {
+    let Some(owner) = &b.owner_ref else {
+        return Ok(());
+    };
+    if Path::new(&format!("{owner}.lock")).exists() {
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "Каталог Lightroom открыт: {0}",
+                "The Lightroom catalogue is open: {0}",
+                owner
+            )
+        );
+    }
+    // A smart preview is the only copy of a frame whose original is not
+    // there. Standing in for nothing, it stops being derived data.
+    if b.kind == pc_core::DerivedKind::LrSmartPreviews && Path::new(owner).exists() {
+        let check = pc_lightroom::check_originals(Path::new(owner))?;
+        if !check.all_present() {
+            bail!(
+                "{}",
+                pc_core::tf!(
+                    "Отсутствуют оригиналы: {0} из {1} — {2}",
+                    "Originals are missing: {0} of {1} — {2}",
+                    check.missing,
+                    check.total,
+                    owner
+                )
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Move one bundle into quarantine, journalling before touching the filesystem.
 pub fn quarantine(
     db: &Db,
@@ -265,6 +307,7 @@ pub fn quarantine(
     if !unchanged(b)? {
         return Ok(Outcome::Skipped);
     }
+    lightroom_gate(b)?;
 
     let dst = quarantine_dest(b, override_root)?;
     let dst_str = dst.to_string_lossy().into_owned();
@@ -657,4 +700,66 @@ pub fn quarantined_totals(db: &Db) -> Result<Totals> {
         t.bytes += e.size as u64;
     }
     Ok(t)
+}
+
+#[cfg(test)]
+mod lightroom_tests {
+    use super::*;
+    use pc_db::{model::NewBundle, Db};
+
+    /// A bundle of previews recorded by a scan, exactly as the walk writes it.
+    fn scanned(db: &Db, run: i64, dir: &Path, owner: &Path) -> pc_db::Bundle {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("cache"), b"cached").unwrap();
+        db.upsert_bundle(
+            &NewBundle {
+                path: dir.display().to_string(),
+                is_dir: true,
+                disk: "root".into(),
+                dev: 0,
+                mount: dir.parent().unwrap().display().to_string(),
+                kind: pc_core::DerivedKind::LrPreviews,
+                owner_ref: Some(owner.display().to_string()),
+                file_count: 1,
+                size: 6,
+                newest_mtime: pc_core::time::mtime_unix(&fs::metadata(dir).unwrap()),
+            },
+            run,
+        )
+        .unwrap();
+        db.list_bundles(&Default::default())
+            .unwrap()
+            .into_iter()
+            .find(|b| b.path == dir.display().to_string())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_catalogue_opened_after_the_scan_stops_the_move_in_the_core() {
+        // The scan wrote down that nothing blocked these previews. Lightroom
+        // was opened afterwards, and rebuilding previews it is holding is not
+        // the tool's decision to make. The web preview used to be the only
+        // place that looked again — the command line went straight past it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("archive");
+        let previews = root.join("Library Previews.lrdata");
+        let owner = root.join("Library.lrcat");
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[root.display().to_string()], "test").unwrap();
+        let b = scanned(&db, run, &previews, &owner);
+        assert!(
+            b.removable(),
+            "сценарий не тот: скан уже что-то заблокировал"
+        );
+
+        fs::write(root.join("Library.lrcat.lock"), b"open").unwrap();
+        let refused = quarantine(&db, run, &b, None).unwrap_err().to_string();
+        assert!(refused.contains("Library.lrcat"), "{refused}");
+        assert!(previews.exists(), "превью уехали при открытом каталоге");
+
+        // Closed again, and the same call goes through.
+        fs::remove_file(root.join("Library.lrcat.lock")).unwrap();
+        assert_eq!(quarantine(&db, run, &b, None).unwrap(), Outcome::Moved);
+        assert!(!previews.exists());
+    }
 }

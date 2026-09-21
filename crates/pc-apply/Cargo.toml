@@ -11,6 +11,7 @@ pc-db.workspace = true
 pc-family.workspace = true
 pc-organize.workspace = true
 pc-image.workspace = true
+pc-lightroom.workspace = true
 pc-hash.workspace = true
 anyhow.workspace = true
 rusqlite.workspace = true

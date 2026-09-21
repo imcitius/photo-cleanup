@@ -9,7 +9,6 @@ license.workspace = true
 pc-image.workspace = true
 image.workspace = true
 pc-work.workspace = true
-pc-lightroom.workspace = true
 rusqlite.workspace = true
 blake3.workspace = true
 async-stream = "0.3"

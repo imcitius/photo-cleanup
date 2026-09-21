@@ -687,7 +687,7 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     );
                     continue;
                 }
-                if let Err(e) = bundle_gate(&b) {
+                if let Err(e) = pc_apply::lightroom_gate(&b) {
                     add_refusal(b.path.clone(), format!("{e:#}"));
                     continue;
                 }
@@ -959,31 +959,6 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
         .to_string());
     Ok((out, actions))
 }
-fn bundle_gate(b: &pc_db::Bundle) -> Result<()> {
-    if let Some(owner) = &b.owner_ref {
-        if FsPath::new(&format!("{owner}.lock")).exists() {
-            bail!(
-                "{}",
-                pc_core::tf!(
-                    "Каталог Lightroom открыт: {0}",
-                    "The Lightroom catalogue is open: {0}",
-                    owner
-                )
-            );
-        }
-        if b.kind == pc_core::DerivedKind::LrSmartPreviews && FsPath::new(owner).exists() {
-            let check = pc_lightroom::check_originals(FsPath::new(owner))?;
-            if !check.all_present() {
-                bail!(
-                    "Отсутствуют оригиналы: {} из {} — {owner}",
-                    check.missing,
-                    check.total
-                );
-            }
-        }
-    }
-    Ok(())
-}
 pub fn apply_action(
     st: &AppState,
     db: &Db,
@@ -1001,7 +976,6 @@ pub fn apply_action(
             }
         }
         Action::Bundle(b) => {
-            bundle_gate(b)?;
             if matches!(
                 pc_apply::quarantine(db, run, b, root.as_deref())?,
                 pc_apply::Outcome::Skipped
