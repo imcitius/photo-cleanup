@@ -1002,3 +1002,35 @@ async fn a_purge_takes_the_sidecar_with_the_frame_and_leaves_nothing_behind() {
     assert!(f.archive.join("a.jpg").exists());
     assert!(f.archive.join("a.xmp").exists());
 }
+
+#[tokio::test]
+async fn a_finished_job_has_already_let_go_of_the_writer() {
+    // "Done" is what the interface waits for before pressing the next button.
+    // The terminal state used to be written while the job still held the
+    // single-writer gate, so a press in that instant was refused with 409 for
+    // work that was over — rare enough to look like a ghost, common enough to
+    // fail a test run about once in thirty.
+    let f = Fixture::new();
+    // Stand in the gap on purpose: the two steps are microseconds apart in
+    // real life, which is why this went unexplained for so long.
+    jobs::FINISH_PAUSE_MS.store(150, std::sync::atomic::Ordering::Relaxed);
+    for round in 0..3 {
+        let id = f.start("families", json!({})).await;
+        // No sleeping between polls: the point is to arrive exactly at the
+        // moment the job reports itself finished.
+        loop {
+            let (_, j) = f.req("GET", &format!("/api/jobs/{id}"), Value::Null).await;
+            if !matches!(j["state"].as_str(), Some("queued" | "running")) {
+                assert_eq!(j["state"], "done", "{j}");
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let (status, v) = f
+            .req("POST", "/api/jobs", json!({"kind":"families","params":{}}))
+            .await;
+        assert_eq!(status, 202, "круг {round}: {v}");
+        f.wait(v["job_id"].as_i64().unwrap()).await;
+    }
+    jobs::FINISH_PAUSE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+}

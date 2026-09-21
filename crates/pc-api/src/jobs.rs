@@ -44,6 +44,24 @@ pub fn destructive(kind: &str) -> bool {
             | "quarantine-purge"
     )
 }
+/// A gap held open between releasing the writer and recording the terminal
+/// state, so a test can stand exactly in it. Zero everywhere else; the order
+/// of those two steps is what it exists to prove — whoever reads "done" must
+/// find the gate already open.
+#[cfg(test)]
+pub(crate) static FINISH_PAUSE_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn pause_between_letting_go_and_saying_so() {
+    #[cfg(test)]
+    {
+        let ms = FINISH_PAUSE_MS.load(Ordering::Relaxed);
+        if ms > 0 {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+    }
+}
+
 pub fn idle(st: &AppState) -> Result<()> {
     if let Some((id, _)) = &*st.jobs.active.lock().unwrap() {
         bail!(
@@ -253,6 +271,13 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
             Err(e) if e.is::<pc_core::work::Cancelled>() => "cancelled",
             Err(_) => "failed",
         };
+        // The writer is released before the job is called finished, and not
+        // after. Whoever sees "done" tries the next job immediately, and in
+        // the other order that press met a gate the finished job was still
+        // holding — a 409 for work that was over. The reverse gap is harmless:
+        // the row says "running" for an instant longer than it runs.
+        *st.jobs.active.lock().unwrap() = None;
+        pause_between_letting_go_and_saying_so();
         if let Ok(db) = Db::open(&st.db_path) {
             let err = result.err().map(|e| format!("{e:#}"));
             let _ = db.conn.execute(
@@ -266,7 +291,6 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
                 ],
             );
         }
-        *st.jobs.active.lock().unwrap() = None;
     });
     (axum::http::StatusCode::ACCEPTED, Json(json!({"job_id":id}))).into_response()
 }
