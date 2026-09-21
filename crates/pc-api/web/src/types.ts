@@ -256,6 +256,8 @@ export interface Series {
   id: number;
   kind: string;
   label: string;
+  /// What was measured to call it that.
+  because: string;
   started_at: number | null;
   camera: string | null;
   protected: boolean;

@@ -961,6 +961,8 @@ pub struct SeriesOut {
     id: i64,
     kind: String,
     label: &'static str,
+    /// What was measured to call it that, so the screen can say it plainly.
+    because: &'static str,
     started_at: Option<i64>,
     camera: Option<String>,
     protected: bool,
@@ -985,11 +987,8 @@ pub async fn series(
             .into_iter()
             .map(|s| SeriesOut {
                 id: s.id,
-                label: match s.kind.as_str() {
-                    "pixel-shift" => "pixel-shift",
-                    "bracket" => pc_core::tr!("брекетинг", "bracketing"),
-                    _ => pc_core::tr!("серия", "burst"),
-                },
+                label: pc_family::series::SeriesKind::parse(&s.kind).label(),
+                because: pc_family::series::SeriesKind::parse(&s.kind).because(),
                 kind: s.kind,
                 started_at: s.started_at,
                 camera: s.camera,
@@ -1101,7 +1100,31 @@ const VIEW_SIDE: u32 = 2400;
 /// frame that was rendered wrong stays wrong for as long as the file sits
 /// untouched — which is exactly what happened to the TIFFs whose predictor
 /// tag we used to obey.
-const RENDER: &[u8] = b"v3-orientation";
+/// What the rendered view depends on, so the cache invalidates itself.
+///
+/// The key used to carry a marker typed by hand, and a marker typed by hand
+/// is a marker somebody forgets: the decoder was fixed once and every stale
+/// grey view stayed stale until the string was bumped. This is the same
+/// question answered by the build — the sources that decide how a file is
+/// decoded and turned into a picture, the locked versions of the libraries
+/// that do it, and this release. Nothing here depends on *when* it was built,
+/// so two builds of the same tree still agree on the cache.
+fn render_fingerprint() -> &'static [u8; 32] {
+    static FINGERPRINT: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        let mut h = blake3::Hasher::new();
+        for source in [
+            include_str!("../../pc-image/src/thumb.rs"),
+            include_str!("../../pc-image/src/tiff.rs"),
+            include_str!("../../pc-image/src/read.rs"),
+            include_str!("../../../Cargo.lock"),
+            env!("CARGO_PKG_VERSION"),
+        ] {
+            h.update(source.as_bytes());
+        }
+        *h.finalize().as_bytes()
+    })
+}
 
 /// Where a rendered view of this file is kept between looks.
 fn view_key(path: &str, md: &std::fs::Metadata, full: bool) -> String {
@@ -1113,7 +1136,7 @@ fn view_key(path: &str, md: &std::fs::Metadata, full: bool) -> String {
         .unwrap_or(0);
     let mut hasher = blake3::Hasher::new();
     hasher.update(if full { b"view-full" } else { b"view-2400" });
-    hasher.update(RENDER);
+    hasher.update(render_fingerprint());
     hasher.update(path.as_bytes());
     hasher.update(&stamp.to_le_bytes());
     hasher.update(&md.len().to_le_bytes());

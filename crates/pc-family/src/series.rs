@@ -28,6 +28,15 @@ pub enum SeriesKind {
 }
 
 impl SeriesKind {
+    /// The word stored in the database, back into a kind.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "pixel-shift" => Self::PixelShift,
+            "bracket" => Self::Bracket,
+            _ => Self::Burst,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Burst => "burst",
@@ -36,18 +45,47 @@ impl SeriesKind {
         }
     }
 
+    /// What to call this on screen.
+    ///
+    /// Two of these are guesses and are worded as guesses. Nothing here reads
+    /// the camera's own account of what it was doing: a pixel-shift set is
+    /// recognised by four indistinguishable raw frames in a moment, and
+    /// bracketing by frames of one moment clipping differently. Ordinary
+    /// shooting produces both of those often enough — four quick frames of a
+    /// still subject, a moving scene against a bright sky — and a label that
+    /// says "pixel-shift" flatly claims a fact the tool does not have.
     pub fn label(self) -> &'static str {
         match self {
             Self::Burst => pc_core::tr!("серия", "burst"),
-            Self::Bracket => pc_core::tr!("брекетинг", "bracketing"),
-            Self::PixelShift => "pixel-shift",
+            Self::Bracket => pc_core::tr!("похоже на брекетинг", "looks like bracketing"),
+            Self::PixelShift => pc_core::tr!("похоже на pixel-shift", "looks like pixel-shift"),
+        }
+    }
+
+    /// Why the tool thinks so, in the words of what was actually measured.
+    pub fn because(self) -> &'static str {
+        match self {
+            Self::Burst => pc_core::tr!(
+                "кадры сняты один за другим",
+                "the frames were taken one after another"
+            ),
+            Self::Bracket => pc_core::tr!(
+                "кадры одного мгновения по-разному пересвечены — так снимают с вилкой экспозиции",
+                "frames of one moment clip differently, which is how an exposure bracket looks"
+            ),
+            Self::PixelShift => pc_core::tr!(
+                "четыре неразличимых RAW за пару секунд — так выглядит съёмка со сдвигом матрицы",
+                "four indistinguishable raw frames within a couple of seconds, which is how a sensor-shift capture looks"
+            ),
         }
     }
 
     /// Whether thinning the series is forbidden outright.
     pub fn protected(self) -> bool {
         // A pixel-shift set is one photograph stored as four files; losing
-        // any of them loses the photograph.
+        // any of them loses the photograph. The guess is not certain, so the
+        // protection errs the safe way: a burst kept whole costs the user a
+        // decision, a pixel-shift set thinned costs them the photograph.
         matches!(self, Self::PixelShift)
     }
 }
@@ -138,8 +176,15 @@ fn rank(members: &[&FileInfo]) -> Vec<Ranked> {
     out
 }
 
+/// What kind of series this looks like.
+///
+/// Every answer here is an inference from timing and from measurements of the
+/// frames. The camera's own record of its mode is not read — the makers keep
+/// it in their own notes, which this tool does not parse — so these are named
+/// as resemblances, not as facts, wherever they are shown.
 fn classify(members: &[&FileInfo]) -> SeriesKind {
-    // Four frames within a second or so, indistinguishable: sensor shift.
+    // Four indistinguishable raw frames in a moment: what sensor shift looks
+    // like, and also what four quick frames of a still subject look like.
     let span = match (
         members.iter().filter_map(|f| f.taken_at).min(),
         members.iter().filter_map(|f| f.taken_at).max(),
@@ -291,6 +336,37 @@ pub fn build_controlled(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_guess_about_the_camera_is_worded_as_a_guess() {
+        // Four quick raw frames of a still subject look exactly like a
+        // sensor-shift capture, and nothing here reads the camera's own
+        // account of what it was doing. The set is still protected — that
+        // errs the safe way — but the screen must not state as fact a mode
+        // that was never measured.
+        for kind in [SeriesKind::PixelShift, SeriesKind::Bracket] {
+            let label = kind.label();
+            assert!(
+                label.starts_with("похоже") || label.starts_with("looks like"),
+                "метка утверждает режим камеры: {label}"
+            );
+            assert!(!kind.because().is_empty(), "не сказано, что измерено");
+        }
+        assert_eq!(SeriesKind::Burst.label(), pc_core::tr!("серия", "burst"));
+        assert!(SeriesKind::PixelShift.protected());
+        assert!(!SeriesKind::Bracket.protected());
+    }
+
+    #[test]
+    fn the_word_in_the_database_survives_the_round_trip() {
+        for kind in [
+            SeriesKind::Burst,
+            SeriesKind::Bracket,
+            SeriesKind::PixelShift,
+        ] {
+            assert_eq!(SeriesKind::parse(kind.as_str()), kind);
+        }
+    }
+
     use super::*;
 
     fn frame(id: i64, t: i64, sharp: f64, phash: u64) -> FileInfo {

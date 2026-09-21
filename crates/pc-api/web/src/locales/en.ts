@@ -252,7 +252,7 @@ export const ui = {
   rebuildCategoriesHelp:
     "Work it out again from the current index. Files are not re-read — it takes seconds.",
   protectedSeries:
-    "Pixel-shift is protected: every frame is part of one photograph. Thinning it is not offered.",
+    "This looks like a pixel-shift set, so thinning it is not offered: if it is one, every frame is part of one photograph and losing any loses it. What was measured:",
   seriesNote:
     "No frame becomes a candidate for removal merely by belonging to a burst.",
   pendingNote:

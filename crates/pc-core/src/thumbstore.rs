@@ -21,6 +21,26 @@ pub fn hex32(bytes: &[u8]) -> String {
     s
 }
 
+/// Write beside the target and rename onto it, so a crash never leaves a
+/// half-written file that later looks valid.
+///
+/// The temporary name is unique per writer: several frames with identical
+/// content are hashed to one key and may be stored at the same moment, and a
+/// shared `.tmp` name means one writer renaming another writer's half-written
+/// file onto the target. Both ways into the store use this — they used to
+/// differ, and only one of them was safe.
+fn write_then_rename(path: &Path, jpeg: &[u8]) -> Result<()> {
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{sequence}.tmp", std::process::id()));
+    fs::write(&tmp, jpeg)?;
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
 impl ThumbStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -57,18 +77,7 @@ impl ThumbStore {
         ))?;
         fs::create_dir_all(parent)
             .with_context(|| crate::tf!("не создать {0}", "cannot create {0}", parent.display()))?;
-        // Write beside the target and rename, so a crash never leaves a
-        // half-written thumbnail that later looks valid.
-        // Several identical files may be indexed concurrently. A shared
-        // .tmp name makes one writer rename another writer's temporary file.
-        static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let sequence = NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = path.with_extension(format!("{}.{sequence}.tmp", std::process::id()));
-        fs::write(&tmp, jpeg)?;
-        if let Err(e) = fs::rename(&tmp, &path) {
-            let _ = fs::remove_file(&tmp);
-            return Err(e.into());
-        }
+        write_then_rename(&path, jpeg)?;
         Ok(key)
     }
 
@@ -82,13 +91,7 @@ impl ThumbStore {
             "no parent directory"
         ))?;
         fs::create_dir_all(parent)?;
-        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-        fs::write(&tmp, jpeg)?;
-        if let Err(e) = fs::rename(&tmp, &path) {
-            let _ = fs::remove_file(&tmp);
-            return Err(e.into());
-        }
-        Ok(())
+        write_then_rename(&path, jpeg)
     }
 
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
@@ -180,6 +183,31 @@ impl Hasher {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn one_key_written_from_several_threads_at_once_stays_whole() {
+        // A rendered view is keyed by the file it came from, so two tabs
+        // opening the same frame store the same key at the same moment. With
+        // a temporary name shared by both writers, one renames the other's
+        // half-written file onto the target — or finds nothing to rename.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ThumbStore::new(tmp.path().to_path_buf());
+        let key = "0123456789abcdef0123456789abcdef";
+        let payloads: Vec<Vec<u8>> = (0..8u8).map(|n| vec![n; 4096]).collect();
+
+        std::thread::scope(|scope| {
+            for jpeg in &payloads {
+                scope.spawn(|| store.put_at(key, jpeg).expect("запись не удалась"));
+            }
+        });
+
+        let stored = store.get(key).expect("ничего не сохранилось");
+        assert!(
+            payloads.contains(&stored),
+            "сохранилось не то, что писали: {} байт",
+            stored.len()
+        );
+    }
+
     use super::*;
 
     #[test]

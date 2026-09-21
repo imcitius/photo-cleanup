@@ -1204,7 +1204,11 @@ export function SeriesPage({
               <section className="panel series-panel" key={s.id}>
                 <div className="section-heading">
                   <h3>
-                    {s.label} · {when(s.started_at)}
+                    {/* The kind is a resemblance, not the camera's own word
+                        for what it did — the title says so, and the reason is
+                        one hover away. */}
+                    <span title={s.because}>{s.label}</span> ·{" "}
+                    {when(s.started_at)}
                   </h3>
                   <span className="muted">
                     {s.camera || ui.unknownCamera} · {s.members.length}{" "}
@@ -1250,7 +1254,9 @@ export function SeriesPage({
                   </div>
                 )}
                 {s.protected && (
-                  <Notice tone="warning">{ui.protectedSeries}</Notice>
+                  <Notice tone="warning">
+                    {ui.protectedSeries} {s.because}.
+                  </Notice>
                 )}
                 <div className="filmstrip">
                   {frames.map((m, i) => {
