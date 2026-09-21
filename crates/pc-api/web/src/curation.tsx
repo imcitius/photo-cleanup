@@ -532,25 +532,6 @@ export function Families({
   // rest are copies of it — and a folder of copies is cleared in one plan
   // rather than group by group. Shown before it runs, because this is a
   // thousand files rather than one.
-  const prepareFolderMove = async (dir: string) => {
-    setBusy(true);
-    setError("");
-    try {
-      const move = await plannedMove("folder", dir);
-      setFolderNote({
-        dir,
-        // Nothing to move is an answer too, and a common one: a folder of
-        // originals has no copies in it.
-        text: move ? "" : ui.folderHasNoCopies,
-        move,
-      });
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const runFolderMove = async () => {
     if (!folderNote?.move) return;
     const { scope, token } = folderNote.move;
@@ -564,6 +545,49 @@ export function Families({
       });
       setFolderNote(null);
       setSelected(null);
+      onChange();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // The tool stops at exact copies, and it should: a scan and the JPEG made
+  // from it are one photograph in two encodings, and no measurement settles
+  // which of them to keep. A person looking at both can settle it in one
+  // press, and that answer is worth as much as any rule here.
+  /// The group is read back rather than patched by hand: this changes the
+  /// kept file, what counts as movable and what is set aside, and guessing
+  /// all of that on the page is how it drifts from what the server holds.
+  const refreshGroup = async (id: number) => {
+    const fresh = await api<Family>(`/families/${id}`);
+    setSelected(fresh);
+    setCache(
+      (old) => new Map([...old].map(([k, f]) => [k, f.id === id ? fresh : f])),
+    );
+  };
+
+  const keepOnly = async (family: Family, m: Member) => {
+    setBusy(true);
+    setError("");
+    try {
+      await post(`/families/${family.id}/keep-only`, { file_id: m.file_id });
+      await refreshGroup(family.id);
+      onChange();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const keepAllVersions = async (family: Family) => {
+    setBusy(true);
+    setError("");
+    try {
+      await post(`/families/${family.id}/keep-all-versions`, {});
+      await refreshGroup(family.id);
       onChange();
     } catch (e) {
       setError((e as Error).message);
@@ -840,6 +864,14 @@ export function Families({
               </details>
               <div className="section-heading">
                 <span className="muted">{t("versii_snimka")}</span>
+                {selected.members.some((m) => m.is_rejected) && (
+                  <Button
+                    disabled={disabled || busy}
+                    onClick={() => keepAllVersions(selected)}
+                  >
+                    {ui.keepAllVersions}
+                  </Button>
+                )}
                 <Button
                   disabled={selection.length !== 2}
                   onClick={() =>
@@ -921,15 +953,6 @@ export function Families({
                           >
                             {ui.preferFolder}
                           </button>
-                          <span className="muted">·</span>
-                          <button
-                            className="link"
-                            disabled={disabled || busy}
-                            title={ui.moveFolderHelp}
-                            onClick={() => prepareFolderMove(m.dir)}
-                          >
-                            {ui.moveFolder}
-                          </button>
                         </div>
                         {folderNote?.dir === m.dir && (
                           <div className="folder-note">
@@ -982,6 +1005,9 @@ export function Families({
                           different file than the one kept now. Saying so is
                           the difference between a button that does nothing
                           and a group the user can finish. */}
+                      {m.is_rejected && !m.is_keeper && (
+                        <small className="green">{ui.setAside}</small>
+                      )}
                       {m.role === "copy" && !m.is_keeper && !m.same_as_kept && (
                         <small className="warning-text">
                           {ui.notACopyOfKept}
@@ -1025,6 +1051,18 @@ export function Families({
                           onClick={() => split(m)}
                         >
                           {ui.split}
+                        </Button>
+                        {/* For a group the measurements cannot settle: the
+                            same photograph as a scan and as an export, where
+                            only a person can say which one stays. */}
+                        <Button
+                          disabled={
+                            disabled || busy || selected.members.length < 2
+                          }
+                          title={ui.keepOnlyHelp}
+                          onClick={() => keepOnly(selected, m)}
+                        >
+                          {ui.keepOnly}
                         </Button>
                       </div>
                     </div>

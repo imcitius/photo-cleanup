@@ -212,6 +212,11 @@ export const ui = {
     "Mark this frame as unwanted. It joins the move plan; the file stays where it is until you approve that plan.",
   keepFrame: "Keep it",
   keepFrameHelp: "Clear the mark: the frame stays in the archive.",
+  keepOnly: "Keep only this one",
+  keepOnlyHelp:
+    "This file stays and every other version of the shot goes into the plan — including the ones that are not exact copies. This is how one photograph held as a scan and as an export gets settled.",
+  setAside: "set aside by you",
+  keepAllVersions: "Take that back",
   orphanQuarantineHelp:
     "These files sit in quarantine folders, but the journal knows nothing about them: another database moved them — an earlier one, or one from another machine. They can go back where they came from, one level up from where they lie. Deleting is for good.",
   orphanRestore: "Put everything back",
@@ -303,7 +308,7 @@ export const messages = {
   po_date_staryye: "Date, oldest first",
   po_papke: "Folder",
   semeystv: "groups",
-  tolko_neskolko_faylov: "Only groups of several files",
+  tolko_neskolko_faylov: "Only groups with something to move",
   spisok_semeystv: "Group list",
   postroyte_semeystva_ili_izmenite_filtry:
     "Build the duplicate groups, or change the filters.",

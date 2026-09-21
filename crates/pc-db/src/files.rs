@@ -542,6 +542,8 @@ pub struct MemberRow {
     /// What the pixels hash to. A role says what a file is; this says whether
     /// it is the same picture as the one being kept.
     pub pixel_hash: Option<Vec<u8>>,
+    /// The user looked at this file and said it can go, whatever its role.
+    pub is_rejected: bool,
     pub path: String,
     pub name: String,
     pub role: String,
@@ -627,8 +629,10 @@ impl Db {
         let mut st = self.conn.prepare(
             "SELECT fm.file_id, f.path, f.name, fm.role, f.size, f.width, f.height,
                     f.container, fm.quality, fm.breakdown, fm.evidence, f.thumb_key,
-                    f.pixel_hash
-               FROM family_members fm JOIN files f ON f.id = fm.file_id
+                    f.pixel_hash, r.file_id IS NOT NULL
+               FROM family_members fm
+               JOIN files f ON f.id = fm.file_id
+               LEFT JOIN manual_rejects r ON r.file_id = fm.file_id
               WHERE fm.family_id = ?1
               ORDER BY fm.quality DESC",
         )?;
@@ -649,6 +653,7 @@ impl Db {
                     evidence: r.get(10)?,
                     thumb_key: r.get(11)?,
                     pixel_hash: r.get(12)?,
+                    is_rejected: r.get(13)?,
                     is_keeper: Some(file_id) == keeper,
                 })
             })?
@@ -746,15 +751,26 @@ impl Db {
     /// Files the user marked as not worth keeping, with everything the
     /// planner needs to treat them like any other candidate.
     pub fn rejected_rows(&self) -> Result<Vec<PlanRow>> {
+        self.rejected_rows_scoped(None)
+    }
+
+    /// Files the user set aside by hand, optionally only within one group.
+    ///
+    /// A hand-made decision carries no family of its own — it is about the
+    /// file, not about what it duplicates — so a plan narrowed to one group
+    /// has to ask for its rejects by that group.
+    pub fn rejected_rows_scoped(&self, family: Option<i64>) -> Result<Vec<PlanRow>> {
         let mut st = self.conn.prepare(
             "SELECT f.id, f.path, f.size, f.width, f.height, f.mtime, f.inode, f.dev, f.disk
                FROM manual_rejects r
                JOIN files f ON f.id = r.file_id
               WHERE f.state = 'present'
+                AND (?1 IS NULL OR EXISTS(SELECT 1 FROM family_members fm
+                                           WHERE fm.file_id = f.id AND fm.family_id = ?1))
               ORDER BY f.path",
         )?;
         let rows = st
-            .query_map([], |r| {
+            .query_map([family], |r| {
                 Ok(PlanRow {
                     family_id: 0,
                     file_id: r.get(0)?,
@@ -1119,6 +1135,7 @@ impl Db {
                     evidence: None,
                     thumb_key: r.get(11)?,
                     pixel_hash: None,
+                    is_rejected: false,
                     is_keeper: false,
                 })
             })?

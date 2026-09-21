@@ -239,7 +239,7 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
     // stronger in the reason column would be inventing a justification the
     // tool does not have.
     let already: BTreeSet<i64> = plan.candidates.iter().map(|c| c.file_id).collect();
-    for m in db.rejected_rows()? {
+    for m in db.rejected_rows_scoped(scope.family)? {
         if already.contains(&m.file_id) {
             continue;
         }

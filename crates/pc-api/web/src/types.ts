@@ -14,6 +14,7 @@ export interface Member {
   is_keeper: boolean;
   /// Whether this file holds the same pixels as the one being kept.
   same_as_kept: boolean;
+  is_rejected: boolean;
   sidecars?: string[];
   catalogs?: string[];
   rating?: number | null;

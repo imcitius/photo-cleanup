@@ -608,7 +608,11 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             // its own, and the plan behind it is the same plan — narrowed,
             // not a second code path with its own rules.
             if let Some(family) = r.params.get("family_id").and_then(Value::as_i64) {
-                plan.candidates.retain(|c| c.family_id == family);
+                // A hand-made decision belongs to the file, not to a group,
+                // so it arrives with no family on it — and the rows were
+                // already narrowed to this group when they were read.
+                plan.candidates
+                    .retain(|c| c.family_id == family || c.manual);
                 plan.refusals.clear();
             }
             // ...or to one folder. A folder that copies another is cleared in
@@ -1228,6 +1232,74 @@ pub async fn quarantine_adopt(State(st): State<Arc<AppState>>, Json(v): Json<Val
             tx.commit()?;
         }
         Ok(json!({"done": done, "refused": refused}))
+    })
+}
+
+/// Keep one file of a group and set the rest aside for the plan.
+///
+/// The tool's own reasoning stops at exact copies: a scan and the JPEG made
+/// from it are one photograph in two encodings, and it will not choose
+/// between them. The person looking at them can. This writes that choice
+/// down — the kept file becomes the kept file, and every other member of the
+/// group is marked as set aside by hand, which is the same mark the bursts
+/// screen uses and carries the same weight: the move does not ask the pixels
+/// to match, because the answer came from someone who looked.
+pub async fn keep_only(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(v): Json<Value>,
+) -> Response {
+    mutate(&st, |db| {
+        let keep = v["file_id"]
+            .as_i64()
+            .context(pc_core::tr!("Не указан файл", "No file given"))?;
+        let members: Vec<i64> = {
+            let mut st = db.conn.prepare(
+                "SELECT fm.file_id FROM family_members fm JOIN files f ON f.id = fm.file_id
+                  WHERE fm.family_id = ?1 AND f.state = 'present'",
+            )?;
+            let rows = st
+                .query_map([id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        if !members.contains(&keep) {
+            bail!(
+                "{}",
+                pc_core::tr!(
+                    "Этот файл не из этой группы",
+                    "That file is not in this group"
+                )
+            );
+        }
+        let tx = db.conn.unchecked_transaction()?;
+        db.set_family_keeper(id, keep)?;
+        db.conn
+            .execute("INSERT OR IGNORE INTO manual_keepers VALUES(?1)", [keep])?;
+        db.conn
+            .execute("DELETE FROM manual_rejects WHERE file_id = ?1", [keep])?;
+        let mut marked = 0u64;
+        for m in members.iter().filter(|m| **m != keep) {
+            db.conn.execute(
+                "INSERT OR IGNORE INTO manual_rejects(file_id, marked_at) VALUES(?1, ?2)",
+                rusqlite::params![m, pc_core::time::now_unix()],
+            )?;
+            marked += 1;
+        }
+        tx.commit()?;
+        Ok(json!({"kept": keep, "marked": marked}))
+    })
+}
+
+/// Take back that choice: the group goes back to being undecided.
+pub async fn keep_all_versions(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+    mutate(&st, |db| {
+        let n = db.conn.execute(
+            "DELETE FROM manual_rejects WHERE file_id IN
+               (SELECT file_id FROM family_members WHERE family_id = ?1)",
+            [id],
+        )?;
+        Ok(json!({"cleared": n}))
     })
 }
 

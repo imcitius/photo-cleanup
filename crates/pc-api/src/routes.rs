@@ -211,6 +211,8 @@ pub struct MemberOut {
     is_keeper: bool,
     /// Whether this file holds the same pixels as the one being kept.
     same_as_kept: bool,
+    /// The user said this one can go, whatever the roles say.
+    is_rejected: bool,
     sidecars: Vec<String>,
     catalogs: Vec<String>,
     rating: Option<i64>,
@@ -275,6 +277,7 @@ fn to_out(f: FamilyRow, db: &pc_db::Db) -> FamilyOut {
                 thumb: m.thumb_key,
                 is_keeper: m.is_keeper,
                 same_as_kept,
+                is_rejected: m.is_rejected,
             }
         })
         .collect();
@@ -298,7 +301,7 @@ fn to_out(f: FamilyRow, db: &pc_db::Db) -> FamilyOut {
         // to free, and offer a button that does nothing.
         removable_bytes: members
             .iter()
-            .filter(|m| m.removable && !m.is_keeper && m.same_as_kept)
+            .filter(|m| !m.is_keeper && (m.is_rejected || (m.removable && m.same_as_kept)))
             .map(|m| m.size)
             .sum(),
         members,
@@ -331,7 +334,22 @@ pub async fn families(
         "path" => "MIN(CASE WHEN f.id = fa.keeper_file THEN f.path END) ASC",
         _ => "SUM(CASE WHEN fm.role='copy' AND f.id != fa.keeper_file THEN f.size ELSE 0 END) DESC",
     };
-    let base = "FROM families fa JOIN family_members fm ON fm.family_id=fa.id JOIN files f ON f.id=fm.file_id WHERE f.state='present' GROUP BY fa.id HAVING (?1 OR COUNT(*)>1) AND (?2='' OR MAX(instr(lower(f.path),lower(?2)))>0) AND (?3='' OR MAX(fm.role=?3)) AND (?4='' OR MAX(instr(f.disk,?4))>0) AND SUM(f.size)>=?5";
+    // What the list is for is work that is left. A group of six files with
+    // no exact copies among them has nothing to move — the decision about it
+    // has already been made, by hand or by naming a folder — and keeping it
+    // on screen buries the ten thousand that still need one.
+    //
+    // "Copies to move" means the same thing here as it does to the plan: an
+    // exact copy of the file being kept, not merely a member carrying that
+    // role from when the group was built.
+    const MOVABLE: &str = "SUM(CASE WHEN (fm.role='copy' AND f.id<>fa.keeper_file
+                                         AND f.pixel_hash IS NOT NULL
+                                         AND f.pixel_hash=(SELECT k.pixel_hash FROM files k
+                                                            WHERE k.id=fa.keeper_file))
+                                     OR EXISTS(SELECT 1 FROM manual_rejects mr
+                                                WHERE mr.file_id=f.id)
+                                THEN 1 ELSE 0 END)>0";
+    let base = &format!("FROM families fa JOIN family_members fm ON fm.family_id=fa.id JOIN files f ON f.id=fm.file_id WHERE f.state='present' GROUP BY fa.id HAVING (?1 OR {MOVABLE}) AND (?2='' OR MAX(instr(lower(f.path),lower(?2)))>0) AND (?3='' OR MAX(fm.role=?3)) AND (?4='' OR MAX(instr(f.disk,?4))>0) AND SUM(f.size)>=?5");
     let args: [&dyn rusqlite::ToSql; 5] = [&q.all, &q.search, &q.role, &q.disk, &q.min_bytes];
     let total: i64 = db.conn.query_row(
         &format!("SELECT COUNT(*) FROM (SELECT fa.id {base})"),
