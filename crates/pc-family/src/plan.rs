@@ -140,6 +140,34 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
             if role == Role::Resize && m.width * m.height >= policy.resize_below_pixels {
                 continue;
             }
+            // A copy is a copy *of the file being kept*. The roles were
+            // settled when the group was built, against whichever member was
+            // kept then — and the user is free to keep a different one since,
+            // by hand or by naming a folder. A scan and the JPEG exported
+            // from it belong to one group and do not share a pixel: if the
+            // export is what stays, the scans are no longer copies of it.
+            //
+            // Proposing them anyway wastes the only safety that matters: the
+            // move re-reads both files, sees two different pictures and
+            // refuses — every time, for ever, with the group stuck in the
+            // list. So the plan asks the question here instead.
+            if role == Role::Copy {
+                let same = match (&m.pixel_hash, &keeper.pixel_hash) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                };
+                if !same {
+                    plan.refusals.push(Refusal {
+                        path: m.path.clone(),
+                        why: pc_core::tf!(
+                            "не совпадает с сохраняемым файлом: {0}",
+                            "does not match the file being kept: {0}",
+                            keeper.path
+                        ),
+                    });
+                    continue;
+                }
+            }
             if let Some(c) = protected.lookup(&m.path) {
                 let stars = c
                     .rating
@@ -314,5 +342,89 @@ mod tests {
         members[0].width = 100;
         members[0].height = 100;
         assert_eq!(keeper_of(&members).unwrap().file_id, 2);
+    }
+}
+
+#[cfg(test)]
+mod keeper_tests {
+    use super::*;
+    use pc_db::files::NewFile;
+
+    fn file(db: &Db, run: i64, path: &str, pixels: u8) -> i64 {
+        db.upsert_file(
+            &NewFile {
+                path: path.into(),
+                name: pc_core::base_name(path).into(),
+                disk: "disk1".into(),
+                size: 1000,
+                mtime: 1,
+                container: Some("jpeg".into()),
+                pixel_hash: Some(vec![pixels; 32]),
+                phash: Some(1),
+                thumb_key: Some("k".into()),
+                ..Default::default()
+            },
+            run,
+        )
+        .unwrap()
+    }
+
+    /// A group is one photograph, which is not the same as one set of pixels:
+    /// a scan and the JPEG exported from it belong together and share nothing
+    /// byte for byte. Whichever of them is kept, the other is not a copy of
+    /// it — and the plan has to say so before the move re-reads both files,
+    /// sees two different pictures and refuses.
+    #[test]
+    fn a_copy_of_something_else_is_not_offered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("pc.db")).unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+
+        let scan = file(&db, run, "/foto/N.66.BMP", 1);
+        let export = file(&db, run, "/foto/N.66.jpg", 9);
+        let twin = file(&db, run, "/backup/N.66.BMP", 1);
+
+        // The export is what is kept — by hand, or because a folder was
+        // named the main one.
+        let family = db
+            .insert_family("linked", None, None, Some(export), run)
+            .unwrap();
+        for (f, role) in [(scan, "original"), (export, "export"), (twin, "copy")] {
+            db.insert_family_member(family, f, role, None, 1.0, "")
+                .unwrap();
+        }
+
+        let plan = compute(&db, &Policy::default()).unwrap();
+        assert!(
+            plan.candidates.is_empty(),
+            "предложено к переносу: {:?}",
+            plan.candidates.iter().map(|c| &c.path).collect::<Vec<_>>()
+        );
+        assert!(
+            plan.refusals.iter().any(|r| r.path.contains("backup")),
+            "отказ не объяснён: {:?}",
+            plan.refusals
+        );
+    }
+
+    #[test]
+    fn a_copy_of_the_kept_file_still_is_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("pc.db")).unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+
+        let scan = file(&db, run, "/foto/N.66.BMP", 1);
+        let twin = file(&db, run, "/backup/N.66.BMP", 1);
+        let family = db
+            .insert_family("linked", None, None, Some(scan), run)
+            .unwrap();
+        for (f, role) in [(scan, "original"), (twin, "copy")] {
+            db.insert_family_member(family, f, role, None, 1.0, "")
+                .unwrap();
+        }
+
+        let plan = compute(&db, &Policy::default()).unwrap();
+        assert_eq!(plan.candidates.len(), 1, "{:?}", plan.candidates);
+        assert!(plan.candidates[0].path.contains("backup"));
     }
 }

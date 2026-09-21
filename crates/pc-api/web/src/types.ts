@@ -12,6 +12,8 @@ export interface Member {
   evidence: { detail?: string } | null;
   thumb: string | null;
   is_keeper: boolean;
+  /// Whether this file holds the same pixels as the one being kept.
+  same_as_kept: boolean;
   sidecars?: string[];
   catalogs?: string[];
   rating?: number | null;

@@ -978,6 +978,15 @@ export function Families({
                         {m.width} × {m.height} · {bytes(m.size)}
                       </div>
                       {m.evidence?.detail && <small>{m.evidence.detail}</small>}
+                      {/* Marked a copy when the group was built, against a
+                          different file than the one kept now. Saying so is
+                          the difference between a button that does nothing
+                          and a group the user can finish. */}
+                      {m.role === "copy" && !m.is_keeper && !m.same_as_kept && (
+                        <small className="warning-text">
+                          {ui.notACopyOfKept}
+                        </small>
+                      )}
                       <details>
                         <summary>
                           {t("pochemu_eta_otsenka")}

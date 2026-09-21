@@ -212,6 +212,8 @@ export const ui = {
     "Mark this frame as unwanted. It joins the move plan; the file stays where it is until you approve that plan.",
   keepFrame: "Keep it",
   keepFrameHelp: "Clear the mark: the frame stays in the archive.",
+  notACopyOfKept:
+    "Not a copy of the file being kept: the pixels differ. Keep the file it is a copy of instead.",
   folderHasNoCopies:
     "The plan finds no copies in this folder — it looks like the originals live here. To take away what duplicates them elsewhere, press “keep this folder everywhere”.",
   moveFolder: "move this folder\u2019s copies",

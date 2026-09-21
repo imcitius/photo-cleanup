@@ -1043,30 +1043,64 @@ pub async fn prefer_folder(State(st): State<Arc<AppState>>, Json(v): Json<Value>
             .context(pc_core::tr!("Не указана папка", "No folder given"))?
             .to_string();
 
-        let rows: Vec<(i64, i64, String, f64)> = {
+        type Row = (i64, i64, String, f64, Option<Vec<u8>>, Option<Vec<u8>>);
+        let rows: Vec<Row> = {
             let mut st = db.conn.prepare(
-                "SELECT fm.family_id, fm.file_id, f.path, COALESCE(fm.quality, 0)
-                   FROM family_members fm JOIN files f ON f.id = fm.file_id
+                "SELECT fm.family_id, fm.file_id, f.path, COALESCE(fm.quality, 0),
+                        f.pixel_hash,
+                        (SELECT k.pixel_hash FROM files k WHERE k.id = fa.keeper_file)
+                   FROM family_members fm
+                   JOIN files f     ON f.id = fm.file_id
+                   JOIN families fa ON fa.id = fm.family_id
                   WHERE f.state = 'present'",
             )?;
             let rows = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })?
                 .collect::<rusqlite::Result<_>>()?;
             rows
         };
 
-        // The best file the folder holds, per group. Within one group every
-        // member is the same photograph, so this chooses where it is kept,
-        // not what is kept.
+        // The best file the folder holds, per group — but only among files
+        // that hold the same pixels as the one being kept now.
+        //
+        // A group is one photograph, and that is not the same as one set of
+        // pixels: a scan and the JPEG exported from it sit in the same group
+        // and differ byte for byte. Moving the keeper onto the export would
+        // leave every scan in the group a "copy" of something it does not
+        // match — and the move refuses at the last moment, every time,
+        // because it re-reads both files and compares. The group then sits in
+        // the list for ever, refusing to be dealt with. So a folder can only
+        // take over the groups whose picture it actually holds.
         let mut best: std::collections::HashMap<i64, (i64, f64)> = std::collections::HashMap::new();
-        for (family, file, path, quality) in rows {
+        let mut untouched: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for (family, file, path, quality, pixels, keeper_pixels) in rows {
             if pc_core::dir_name(&path) != dir {
+                continue;
+            }
+            let same = match (&pixels, &keeper_pixels) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            };
+            if !same {
+                untouched.insert(family);
                 continue;
             }
             let e = best.entry(family).or_insert((file, quality));
             if quality > e.1 {
                 *e = (file, quality);
             }
+        }
+        for family in best.keys() {
+            untouched.remove(family);
         }
 
         let tx = db.conn.unchecked_transaction()?;
@@ -1079,7 +1113,7 @@ pub async fn prefer_folder(State(st): State<Arc<AppState>>, Json(v): Json<Value>
             }
         }
         tx.commit()?;
-        Ok(json!({"groups": changed, "dir": dir}))
+        Ok(json!({"groups": changed, "untouched": untouched.len(), "dir": dir}))
     })
 }
 

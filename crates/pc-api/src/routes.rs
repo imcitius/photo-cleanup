@@ -209,6 +209,8 @@ pub struct MemberOut {
     evidence: Option<serde_json::Value>,
     thumb: Option<String>,
     is_keeper: bool,
+    /// Whether this file holds the same pixels as the one being kept.
+    same_as_kept: bool,
     sidecars: Vec<String>,
     catalogs: Vec<String>,
     rating: Option<i64>,
@@ -238,10 +240,19 @@ fn role_rank(r: Role) -> u8 {
 
 fn to_out(f: FamilyRow, db: &pc_db::Db) -> FamilyOut {
     let total_size = f.total_size();
+    let kept_pixels = f
+        .members
+        .iter()
+        .find(|m| m.is_keeper)
+        .and_then(|m| m.pixel_hash.clone());
     let mut members: Vec<MemberOut> = f
         .members
         .into_iter()
         .map(|m| {
+            let same_as_kept = match (&m.pixel_hash, &kept_pixels) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            };
             let role = Role::parse(&m.role).unwrap_or(Role::Unknown);
             let catalogs = crate::jobs::rows(db,"SELECT c.name,lf.rating FROM lr_files lf JOIN lr_catalogs c ON c.id=lf.catalog_id WHERE lf.path=?1 AND c.is_backup=0",&[&m.path]).unwrap_or_default();
             MemberOut {
@@ -263,6 +274,7 @@ fn to_out(f: FamilyRow, db: &pc_db::Db) -> FamilyOut {
                 evidence: m.evidence.and_then(|e| serde_json::from_str(&e).ok()),
                 thumb: m.thumb_key,
                 is_keeper: m.is_keeper,
+                same_as_kept,
             }
         })
         .collect();
@@ -279,9 +291,14 @@ fn to_out(f: FamilyRow, db: &pc_db::Db) -> FamilyOut {
         taken_at: f.taken_at,
         camera: f.camera,
         total_size,
+        // What would actually leave. A role of "copy" was settled against
+        // whichever file was kept when the group was built; if a different
+        // one is kept now, a member can carry that role and not be a copy of
+        // it at all. Counting those would promise space the plan will refuse
+        // to free, and offer a button that does nothing.
         removable_bytes: members
             .iter()
-            .filter(|m| m.removable && !m.is_keeper)
+            .filter(|m| m.removable && !m.is_keeper && m.same_as_kept)
             .map(|m| m.size)
             .sum(),
         members,

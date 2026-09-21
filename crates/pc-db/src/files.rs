@@ -539,6 +539,9 @@ impl Db {
 #[derive(Debug, Clone)]
 pub struct MemberRow {
     pub file_id: i64,
+    /// What the pixels hash to. A role says what a file is; this says whether
+    /// it is the same picture as the one being kept.
+    pub pixel_hash: Option<Vec<u8>>,
     pub path: String,
     pub name: String,
     pub role: String,
@@ -623,7 +626,8 @@ impl Db {
 
         let mut st = self.conn.prepare(
             "SELECT fm.file_id, f.path, f.name, fm.role, f.size, f.width, f.height,
-                    f.container, fm.quality, fm.breakdown, fm.evidence, f.thumb_key
+                    f.container, fm.quality, fm.breakdown, fm.evidence, f.thumb_key,
+                    f.pixel_hash
                FROM family_members fm JOIN files f ON f.id = fm.file_id
               WHERE fm.family_id = ?1
               ORDER BY fm.quality DESC",
@@ -644,6 +648,7 @@ impl Db {
                     breakdown: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
                     evidence: r.get(10)?,
                     thumb_key: r.get(11)?,
+                    pixel_hash: r.get(12)?,
                     is_keeper: Some(file_id) == keeper,
                 })
             })?
@@ -1113,6 +1118,7 @@ impl Db {
                     breakdown: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
                     evidence: None,
                     thumb_key: r.get(11)?,
+                    pixel_hash: None,
                     is_keeper: false,
                 })
             })?
