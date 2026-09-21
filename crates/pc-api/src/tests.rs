@@ -1034,3 +1034,70 @@ async fn a_finished_job_has_already_let_go_of_the_writer() {
     }
     jobs::FINISH_PAUSE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
 }
+
+#[tokio::test]
+async fn a_folder_decision_reaches_the_plan_that_folder_asks_for() {
+    // "Keep this folder's versions in every group" marks the other encodings
+    // by hand. The screen then asks for the plan of that folder — and got an
+    // empty one: the narrowing went by the file that *proves* a copy, which a
+    // decision made by hand does not have. The versions the user had just set
+    // aside were exactly the ones dropped.
+    let f = Fixture::new();
+    let scans = f.archive.join("scans");
+    let exports = f.archive.join("exports");
+    std::fs::create_dir_all(&scans).unwrap();
+    std::fs::create_dir_all(&exports).unwrap();
+    let img = image::RgbImage::from_fn(320, 240, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 120])
+    });
+    img.save(scans.join("frame.bmp")).unwrap();
+    img.save(exports.join("frame.jpg")).unwrap();
+
+    let id = f
+        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+    // Two encodings of one frame are not copies of each other, and nothing
+    // groups them automatically. A shared provenance link does — the same
+    // thing Lightroom writes when it exports.
+    f.state
+        .db
+        .lock()
+        .unwrap()
+        .conn
+        .execute("UPDATE meta SET xmp_original_id = 'one-source'", [])
+        .unwrap();
+    let id = f.start("families", json!({})).await;
+    assert_eq!(f.wait(id).await["state"], "done");
+
+    // Nothing is a copy here: without a person, this plan stays empty.
+    let untouched = f.preview("plan-apply", json!({})).await;
+    assert_eq!(untouched["total_files"], 0, "{untouched}");
+
+    let dir = exports.display().to_string();
+    let (s, v) = f
+        .req(
+            "POST",
+            "/api/keepers/keep-folder-only",
+            json!({ "dir": dir }),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["marked"], 1, "{v}");
+
+    let scoped = f
+        .preview("plan-apply", json!({ "keeper_folder": dir }))
+        .await;
+    assert_eq!(
+        scoped["total_files"], 1,
+        "план папки потерял отложенное вручную: {scoped}"
+    );
+    assert_eq!(scoped["items"][0]["manual"], true, "{scoped}");
+    assert!(
+        scoped["items"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with(".bmp"),
+        "{scoped}"
+    );
+}

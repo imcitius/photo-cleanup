@@ -47,6 +47,12 @@ pub struct Candidate {
     /// Chosen by the user rather than derived from a role, so the interface
     /// can say which of the two put each file on the list.
     pub manual: bool,
+    /// The file this one's group keeps. For a candidate the tool derived it
+    /// is the same as `keeper_path`; for a hand-made decision there is no
+    /// evidence behind it and `keeper_path` stays empty, but the group still
+    /// has a kept file — which is how a plan narrowed to one folder knows
+    /// that this decision belongs to it.
+    pub group_keeper: String,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +246,7 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
                     }
                 },
                 manual: false,
+                group_keeper: keeper.path.clone(),
             });
         }
     }
@@ -284,6 +291,7 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
             )
             .into(),
             manual: true,
+            group_keeper: m.group_keeper.clone().unwrap_or_default(),
         });
     }
 
@@ -377,6 +385,7 @@ mod tests {
             pixel_hash: Some(vec![1; 32]),
             content_hash: Some(vec![1; 32]),
             is_keeper: keeper,
+            group_keeper: None,
         }
     }
 

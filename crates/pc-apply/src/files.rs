@@ -310,6 +310,7 @@ mod tests {
             keeper_path: String::new(),
             reason: "выбор человека".into(),
             manual: true,
+            group_keeper: String::new(),
         }
     }
 

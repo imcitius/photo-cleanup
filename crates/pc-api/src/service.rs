@@ -634,8 +634,12 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             // The groups this folder keeps: their copies go, wherever they
             // are. This is what follows from calling a folder the main one.
             if let Some(dir) = r.params.get("keeper_folder").and_then(Value::as_str) {
+                // By the file the group keeps, not by the one that proves the
+                // copy: a decision made by hand has no such proof, and
+                // filtering on it dropped exactly the versions the user had
+                // just set aside for this folder.
                 plan.candidates
-                    .retain(|c| pc_core::dir_name(&c.keeper_path) == dir);
+                    .retain(|c| pc_core::dir_name(&c.group_keeper) == dir);
                 plan.refusals.clear();
             }
             for refusal in plan.refusals {

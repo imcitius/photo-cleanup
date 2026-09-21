@@ -855,7 +855,15 @@ impl Db {
         let mut st = self.conn.prepare(
             "SELECT f.id, f.path, f.size, f.width, f.height, f.mtime, f.inode, f.dev, f.disk,
                     COALESCE((SELECT fm.family_id FROM family_members fm
-                               WHERE fm.file_id = f.id LIMIT 1), 0)
+                               WHERE fm.file_id = f.id LIMIT 1), 0),
+                    -- Which file this one's group keeps. Not evidence of
+                    -- anything: a hand-made decision needs none. It says
+                    -- where the decision belongs, so a plan narrowed to one
+                    -- folder can find it.
+                    (SELECT k.path FROM families fam
+                       JOIN files k ON k.id = fam.keeper_file
+                      WHERE fam.id = (SELECT fm.family_id FROM family_members fm
+                                       WHERE fm.file_id = f.id LIMIT 1))
                FROM manual_rejects r
                JOIN files f ON f.id = r.file_id
               WHERE f.state = 'present'
@@ -883,6 +891,7 @@ impl Db {
                     pixel_hash: None,
                     content_hash: None,
                     is_keeper: false,
+                    group_keeper: r.get(10)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -945,6 +954,8 @@ impl Db {
                         pixel_hash: r.get(11)?,
                         content_hash: r.get(13)?,
                         is_keeper: r.get::<_, Option<i64>>(12)? == Some(file_id),
+                        // The plan fills this in from the group's own rows.
+                        group_keeper: None,
                     })
                 },
             )?
@@ -969,6 +980,8 @@ pub struct PlanRow {
     pub pixel_hash: Option<Vec<u8>>,
     pub content_hash: Option<Vec<u8>>,
     pub is_keeper: bool,
+    /// The file this one's group keeps, when the group has chosen one.
+    pub group_keeper: Option<String>,
 }
 
 impl Db {
