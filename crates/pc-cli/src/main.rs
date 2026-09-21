@@ -48,7 +48,7 @@ enum Command {
     Series(SeriesCmd),
     /// What the current policy would move
     Plan(PolicyArgs),
-    /// Move to quarantine, following the plan
+    /// Move to quarantine, following the plan computed right now
     Apply(ApplyArgs),
     /// Sort the archive by date: YYYY/YYYY-MM-DD_event
     #[command(subcommand)]
@@ -94,6 +94,9 @@ struct ApplyArgs {
     policy: PolicyArgs,
     #[arg(long)]
     quarantine: Option<PathBuf>,
+    /// Carry out the plan printed above. It is computed by this command, not
+    /// carried over from an earlier `plan`: the interface checks a reviewed
+    /// plan against a token, and the command line has no such token
     #[arg(long)]
     yes: bool,
 }
@@ -345,6 +348,9 @@ struct PurgeArgs {
     /// Holding period, for example 7d
     #[arg(long, default_value = "7d", value_parser = format::parse_duration)]
     older_than: i64,
+    /// Delete the listed objects for good. This flag is the whole
+    /// confirmation: the interface asks for a word to be typed, the command
+    /// line takes you at your word
     #[arg(long)]
     yes: bool,
 }
@@ -1022,7 +1028,12 @@ fn cmd_plan(
     let run_id = db
         .latest_run()?
         .context("no runs yet; run scan or index first")?;
-    println!("\nChecking every file before it moves…");
+    // The interface hands a reviewed plan back with a token and refuses to
+    // run anything else. Here the plan above is the one that runs, and it was
+    // computed a moment ago — which is a weaker promise, and has to be said
+    // rather than assumed.
+    println!("\nCarrying out the plan above, computed just now.");
+    println!("Checking every file before it moves…");
     let report = pc_apply::apply(db, run_id, &plan.candidates, quarantine)?;
     println!("Moved: {}", report.totals.summary());
     for (path, why) in &report.refused {

@@ -75,6 +75,25 @@ by hand say so, and do not depend on the role checkboxes above.
 Every move is written to a journal **before** the filesystem is touched, so an
 interrupted run leaves a row pointing at exactly what to inspect.
 
+One writer at a time, whichever way you use it: while a job is running — or a
+command is writing — the archive is locked for writing, and the second one is
+refused and told who holds it. Reading goes on as usual. The lock is the
+operating system's, so killing the process releases it.
+
+### What the command line does not promise
+
+The interface hands a reviewed plan back with a token and refuses to carry out
+anything else. `apply --yes` has no such token: it works out the plan there and
+then and carries out *that* plan, which is what it prints just above. If the
+index changed since you last looked, what moves is what the new plan says.
+
+`purge --yes` is the whole confirmation, where the interface asks for a word to
+be typed.
+
+This is on purpose: a command line is for people who mean it, and for scripts
+that cannot type words. Use the interface when you want the plan you looked at
+to be the plan that runs.
+
 ## Quick start
 
 ```bash
