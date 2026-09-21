@@ -368,6 +368,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_undo_after_a_reset_moves_the_file_and_leaves_the_index_alone() {
+        // Same reuse of row ids as in quarantine: an old reorganisation entry
+        // must still put the file back on disk, and must not rewrite the path
+        // of whatever now holds the number it was written with.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("foto");
+        let dest = root.join("2019");
+        fs::create_dir_all(&dest).unwrap();
+        let src = root.join("a.jpg");
+        let dst = dest.join("a.jpg");
+        fs::write(&src, b"picture").unwrap();
+
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[root.display().to_string()], "test").unwrap();
+        let file_id = db
+            .upsert_file(
+                &pc_db::NewFile {
+                    path: src.display().to_string(),
+                    name: "a.jpg".into(),
+                    size: 7,
+                    mtime: pc_core::time::mtime_unix(&fs::metadata(&src).unwrap()),
+                    ..Default::default()
+                },
+                run,
+            )
+            .unwrap();
+        let report = organize(
+            &db,
+            run,
+            &[Move {
+                file_id,
+                src: src.display().to_string(),
+                dst: dst.display().to_string(),
+                size: 7,
+                mtime: pc_core::time::mtime_unix(&fs::metadata(&src).unwrap()),
+                date: pc_organize::Dated {
+                    ts: 1_562_000_000,
+                    source: pc_organize::Source::Exif,
+                    precision: pc_organize::Precision::Day,
+                },
+                event: "2019".into(),
+                renamed_from: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(report.moved, 1, "{:?}", report.refused);
+
+        db.reset_index().unwrap();
+        let stranger = root.join("stranger.jpg");
+        fs::write(&stranger, b"someone else").unwrap();
+        let run = db.start_run(&[root.display().to_string()], "test").unwrap();
+        let new_id = db
+            .upsert_file(
+                &pc_db::NewFile {
+                    path: stranger.display().to_string(),
+                    name: "stranger.jpg".into(),
+                    ..Default::default()
+                },
+                run,
+            )
+            .unwrap();
+        assert_eq!(new_id, file_id, "id не переиспользован — сценарий не тот");
+
+        let entry = db.journal_by_run_op(1, "organize").unwrap().pop().unwrap();
+        crate::undo(&db, entry.id).unwrap();
+
+        assert!(src.exists(), "файл не вернулся");
+        let path: String = db
+            .conn
+            .query_row("SELECT path FROM files WHERE id = ?1", [new_id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            path,
+            stranger.display().to_string(),
+            "откат переписал путь чужому файлу"
+        );
+    }
+
+    #[test]
     fn a_service_file_is_quarantined_not_deleted_and_comes_back() {
         // An AppleDouble can carry a resource fork, and Finder's folder note
         // is still the user's byte. The reorganisation used to delete both to

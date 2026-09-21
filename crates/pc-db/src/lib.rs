@@ -106,6 +106,13 @@ impl Db {
              DELETE FROM lr_catalogs;
              DELETE FROM derived_bundles;
              DELETE FROM jobs;
+             -- The journal survives a reset, because it is the only record of
+             -- what left the archive. Its target ids do not: SQLite hands the
+             -- same numbers out again to whatever is indexed next, and a row
+             -- pointing at a file it has never seen is worse than a row
+             -- pointing at nothing. What the entry moved is written in it by
+             -- path.
+             UPDATE journal SET target_id = NULL;
              COMMIT;",
         )?;
         // Outside the transaction: SQLite will not vacuum inside one.

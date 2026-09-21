@@ -334,6 +334,32 @@ impl Db {
         Ok(moved.or(Some(f.path)))
     }
 
+    /// The indexed file at this exact path, if the index holds one.
+    ///
+    /// The path is what identifies a file across a reset: row ids are handed
+    /// out again from the start, so an old journal entry that still carries a
+    /// number is carrying somebody else's.
+    pub fn file_id_at(&self, path: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row("SELECT id FROM files WHERE path = ?1", params![path], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    /// The same for a bundle of derived data.
+    pub fn bundle_id_at(&self, path: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM derived_bundles WHERE path = ?1",
+                params![path],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// Container breakdown, for the scan report.
     pub fn container_counts(&self) -> Result<Vec<(String, i64, i64)>> {
         let mut st = self.conn.prepare(

@@ -508,10 +508,28 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
         )?;
     }
     db.journal_mark_undone(journal_id)?;
-    match (entry.op.as_str(), entry.target_id) {
-        ("quarantine", Some(bid)) => db.set_bundle_state(bid, BundleState::Present)?,
-        ("quarantine-file", Some(fid)) => db.set_file_state(fid, "present")?,
-        ("organize", Some(fid)) => db.set_file_path(fid, &entry.src, &name_of(&src_path))?,
+    // Which row in the index this concerns is decided by path, not by the id
+    // the entry was written with. After a reset those ids belong to other
+    // files, and an entry from an older database would otherwise reach into
+    // the new index and change a stranger.
+    match entry.op.as_str() {
+        "quarantine" => {
+            if let Some(id) = db.bundle_id_at(&entry.src)? {
+                db.set_bundle_state(id, BundleState::Present)?;
+            }
+        }
+        "quarantine-file" => {
+            if let Some(id) = db.file_id_at(&entry.src)? {
+                db.set_file_state(id, "present")?;
+            }
+        }
+        // The reorganisation moved the file, so the index knows it by where
+        // it was moved to.
+        "organize" => {
+            if let Some(id) = db.file_id_at(&dst)? {
+                db.set_file_path(id, &entry.src, &name_of(&src_path))?;
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -586,9 +604,20 @@ pub fn purge_entry_controlled(db: &Db, id: i64, control: &pc_core::work::Control
         remove_controlled(&side, control)?;
     }
     db.journal_mark_purged(id)?;
-    match (e.op.as_str(), e.target_id) {
-        ("quarantine", Some(id)) => db.set_bundle_state(id, BundleState::Purged)?,
-        ("quarantine-file", Some(id)) => db.set_file_state(id, "purged")?,
+    // By path, for the same reason as in `undo`: the number in the entry may
+    // now belong to a file that is still in the archive, and marking that one
+    // purged would take it out of every view while its bytes sit untouched.
+    match e.op.as_str() {
+        "quarantine" => {
+            if let Some(id) = db.bundle_id_at(&e.src)? {
+                db.set_bundle_state(id, BundleState::Purged)?;
+            }
+        }
+        "quarantine-file" => {
+            if let Some(id) = db.file_id_at(&e.src)? {
+                db.set_file_state(id, "purged")?;
+            }
+        }
         _ => {}
     }
     Ok(())

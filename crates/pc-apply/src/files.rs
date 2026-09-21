@@ -434,6 +434,47 @@ mod tests {
     }
 
     #[test]
+    fn an_old_journal_does_not_reach_into_a_new_index() {
+        // A reset empties the index but keeps the journal, because the
+        // journal is the only record of what left the archive. SQLite then
+        // hands the same row ids out again, so an entry that still carried a
+        // number would mark a file it has never seen: the purge of a long
+        // gone copy made an untouched photograph vanish from every view.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("archive");
+        fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.bmp");
+        fs::write(&old, b"old").unwrap();
+
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
+        let c = one_manual_candidate(&db, run, &old);
+        assert_eq!(
+            quarantine_file(&db, run, &c, None).unwrap().0,
+            FileOutcome::Moved
+        );
+        let entry = db.journal_quarantined(None).unwrap().pop().unwrap();
+
+        db.reset_index().unwrap();
+        let other = dir.join("other.bmp");
+        fs::write(&other, b"new").unwrap();
+        let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
+        let new_id = one_manual_candidate(&db, run, &other).file_id;
+        assert_eq!(new_id, c.file_id, "id не переиспользован — сценарий не тот");
+
+        crate::purge_entry_controlled(&db, entry.id, &pc_core::work::Control::default()).unwrap();
+
+        let state: String = db
+            .conn
+            .query_row("SELECT state FROM files WHERE id = ?1", [new_id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(state, "present", "чужая запись журнала спрятала живой файл");
+        assert!(other.exists(), "и байты на месте");
+    }
+
+    #[test]
     fn case_aliases_do_not_duplicate_one_sidecar() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("frame.xmp"), b"metadata").unwrap();
