@@ -433,6 +433,59 @@ mod tests {
         conn
     }
 
+    /// The schema of a database, as SQLite itself describes it.
+    fn shape(conn: &Connection) -> Vec<String> {
+        let mut st = conn
+            .prepare("SELECT type, name, COALESCE(sql, '') FROM sqlite_master ORDER BY type, name")
+            .unwrap();
+        let rows: Vec<String> = st
+            .query_map([], |r| {
+                Ok(format!(
+                    "{} {} {}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    // SQLite keeps the text of a CREATE as it was written, and
+                    // ALTER rewrites it; only the words matter here.
+                    r.get::<_, String>(2)?
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        rows
+    }
+
+    #[test]
+    fn a_database_of_any_age_ends_up_shaped_like_a_new_one() {
+        // Fourteen releases have gone out, so a database in use may have been
+        // left at any version. Each of them has to arrive at exactly the
+        // schema a fresh install has — otherwise a query written for today
+        // meets a table from a year ago, which is the kind of failure that
+        // only happens on someone else's archive.
+        let fresh = Connection::open_in_memory().unwrap();
+        migrate(&fresh).unwrap();
+        let want = shape(&fresh);
+
+        for version in 0..MIGRATIONS.len() {
+            let conn = database_of_version(version);
+            migrate(&conn).unwrap();
+            assert_eq!(
+                shape(&conn),
+                want,
+                "база версии {version} обновилась не в ту схему"
+            );
+            let broken: i64 = conn
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(broken, 0, "версия {version}: битые ссылки после обновления");
+        }
+    }
+
     #[test]
     fn dropping_columns_keeps_everything_else_in_place() {
         // Migration 016 takes away four columns nothing ever wrote to. A

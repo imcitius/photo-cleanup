@@ -511,6 +511,9 @@ export function Review({
     return () => controller.abort();
   }, [kind, debounced, nonce, refresh]);
   const purge = kind === "derived-purge" || kind === "quarantine-purge";
+  // Adopting orphaned quarantine carries files *out* of it, the same
+  // direction as an undo — and the button has to say so.
+  const restoring = kind.includes("undo") || kind === "quarantine-adopt";
   const apply = async () => {
     if (!plan) return;
     setSending(true);
@@ -545,7 +548,7 @@ export function Review({
                 <p className="muted">
                   {purge
                     ? t("budet_udaleno_okonchatelno")
-                    : kind.includes("undo")
+                    : restoring
                       ? t("vernutsya_po_ishodnym_putyam")
                       : t("budet_pereneseno_posle_podtverzhdeniya")}{" "}
                   {t("otkazov")}
@@ -574,7 +577,7 @@ export function Review({
               >
                 {purge
                   ? ui.purge
-                  : kind.includes("undo")
+                  : restoring
                     ? ui.undo
                     : organize
                       ? t("razlozhit_po_datam")
