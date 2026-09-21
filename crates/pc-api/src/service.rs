@@ -603,10 +603,10 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             // re-checks has to mean the same thing as the plan that was
             // shown, and a list of folders travelling through the request
             // would let the two drift apart.
-            let marked = if flag(&r.params, "originals") {
-                db.original_folders()?
+            let marks = if flag(&r.params, "originals") {
+                db.original_marks()?
             } else {
-                Vec::new()
+                pc_db::Marks::default()
             };
             let scope = pc_family::plan::Scope {
                 family: r.params.get("family_id").and_then(Value::as_i64),
@@ -620,7 +620,6 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     .get("keeper_folder")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                keeper_under: marked.clone(),
             };
             let mut plan = pc_family::plan::compute_scoped(db, &policy, &scope)?;
             // One group at a time. Ten thousand groups is not a decision
@@ -666,9 +665,10 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             // whole archive because a mark had been taken back is exactly the
             // accident this screen must not have.
             if flag(&r.params, "originals") {
-                let under = |p: &str| marked.iter().any(|d| pc_core::under(p, d));
-                plan.candidates.retain(|c| under(&c.group_keeper));
-                plan.refusals.retain(|r| under(&r.group_keeper));
+                plan.candidates
+                    .retain(|c| marks.covering(&c.group_keeper).is_some());
+                plan.refusals
+                    .retain(|r| marks.covering(&r.group_keeper).is_some());
             }
             for refusal in plan.refusals {
                 add_refusal(refusal.path, refusal.why);
@@ -1567,72 +1567,158 @@ fn companion_destination(src: &FsPath, dst: &FsPath, side: &FsPath) -> PathBuf {
 //
 // Every other screen here is a list of decisions the tool has prepared. This
 // one is the archive itself, the way its owner already knows it: folders,
-// opened one at a time, with the photographs in them. It is the only place
-// where the question "which of these folders holds the originals?" can be
-// answered by someone who has never read a word about roles or families —
-// and that question, answered once, settles more groups than any number of
-// presses on the groups screen.
+// opened and closed, with the photographs in them. It is the only place where
+// the question "which of these folders holds the originals?" can be answered
+// by someone who has never read a word about roles or families — and that
+// question, answered once, settles more groups than any number of presses on
+// the groups screen.
 //
 // The tree is built from the index, not from the disk: what is not scanned is
 // not here, and a folder's size is what the index knows it to hold.
+//
+// It is also built *across* the roots. On an array the photographs live on
+// three filesystems and the person sees one structure laid over them, so
+// `D/разобрано/даня/театр` is one node here even when it exists three times
+// on disk. Which disks hold it, and how much each of them holds, is what the
+// node says; the absolute paths are still there, one level down, for the
+// times when one disk has to be singled out.
 
+/// One folder of the merged tree, keyed by its path relative to a root.
 #[derive(Default)]
-struct Folder {
-    /// Files sitting directly in this folder.
+struct Node {
+    /// Files sitting directly in this folder, on all roots together.
     here: usize,
     /// Files anywhere beneath it, this folder included.
     files: usize,
     bytes: i64,
     children: std::collections::BTreeSet<String>,
+    /// What each root contributes to the subtree. A node present on one disk
+    /// of three has one entry, and that is the answer to "where is this?".
+    by_root: std::collections::BTreeMap<String, (usize, i64)>,
 }
 
-fn folder_map(files: &[pc_db::TreeFile]) -> HashMap<String, Folder> {
-    let mut dirs: HashMap<String, Folder> = HashMap::new();
+/// The roots the tree is laid over.
+///
+/// Normally the folders the archive is configured to read. With none set —
+/// a database indexed by the command line, which takes its roots per run —
+/// there is one implicit root at the top of the filesystem, and the tree is
+/// the absolute one it was before there was anything to merge.
+fn tree_roots(db: &Db) -> Result<Vec<String>> {
+    let roots = db.archive_roots()?;
+    Ok(if roots.is_empty() {
+        vec![String::new()]
+    } else {
+        roots
+    })
+}
+
+/// Which root a path belongs to, and what is left of it below that root.
+fn split_root<'a>(roots: &'a [String], path: &'a str) -> (&'a str, &'a str) {
+    match roots.iter().find(|r| pc_core::under(path, r)) {
+        Some(root) => (
+            root.as_str(),
+            pc_core::trim_leading_separators(&path[root.len()..]),
+        ),
+        // Indexed when the roots were set differently and still in the
+        // archive. It has no relative reading, so it keeps its own name.
+        None => ("", pc_core::trim_leading_separators(path)),
+    }
+}
+
+fn merged_tree(files: &[pc_db::TreeFile], roots: &[String]) -> HashMap<String, Node> {
+    let mut nodes: HashMap<String, Node> = HashMap::new();
     for f in files {
-        let mut dir = pc_core::dir_name(&f.path);
-        dirs.entry(dir.to_string()).or_default().here += 1;
+        let (root, rel) = split_root(roots, &f.path);
+        let mut dir = pc_core::dir_name(rel);
+        nodes.entry(dir.to_string()).or_default().here += 1;
         loop {
-            let entry = dirs.entry(dir.to_string()).or_default();
-            entry.files += 1;
-            entry.bytes += f.size;
+            let node = nodes.entry(dir.to_string()).or_default();
+            node.files += 1;
+            node.bytes += f.size;
+            let per_root = node.by_root.entry(root.to_string()).or_default();
+            per_root.0 += 1;
+            per_root.1 += f.size;
             if dir.is_empty() {
                 break;
             }
             let parent = pc_core::dir_name(dir);
-            dirs.entry(parent.to_string())
+            nodes
+                .entry(parent.to_string())
                 .or_default()
                 .children
                 .insert(dir.to_string());
             dir = parent;
         }
     }
-    dirs
+    nodes
 }
 
-/// A folder with nothing in it but one other folder is not a stop on the way.
-///
-/// An archive under `/mnt/user/media/photo/archive` would otherwise take five
-/// presses before the first photograph, each one offering a single choice.
-/// The chain is walked through and shown as one entry, named by the whole run
-/// of folders it stands for.
-fn collapse(dirs: &HashMap<String, Folder>, mut dir: String) -> String {
-    loop {
-        let Some(f) = dirs.get(&dir) else {
-            return dir;
-        };
-        if f.here != 0 || f.children.len() != 1 {
-            return dir;
-        }
-        dir = f.children.iter().next().cloned().unwrap_or(dir);
+fn root_label(root: &str) -> String {
+    let name = pc_core::base_name(pc_core::trim_trailing_separators(root));
+    if name.is_empty() {
+        root.to_string()
+    } else {
+        name.to_string()
     }
 }
 
-/// The mark covering this folder, if any: itself, or one above it.
-fn covering<'a>(marks: &'a [String], dir: &str) -> Option<&'a String> {
-    marks
-        .iter()
-        .filter(|m| pc_core::under(dir, m))
-        .max_by_key(|m| m.len())
+/// One node as the browser reads it, with its children to the given depth.
+///
+/// Depth rather than the whole tree: an archive is tens of thousands of
+/// folders, and sending all of them to draw the dozen a person can see is
+/// paid for on every visit. Two levels is what a tree needs to draw itself —
+/// the children, and whether each of them has children of its own, so the
+/// chevron is right before anything is expanded.
+fn node_json(nodes: &HashMap<String, Node>, marks: &pc_db::Marks, path: &str, depth: u32) -> Value {
+    let node = nodes.get(path);
+    let children: Vec<Value> = if depth == 0 {
+        Vec::new()
+    } else {
+        node.map(|n| {
+            n.children
+                .iter()
+                .map(|c| node_json(nodes, marks, c, depth - 1))
+                .collect()
+        })
+        .unwrap_or_default()
+    };
+    let has_children = node.is_some_and(|n| !n.children.is_empty());
+    let covered = marks.covering_relative(path);
+    json!({
+        "name": pc_core::base_name(path),
+        "path": path,
+        "files": node.map(|n| n.files).unwrap_or(0),
+        "bytes": node.map(|n| n.bytes).unwrap_or(0),
+        "here": node.map(|n| n.here).unwrap_or(0),
+        "roots": node.map(|n| n.by_root.iter().map(|(root, (files, bytes))| {
+            // Where this folder actually is on that root, for the times when
+            // one disk of the array has to be singled out.
+            let full = if root.is_empty() {
+                path.to_string()
+            } else if path.is_empty() {
+                root.clone()
+            } else {
+                format!("{root}/{path}")
+            };
+            let covered = marks.covering(&full);
+            json!({
+                "path": root,
+                "label": root_label(root),
+                "full": full,
+                "files": files,
+                "bytes": bytes,
+                "marked": marks.marked(&full, pc_db::MarkScope::Absolute),
+                "covered": covered.map(|m| json!({"path": m.path, "scope": m.scope.as_str()})),
+            })
+        }).collect::<Vec<_>>()).unwrap_or_default(),
+        "marked": marks.marked(path, pc_db::MarkScope::EveryRoot),
+        "covered": covered.map(|m| json!({"path": m.path, "scope": m.scope.as_str()})),
+        "has_children": has_children,
+        // `null` rather than `[]`: "not fetched yet" and "no children" are
+        // different answers, and a tree that confuses them either refuses to
+        // open a folder or shows a chevron on an empty one.
+        "children": if depth == 0 && has_children { Value::Null } else { json!(children) },
+    })
 }
 
 /// How many files of a folder's listing are sent at once.
@@ -1642,6 +1728,10 @@ fn covering<'a>(marks: &'a [String], dir: &str) -> Option<&'a String> {
 /// The count above the list says how many there are.
 const LISTING: usize = 500;
 
+fn default_depth() -> u32 {
+    2
+}
+
 pub async fn tree(
     State(st): State<Arc<AppState>>,
     Query(q): Query<HashMap<String, String>>,
@@ -1649,38 +1739,69 @@ pub async fn tree(
     respond((|| {
         let db = st.db.lock().unwrap();
         let path = q.get("path").cloned().unwrap_or_default();
+        let depth = q
+            .get("depth")
+            .and_then(|d| d.parse().ok())
+            .unwrap_or_else(default_depth)
+            .min(8);
+        let roots = tree_roots(&db)?;
         let files = db.tree_files()?;
-        let dirs = folder_map(&files);
-        let marks = db.original_folders()?;
+        let nodes = merged_tree(&files, &roots);
+        let marks = db.original_marks()?;
 
-        let here = dirs.get(&path);
-        let directories: Vec<Value> = here
-            .map(|f| {
-                f.children
-                    .iter()
-                    .map(|child| {
-                        let full = collapse(&dirs, child.clone());
-                        let agg = dirs.get(&full);
-                        let name = full
-                            .strip_prefix(&path)
-                            .map(pc_core::trim_leading_separators)
-                            .unwrap_or(&full);
-                        json!({
-                            "name": name,
-                            "path": full,
-                            "files": agg.map(|a| a.files).unwrap_or(0),
-                            "bytes": agg.map(|a| a.bytes).unwrap_or(0),
-                            "marked": marks.contains(&full),
-                            "covered": covering(&marks, &full),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let top = nodes.get("");
+        Ok(json!({
+            "path": path,
+            "parent": (!path.is_empty()).then(|| pc_core::dir_name(&path)),
+            // What the tree is laid over, so the page can say "three disks,
+            // one structure" rather than leave it to be guessed.
+            "roots": roots.iter().map(|r| {
+                let stats = top.and_then(|n| n.by_root.get(r)).copied().unwrap_or((0, 0));
+                json!({"path": r, "label": root_label(r), "files": stats.0, "bytes": stats.1})
+            }).collect::<Vec<_>>(),
+            "merged": roots.len() > 1,
+            "files": top.map(|n| n.files).unwrap_or(0),
+            "bytes": top.map(|n| n.bytes).unwrap_or(0),
+            "marks": marks.marks.iter().map(|m| {
+                let stats = matches!(m.scope, pc_db::MarkScope::EveryRoot)
+                    .then(|| nodes.get(&m.path))
+                    .flatten();
+                json!({
+                    "path": m.path,
+                    "scope": m.scope.as_str(),
+                    "files": stats.map(|n| n.files).unwrap_or(0),
+                    "bytes": stats.map(|n| n.bytes).unwrap_or(0),
+                })
+            }).collect::<Vec<_>>(),
+            "node": node_json(&nodes, &marks, &path, depth),
+        }))
+    })())
+}
 
-        let listed: Vec<&pc_db::TreeFile> = files
+/// The photographs sitting directly in one folder of the merged tree.
+///
+/// Fetched apart from the tree because they are what a person looks at last:
+/// the tree is walked with the folders alone, and the frames arrive when a
+/// folder is actually opened.
+pub async fn tree_files(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    respond((|| {
+        let db = st.db.lock().unwrap();
+        let path = q.get("path").cloned().unwrap_or_default();
+        // One disk of the merged folder, when the answer is about that disk.
+        let only = q.get("root").filter(|r| !r.is_empty());
+        let roots = tree_roots(&db)?;
+        let marks = db.original_marks()?;
+        let all = db.tree_files()?;
+
+        let listed: Vec<&pc_db::TreeFile> = all
             .iter()
-            .filter(|f| pc_core::dir_name(&f.path) == path)
+            .filter(|f| {
+                let (root, rel) = split_root(&roots, &f.path);
+                pc_core::dir_name(rel) == path && only.is_none_or(|r| r == root)
+            })
             .collect();
         let ids: Vec<i64> = listed.iter().take(LISTING).map(|f| f.id).collect();
         let badges = db.family_badges(&ids)?;
@@ -1692,10 +1813,13 @@ pub async fn tree(
                 let role = badge
                     .and_then(|b| pc_family::Role::parse(&b.role))
                     .unwrap_or(pc_family::Role::Unknown);
+                let (root, _) = split_root(&roots, &f.path);
                 json!({
                     "file_id": f.id,
                     "name": pc_core::base_name(&f.path),
                     "path": f.path,
+                    "root": root,
+                    "root_label": root_label(root),
                     "size": f.size,
                     "width": f.width,
                     "height": f.height,
@@ -1708,22 +1832,14 @@ pub async fn tree(
                     "role_label": badge.map(|_| role.label()),
                     // Whether this file is an original because of where it
                     // sits, which is the whole point of the page.
-                    "original": covering(&marks, &f.path).is_some(),
+                    "original": marks.covering(&f.path).is_some(),
                 })
             })
             .collect();
-
         Ok(json!({
             "path": path,
-            "parent": (!path.is_empty()).then(|| pc_core::dir_name(&path)),
-            "marked": marks.contains(&path),
-            "covered": covering(&marks, &path),
-            "marks": marks,
-            "files": here.map(|f| f.files).unwrap_or(0),
-            "bytes": here.map(|f| f.bytes).unwrap_or(0),
             "here": listed.len(),
             "shown": entries.len(),
-            "directories": directories,
             "entries": entries,
         }))
     })())
@@ -1735,52 +1851,38 @@ pub async fn tree(
 /// the next rebuild, so the answer is given once rather than every time the
 /// archive is read again. What follows from it is applied at once: every
 /// group with a file in the marked tree keeps that file.
+///
+/// `scope` says which folder is meant. `every-root` is the merged one — this
+/// path under every root, including a disk added to the array later — and
+/// `absolute` is one folder on one disk.
 pub async fn set_original_folder(
     State(st): State<Arc<AppState>>,
     Json(v): Json<Value>,
 ) -> Response {
     mutate(&st, |db| {
+        let scope = pc_db::MarkScope::parse(v["scope"].as_str().unwrap_or("every-root"));
         let path = v["path"]
             .as_str()
+            .map(pc_core::trim_trailing_separators)
             .filter(|d| !d.is_empty())
             .context(pc_core::tr!("Не указана папка", "No folder given"))?
             .to_string();
         let marked = v["marked"].as_bool().unwrap_or(true);
         let tx = db.conn.unchecked_transaction()?;
         if marked {
-            db.mark_original_folder(&path)?;
+            db.mark_original(&path, scope)?;
         } else {
-            db.unmark_original_folder(&path)?;
+            db.unmark_original(&path, scope)?;
         }
         let report = pc_family::originals::settle(db)?;
         tx.commit()?;
         Ok(json!({
-            "marks": db.original_folders()?,
+            "marks": db.original_marks()?.marks.iter()
+                .map(|m| json!({"path": m.path, "scope": m.scope.as_str()}))
+                .collect::<Vec<_>>(),
             "groups": report.groups,
             "moved": report.moved,
             "untouched": report.untouched,
         }))
     })
-}
-
-/// The marks as they stand, with what they cover.
-pub async fn originals(State(st): State<Arc<AppState>>) -> Response {
-    respond((|| {
-        let db = st.db.lock().unwrap();
-        let marks = db.original_folders()?;
-        let files = db.tree_files()?;
-        let dirs = folder_map(&files);
-        let folders: Vec<Value> = marks
-            .iter()
-            .map(|m| {
-                let agg = dirs.get(m);
-                json!({
-                    "path": m,
-                    "files": agg.map(|a| a.files).unwrap_or(0),
-                    "bytes": agg.map(|a| a.bytes).unwrap_or(0),
-                })
-            })
-            .collect();
-        Ok(json!({ "folders": folders }))
-    })())
 }

@@ -5,7 +5,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 use std::{
-    path::{Path, PathBuf},
+    path::{Path as FsPath, Path, PathBuf},
     time::Duration,
 };
 use tower::ServiceExt;
@@ -1211,74 +1211,193 @@ async fn a_job_will_not_start_while_something_else_is_writing() {
 }
 
 #[tokio::test]
-async fn a_marked_folder_makes_its_tree_the_originals_and_clears_the_copies() {
-    // The one sentence the other screens cannot say: "the originals are in
-    // here". It is about a tree, so it has to reach a file two folders down,
-    // and it has to survive the archive being read again.
+async fn one_mark_settles_the_same_folder_on_every_disk_of_an_array() {
+    // The shape this page exists for. On an array the photographs live on
+    // three filesystems — a move has to stay on one spindle to be a rename —
+    // and their owner sees one folder structure laid across the disks. Told
+    // "the originals are in D/разобрано/даня/театр", they mean it about all
+    // of them, and the tree has to take that as one sentence.
     let f = Fixture::new();
-    let shots = f.archive.join("shots/2014/june");
-    let mirror = f.archive.join("mirror/2014");
-    std::fs::create_dir_all(&shots).unwrap();
-    std::fs::create_dir_all(&mirror).unwrap();
-    let img = image::RgbImage::from_fn(320, 240, |x, y| {
-        image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
-    });
-    let mut encoded = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new(&mut encoded)
-        .encode_image(&img)
-        .unwrap();
-    std::fs::write(shots.join("DSC_0001.JPG"), &encoded).unwrap();
-    std::fs::write(mirror.join("DSC_0001.JPG"), &encoded).unwrap();
+    let roots: Vec<String> = ["disk1", "disk2"]
+        .iter()
+        .map(|d| f.archive.join(d).display().to_string())
+        .collect();
+    let good = "D/разобрано/даня/театр";
+    for (n, root) in roots.iter().enumerate() {
+        let kept = FsPath::new(root).join(good);
+        let loose = FsPath::new(root).join("D/свалка");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::create_dir_all(&loose).unwrap();
+        // A different photograph per disk, so each disk is its own group and
+        // the numbers below say how many disks were reached.
+        let img = image::RgbImage::from_fn(320, 240, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, (n * 90) as u8])
+        });
+        let mut encoded = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+            .encode_image(&img)
+            .unwrap();
+        std::fs::write(kept.join("IMG.JPG"), &encoded).unwrap();
+        std::fs::write(loose.join("IMG.JPG"), &encoded).unwrap();
+    }
 
+    let (s, v) = f
+        .req("PUT", "/api/settings", json!({ "roots": roots }))
+        .await;
+    assert_eq!(s, 200, "{v}");
     let id = f
-        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .start("index", json!({"roots": roots, "min_size": 0}))
         .await;
     assert_eq!(f.wait(id).await["state"], "done");
     let id = f.start("families", json!({})).await;
     assert_eq!(f.wait(id).await["state"], "done");
 
-    // The tree is walked, not typed: a folder holding nothing but one folder
-    // is passed through, so the first press lands on something real.
-    let (s, root) = f.req("GET", "/api/tree", Value::Null).await;
-    assert_eq!(s, 200, "{root}");
-    assert_eq!(root["files"], 2, "{root}");
-    let first = root["directories"][0]["path"].as_str().unwrap().to_string();
-    assert_eq!(first, f.archive.display().to_string(), "{root}");
-
-    let at = |p: &str| format!("/api/tree?path={}", urlencoding(p));
-    let (_, level) = f.req("GET", &at(&first), Value::Null).await;
-    let names: Vec<&str> = level["directories"]
+    // One tree over two disks: `D` is one node, and it says both hold it.
+    let (s, top) = f.req("GET", "/api/tree", Value::Null).await;
+    assert_eq!(s, 200, "{top}");
+    assert_eq!(top["merged"], true, "{top}");
+    assert_eq!(top["files"], 4, "{top}");
+    let children = top["node"]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1, "{top}");
+    assert_eq!(children[0]["path"], "D", "{top}");
+    let labels: Vec<&str> = children[0]["roots"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|d| d["name"].as_str().unwrap())
+        .map(|r| r["label"].as_str().unwrap())
         .collect();
-    // A collapsed name is a run of folders, and it is spelled the way the
-    // archive spells its paths: a Windows server says `mirror\2014`.
-    let sep = std::path::MAIN_SEPARATOR;
+    assert_eq!(labels, ["disk1", "disk2"], "{top}");
+
+    // Marked once, relative to the roots.
+    let (s, v) = f
+        .req(
+            "POST",
+            "/api/originals",
+            json!({"path": good, "scope": "every-root"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["groups"], 2, "оба диска не охвачены: {v}");
+    assert_eq!(v["moved"], 2, "{v}");
     assert_eq!(
-        names,
-        [
-            format!("mirror{sep}2014"),
-            format!("shots{sep}2014{sep}june")
-        ],
-        "{level}"
+        v["marks"],
+        json!([{"path": good, "scope": "every-root"}]),
+        "отметка должна быть одна: {v}"
     );
 
-    let shots_dir = shots.display().to_string();
-    let (_, leaf) = f.req("GET", &at(&shots_dir), Value::Null).await;
-    assert_eq!(leaf["here"], 1, "{leaf}");
-    assert_eq!(leaf["entries"][0]["name"], "DSC_0001.JPG", "{leaf}");
-    assert_eq!(leaf["entries"][0]["original"], false, "{leaf}");
+    let kept: Vec<String> = {
+        let db = f.state.db.lock().unwrap();
+        let mut st = db
+            .conn
+            .prepare("SELECT f.path FROM families fa JOIN files f ON f.id = fa.keeper_file")
+            .unwrap();
+        let rows = st
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        rows
+    };
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    for path in &kept {
+        assert!(
+            path.contains("театр"),
+            "хранимым остался не оригинал: {path}"
+        );
+    }
 
-    // Marked one level above the photographs: the rule has to reach them.
-    let marked = f.archive.join("shots").display().to_string();
+    // The merged folder knows it is marked, and which disks it lies on.
+    let (_, node) = f
+        .req(
+            "GET",
+            &format!("/api/tree?path={}", urlencoding(good)),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(node["node"]["marked"], true, "{node}");
+    assert_eq!(node["node"]["roots"].as_array().unwrap().len(), 2, "{node}");
+
+    let (_, listing) = f
+        .req(
+            "GET",
+            &format!("/api/tree/files?path={}", urlencoding(good)),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(listing["here"], 2, "{listing}");
+    for entry in listing["entries"].as_array().unwrap() {
+        assert_eq!(entry["original"], true, "{entry}");
+    }
+
+    // What follows: the copies on both disks, and only those.
+    let plan = f
+        .preview("plan-apply", json!({"roles":["copy"],"originals":true}))
+        .await;
+    assert_eq!(plan["total_files"], 2, "{plan}");
+    for item in plan["items"].as_array().unwrap() {
+        let path = item["path"].as_str().unwrap();
+        assert!(path.contains("свалка"), "уезжает оригинал: {path}");
+    }
+    let done = f.apply(&plan).await;
+    assert_eq!(done["state"], "done", "{done}");
+    for root in &roots {
+        assert!(!FsPath::new(root).join("D/свалка/IMG.JPG").exists());
+        assert!(FsPath::new(root).join(good).join("IMG.JPG").exists());
+    }
+
+    // And taking it back leaves nothing marked behind.
     let (s, v) = f
-        .req("POST", "/api/originals", json!({"path": marked}))
+        .req(
+            "POST",
+            "/api/originals",
+            json!({"path": good, "scope": "every-root", "marked": false}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["marks"], json!([]), "{v}");
+}
+
+#[tokio::test]
+async fn a_single_disk_can_still_be_named_on_its_own() {
+    // The other half: one copy of a structure is the good one and the others
+    // are not. That is an absolute mark, and it must not reach the rest.
+    let f = Fixture::new();
+    let roots: Vec<String> = ["disk1", "disk2"]
+        .iter()
+        .map(|d| f.archive.join(d).display().to_string())
+        .collect();
+    let img = image::RgbImage::from_fn(240, 180, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 40])
+    });
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+        .encode_image(&img)
+        .unwrap();
+    for root in &roots {
+        let dir = FsPath::new(root).join("D/фото");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("IMG.JPG"), &encoded).unwrap();
+    }
+
+    f.req("PUT", "/api/settings", json!({ "roots": roots }))
+        .await;
+    let id = f
+        .start("index", json!({"roots": roots, "min_size": 0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+    let id = f.start("families", json!({})).await;
+    assert_eq!(f.wait(id).await["state"], "done");
+
+    let only = format!("{}/D/фото", roots[0]);
+    let (s, v) = f
+        .req(
+            "POST",
+            "/api/originals",
+            json!({"path": only, "scope": "absolute"}),
+        )
         .await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["groups"], 1, "{v}");
-    assert_eq!(v["marks"], json!([marked]), "{v}");
 
     let keeper: String = f
         .state
@@ -1292,37 +1411,29 @@ async fn a_marked_folder_makes_its_tree_the_originals_and_clears_the_copies() {
             |r| r.get(0),
         )
         .unwrap();
-    assert!(
-        keeper.starts_with(&marked),
-        "хранимым остался файл вне отмеченной папки: {keeper}"
-    );
+    assert!(keeper.starts_with(&roots[0]), "{keeper}");
 
-    let (_, leaf) = f.req("GET", &at(&shots_dir), Value::Null).await;
-    assert_eq!(leaf["entries"][0]["original"], true, "{leaf}");
-    assert_eq!(leaf["covered"], json!(marked), "{leaf}");
+    // The merged node is not marked: this sentence was about one disk.
+    let (_, node) = f
+        .req(
+            "GET",
+            &format!("/api/tree?path={}", urlencoding("D/фото")),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(node["node"]["marked"], false, "{node}");
+    let per_root = node["node"]["roots"].as_array().unwrap();
+    assert_eq!(per_root[0]["marked"], true, "{node}");
+    assert_eq!(per_root[1]["marked"], false, "{node}");
 
-    // What follows from the mark: the copy elsewhere, and only it.
     let plan = f
         .preview("plan-apply", json!({"roles":["copy"],"originals":true}))
         .await;
     assert_eq!(plan["total_files"], 1, "{plan}");
-    let going = plan["items"][0]["path"].as_str().unwrap().to_string();
-    assert!(going.starts_with(&mirror.display().to_string()), "{plan}");
-    let done = f.apply(&plan).await;
-    assert_eq!(done["state"], "done", "{done}");
-    assert!(!mirror.join("DSC_0001.JPG").exists());
-    assert!(shots.join("DSC_0001.JPG").exists());
-
-    // And taking it back leaves nothing marked behind.
-    let (s, v) = f
-        .req(
-            "POST",
-            "/api/originals",
-            json!({"path": marked, "marked": false}),
-        )
-        .await;
-    assert_eq!(s, 200, "{v}");
-    assert_eq!(v["marks"], json!([]), "{v}");
+    assert!(plan["items"][0]["path"]
+        .as_str()
+        .unwrap()
+        .starts_with(&roots[1]));
 }
 
 #[tokio::test]

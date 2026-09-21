@@ -100,10 +100,18 @@ export const ui = {
   },
   tree: {
     root: "The whole archive",
-    up: "Up",
+    disks: "The archive’s disks",
+    disksHelp:
+      "Several roots, one structure: the tree below is laid across all of them at once. A folder that exists on three disks is one node here — and is marked once.",
+    everyRoot: "on every disk",
+    oneDisk: "one disk",
+    perDisk: "This folder, disk by disk",
+    perDiskHelp:
+      "When the originals are on one disk and the others hold copies of it, mark that disk here. Such a mark lives apart from the merged one and reaches no further than the disk it names.",
+    onlyThisDisk: "This disk only",
     mark: "The originals are here",
     markHelp:
-      "Everything in this folder and in its subfolders, at any depth, counts as an original: every group keeps the file it holds here. The mark is remembered and applied again after every rebuild — files indexed into this folder later become originals too.",
+      "Everything in this folder and in its subfolders, at any depth, counts as an original: every group keeps the file it holds here. The mark is on the path relative to a root, so it covers this folder on every disk at once — including one added to the array tomorrow. It is remembered and applied again after every rebuild.",
     unmark: "Take the mark back",
     marks: "Folders holding the originals",
     noMarks:

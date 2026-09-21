@@ -1,6 +1,7 @@
 //! SQLite storage: schema, migrations and the queries phase 0 needs.
 
 pub mod files;
+pub mod marks;
 pub mod model;
 pub mod organize;
 pub mod schema;
@@ -9,6 +10,7 @@ pub use files::{
     FamilyBadge, FamilyRow, FileInfo, FileRow, IndexStats, MemberRow, NewFile, NewMeta, PlanRow,
     SeriesMemberRow, SeriesRow, TreeFile,
 };
+pub use marks::{Mark, MarkScope, Marks};
 pub use model::{
     Bundle, BundleState, Catalog, JournalEntry, JournalStatus, KeeperSource, Moved, NewBundle,
     NewCatalog, NewJournalEntry, QuarantineFound,

@@ -192,6 +192,12 @@ pub fn trim_leading_separators(path: &str) -> &str {
     path.trim_start_matches(SEPARATORS)
 }
 
+/// A path with its trailing separators removed, so that a folder written by
+/// hand as `/foto/` and one read from the index as `/foto` are one folder.
+pub fn trim_trailing_separators(path: &str) -> &str {
+    path.trim_end_matches(SEPARATORS)
+}
+
 /// Path components, with empty ones dropped.
 pub fn path_parts(path: &str) -> Vec<&str> {
     path.split(SEPARATORS).filter(|s| !s.is_empty()).collect()

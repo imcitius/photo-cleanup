@@ -407,6 +407,20 @@ const MIGRATIONS: &[&str] = &[
     -- the first without touching the second.
     ALTER TABLE manual_keepers ADD COLUMN source TEXT NOT NULL DEFAULT 'hand';
     "#,
+    // 018 — одна отметка на весь массив.
+    //
+    // На Unraid три диска — одна файловая система для того, кто ими
+    // пользуется: `/mnt/disk1/D/…`, `/mnt/disk2/D/…` и `/mnt/disk3/D/…` это
+    // одна папка, разложенная по шпинделям. Отметка, записанная абсолютным
+    // путём, говорила про один диск из трёх, и сказать нужное было нельзя.
+    //
+    // `scope` различает две вещи, которые обе нужны: `absolute` — папка на
+    // одном диске, как раньше; `every-root` — путь относительно корня,
+    // который значит эту папку под каждым настроенным корнем, включая диск,
+    // добавленный в массив завтра.
+    r#"
+    ALTER TABLE original_folders ADD COLUMN scope TEXT NOT NULL DEFAULT 'absolute';
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

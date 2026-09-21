@@ -296,17 +296,53 @@ export interface Category {
     thumb: string | null;
   }[];
 }
-/** One folder of the archive tree, as the browser walks it. */
-export interface TreeDir {
-  name: string;
+/** Which mark covers a folder, and what kind of sentence it was. */
+export interface MarkRef {
   path: string;
-  /** Files anywhere beneath it, and what they weigh. */
+  /** `every-root` is the merged folder; `absolute` names one disk's copy. */
+  scope: "every-root" | "absolute";
+}
+
+/** What one root contributes to a folder of the merged tree. */
+export interface TreeRoot {
+  path: string;
+  label: string;
   files: number;
   bytes: number;
-  /** This exact folder carries a mark of its own. */
+  /** This folder's absolute path on that root. Absent on the tree header. */
+  full?: string;
+  marked?: boolean;
+  covered?: MarkRef | null;
+}
+
+/** One folder of the merged tree, keyed by its path relative to a root. */
+export interface TreeNode {
+  name: string;
+  /** Relative to a root: the same node stands for every disk that holds it. */
+  path: string;
+  /** Files anywhere beneath it, across every root, and what they weigh. */
+  files: number;
+  bytes: number;
+  /** Files sitting directly in it. */
+  here: number;
+  roots: TreeRoot[];
   marked: boolean;
-  /** The mark that covers it — itself, or one further up. */
-  covered: string | null;
+  covered: MarkRef | null;
+  has_children: boolean;
+  /** `null` means "not fetched yet", which is not the same as "none". */
+  children: TreeNode[] | null;
+}
+
+export interface TreeView {
+  path: string;
+  parent: string | null;
+  roots: TreeRoot[];
+  /** True when the archive is laid over more than one root. */
+  merged: boolean;
+  files: number;
+  bytes: number;
+  marks: (MarkRef & { files: number; bytes: number })[];
+  node: TreeNode;
 }
 
 /** One indexed file sitting directly in the folder being shown. */
@@ -314,6 +350,8 @@ export interface TreeEntry {
   file_id: number;
   name: string;
   path: string;
+  root: string;
+  root_label: string;
   size: number;
   width: number | null;
   height: number | null;
@@ -329,19 +367,11 @@ export interface TreeEntry {
   original: boolean;
 }
 
-export interface TreeView {
+export interface TreeFiles {
   path: string;
-  parent: string | null;
-  marked: boolean;
-  covered: string | null;
-  /** Every folder marked in the archive, not only the ones shown here. */
-  marks: string[];
-  files: number;
-  bytes: number;
   /** Files directly in this folder, and how many of them were sent. */
   here: number;
   shown: number;
-  directories: TreeDir[];
   entries: TreeEntry[];
 }
 

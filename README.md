@@ -30,6 +30,17 @@ way down: any file under it counts as an original, and every group holding
 such a file keeps it. One more button then quarantines the exact copies of
 what those folders hold, wherever in the archive they lie.
 
+**An array is one structure, not three.** On Unraid the photographs live on
+`/mnt/disk1`, `/mnt/disk2`, `/mnt/disk3` — separate filesystems, because a
+move has to stay on one spindle to be a rename. But
+`D/разобрано/даня/театр` is one folder spread over the disks, and the tree
+shows it as one node, saying how much of it each disk holds. The mark is
+stored as a path *relative to a root*, so it covers that folder on every disk
+at once — including one added to the array tomorrow, with no rule to move.
+When the originals really are on one disk and the others hold copies, open
+"This folder, disk by disk" and mark that one; such a mark reaches no further
+than the disk it names.
+
 The mark is a rule, not a press. It is stored, it survives the groups being
 rebuilt, and it is applied again afterwards, so files indexed into that folder
 tomorrow become originals too. Taking it back undoes what it decided and

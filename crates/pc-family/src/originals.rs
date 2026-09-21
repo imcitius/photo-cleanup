@@ -7,7 +7,9 @@
 //! the groups are rebuilt whenever the archive is read again, and files
 //! indexed tomorrow are inside the same folder.
 //!
-//! So the marks live in the database and this runs after every rebuild.
+//! So the marks live in the database and this runs after every rebuild. What
+//! a mark covers — one folder, or one path under every root of an array — is
+//! `pc_db::Marks`; this only asks it.
 
 use anyhow::Result;
 use pc_db::{Db, KeeperSource};
@@ -43,8 +45,8 @@ struct Member {
 /// No transaction of its own: it runs at the end of a rebuild, inside the one
 /// that wrote the groups, and opening a second there is an error.
 pub fn settle(db: &Db) -> Result<Report> {
-    let folders = db.original_folders()?;
-    if folders.is_empty() {
+    let marks = db.original_marks()?;
+    if marks.is_empty() {
         return Ok(Report::default());
     }
 
@@ -95,17 +97,11 @@ pub fn settle(db: &Db) -> Result<Report> {
         if by_hand.contains(family) {
             continue;
         }
-        // How deep the mark covering this file is. A folder marked inside
-        // another marked folder is absorbed when it is written down, so this
-        // is only ever one mark — but reading it as a depth keeps the choice
-        // stable if that ever stops being true.
-        let depth = |path: &str| {
-            folders
-                .iter()
-                .filter(|d| pc_core::under(path, d))
-                .map(|d| d.len())
-                .max()
-        };
+        // How specific the mark covering this file is. Two marks can cover
+        // one file — a disk named on its own inside a path named everywhere —
+        // and the deeper of them decides, so that naming one disk more
+        // narrowly is a way of preferring it.
+        let depth = |path: &str| marks.covering(path).map(|m| m.path.len());
         let mut best: Option<(usize, f64, i64)> = None;
         let mut covered = false;
         let mut matched = false;
@@ -154,6 +150,19 @@ pub fn settle(db: &Db) -> Result<Report> {
 mod tests {
     use super::*;
     use pc_db::files::NewFile;
+    use pc_db::MarkScope;
+
+    fn paths(db: &Db) -> Vec<String> {
+        let mut out: Vec<String> = db
+            .original_marks()
+            .unwrap()
+            .marks
+            .into_iter()
+            .map(|m| m.path)
+            .collect();
+        out.sort();
+        out
+    }
 
     struct World {
         _tmp: tempfile::TempDir,
@@ -215,7 +224,7 @@ mod tests {
         let deep = file(&w, "/foto/2014/raw/june", "DSC_0001.JPG", 1);
         let fam = family(&w, backup, &[backup, deep]);
 
-        w.db.mark_original_folder("/foto").unwrap();
+        w.db.mark_original("/foto", MarkScope::Absolute).unwrap();
         let report = settle(&w.db).unwrap();
 
         assert_eq!(
@@ -230,13 +239,84 @@ mod tests {
     }
 
     #[test]
+    fn one_relative_mark_settles_the_same_folder_on_every_disk() {
+        // The Unraid shape: three filesystems, one structure laid across
+        // them, and the copies of a shot scattered over all three.
+        let w = world();
+        w.db.conn
+            .execute(
+                "INSERT INTO settings(key, value) VALUES('roots', ?1)",
+                ["[\"/mnt/disk1\",\"/mnt/disk2\",\"/mnt/disk3\"]"],
+            )
+            .unwrap();
+
+        let mut families = Vec::new();
+        for (n, disk) in ["disk1", "disk2", "disk3"].iter().enumerate() {
+            let pixels = n as u8 + 1;
+            let loose = file(&w, &format!("/mnt/{disk}/D/свалка"), "IMG.JPG", pixels);
+            let good = file(
+                &w,
+                &format!("/mnt/{disk}/D/разобрано/даня/театр"),
+                "IMG.JPG",
+                pixels,
+            );
+            // Kept in the wrong place to begin with, on every disk.
+            families.push((family(&w, loose, &[loose, good]), good));
+        }
+
+        w.db.mark_original("D/разобрано/даня/театр", MarkScope::EveryRoot)
+            .unwrap();
+        let report = settle(&w.db).unwrap();
+
+        assert_eq!(
+            report,
+            Report {
+                groups: 3,
+                moved: 3,
+                untouched: 0
+            }
+        );
+        for (fam, good) in families {
+            assert_eq!(keeper_of(&w, fam), good, "диск не подхвачен отметкой");
+        }
+        assert_eq!(paths(&w.db), ["D/разобрано/даня/театр"], "отметка одна");
+    }
+
+    #[test]
+    fn a_disk_added_later_is_covered_without_marking_it_again() {
+        let w = world();
+        w.db.conn
+            .execute(
+                "INSERT INTO settings(key, value) VALUES('roots', ?1)",
+                ["[\"/mnt/disk1\"]"],
+            )
+            .unwrap();
+        w.db.mark_original("D/театр", MarkScope::EveryRoot).unwrap();
+
+        // The array grows, the archive is read again, and nobody goes back to
+        // the tree to say the same thing a second time.
+        w.db.conn
+            .execute(
+                "UPDATE settings SET value = ?1 WHERE key = 'roots'",
+                ["[\"/mnt/disk1\",\"/mnt/disk4\"]"],
+            )
+            .unwrap();
+        let loose = file(&w, "/mnt/disk4/D/свалка", "IMG.JPG", 7);
+        let good = file(&w, "/mnt/disk4/D/театр", "IMG.JPG", 7);
+        let fam = family(&w, loose, &[loose, good]);
+
+        assert_eq!(settle(&w.db).unwrap().moved, 1);
+        assert_eq!(keeper_of(&w, fam), good);
+    }
+
+    #[test]
     fn a_folder_whose_name_merely_starts_the_same_is_not_covered() {
         let w = world();
         let elsewhere = file(&w, "/foto-old/2014", "DSC_0001.JPG", 1);
         let backup = file(&w, "/backup/2014", "DSC_0001.JPG", 1);
         let fam = family(&w, backup, &[backup, elsewhere]);
 
-        w.db.mark_original_folder("/foto").unwrap();
+        w.db.mark_original("/foto", MarkScope::Absolute).unwrap();
         assert_eq!(settle(&w.db).unwrap(), Report::default());
         assert_eq!(keeper_of(&w, fam), backup);
     }
@@ -248,7 +328,7 @@ mod tests {
         let export = file(&w, "/foto/2014", "DSC_0001.jpg", 9);
         let fam = family(&w, backup, &[backup, export]);
 
-        w.db.mark_original_folder("/foto").unwrap();
+        w.db.mark_original("/foto", MarkScope::Absolute).unwrap();
         let report = settle(&w.db).unwrap();
 
         assert_eq!(
@@ -270,7 +350,7 @@ mod tests {
         let fam = family(&w, backup, &[backup, original]);
         w.db.set_manual_keeper(fam, backup).unwrap();
 
-        w.db.mark_original_folder("/foto").unwrap();
+        w.db.mark_original("/foto", MarkScope::Absolute).unwrap();
         assert_eq!(settle(&w.db).unwrap(), Report::default());
         assert_eq!(keeper_of(&w, fam), backup);
     }
@@ -295,34 +375,38 @@ mod tests {
         let byhand = family(&w, other, &[chosen, other]);
         w.db.set_manual_keeper(byhand, chosen).unwrap();
 
-        w.db.mark_original_folder("/foto").unwrap();
+        w.db.mark_original("/foto", MarkScope::Absolute).unwrap();
         settle(&w.db).unwrap();
         assert_eq!(keeper_of(&w, fam), original);
 
-        w.db.unmark_original_folder("/foto").unwrap();
+        w.db.unmark_original("/foto", MarkScope::Absolute).unwrap();
         assert_eq!(keeper_of(&w, fam), backup, "правило не откатилось");
         assert_eq!(keeper_of(&w, byhand), chosen, "снят выбор человека");
-        assert!(w.db.original_folders().unwrap().is_empty());
+        assert!(w.db.original_marks().unwrap().is_empty());
     }
 
     #[test]
     fn marking_a_folder_inside_a_marked_one_leaves_one_rule() {
         let w = world();
-        w.db.mark_original_folder("/foto").unwrap();
-        w.db.mark_original_folder("/foto/2014").unwrap();
-        assert_eq!(w.db.original_folders().unwrap(), ["/foto"]);
+        w.db.mark_original("/foto", MarkScope::Absolute).unwrap();
+        w.db.mark_original("/foto/2014", MarkScope::Absolute)
+            .unwrap();
+        assert_eq!(paths(&w.db), ["/foto"]);
 
-        w.db.mark_original_folder("/archive").unwrap();
-        w.db.mark_original_folder("/archive/raw").unwrap();
-        assert_eq!(w.db.original_folders().unwrap(), ["/archive", "/foto"]);
+        w.db.mark_original("/archive", MarkScope::Absolute).unwrap();
+        w.db.mark_original("/archive/raw", MarkScope::Absolute)
+            .unwrap();
+        assert_eq!(paths(&w.db), ["/archive", "/foto"]);
     }
 
     #[test]
     fn marking_a_folder_above_a_marked_one_absorbs_it() {
         let w = world();
-        w.db.mark_original_folder("/foto/2014").unwrap();
-        w.db.mark_original_folder("/foto/2015").unwrap();
-        w.db.mark_original_folder("/foto").unwrap();
-        assert_eq!(w.db.original_folders().unwrap(), ["/foto"]);
+        w.db.mark_original("/foto/2014", MarkScope::Absolute)
+            .unwrap();
+        w.db.mark_original("/foto/2015", MarkScope::Absolute)
+            .unwrap();
+        w.db.mark_original("/foto", MarkScope::Absolute).unwrap();
+        assert_eq!(paths(&w.db), ["/foto"]);
     }
 }

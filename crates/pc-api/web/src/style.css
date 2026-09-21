@@ -2474,65 +2474,123 @@ kbd {
   margin-top: 5px;
 }
 
-/* The archive tree: one folder open at a time.
-   A row is a target for walking into and a target for deciding about, and
-   the two must not be one button — a press meant as "open this" that instead
-   renamed ten thousand groups is exactly the accident this screen invites. */
+/* The archive tree.
+   A row is two targets that must not be one: the twisty opens the folder,
+   the row selects it. A press meant as "let me look inside" that instead
+   renamed ten thousand groups is exactly the accident this screen invites,
+   so marking lives in the folder's own panel, never in the row. */
+.tree-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 34%) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.tree-panel {
+  position: sticky;
+  top: 16px;
+}
+.tree-rows {
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0 -6px;
+}
+.tree-line {
+  display: flex;
+  border-radius: 6px;
+}
+.tree-line.marked {
+  background: var(--accent-soft);
+}
 .tree-row {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  height: 100%;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--subtle);
-  font-size: 12px;
-}
-.tree-row.marked {
-  border-left: 3px solid var(--accent);
-  padding-left: 10px;
-}
-.tree-open {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  gap: 8px;
   flex: 1;
   min-width: 0;
-  padding: 4px 0;
+  padding: 5px 8px;
   border: 0;
+  border-radius: 6px;
   background: none;
   color: inherit;
   font: inherit;
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
 }
-.tree-open > div {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
+.tree-row:hover {
+  background: var(--surface);
 }
-.tree-open strong {
+.tree-row.current {
+  background: var(--surface);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.tree-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  font-weight: 500;
 }
-.tree-open:hover strong {
-  color: var(--accent);
-}
-.tree-open .muted {
+.tree-row .muted {
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
-.tree-row .folder-note {
-  flex-basis: 100%;
+/* The twisty. Present but invisible on a leaf, so names line up whether or
+   not a folder has anything inside it. */
+.tree-twist {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 17px;
+  width: 17px;
+  height: 17px;
+  border-radius: 4px;
+  color: var(--muted);
+  transition: transform 0.12s ease;
 }
-.tree-bar {
-  justify-content: space-between;
+.tree-twist.has:hover {
+  background: var(--line);
+  color: var(--text);
+}
+.tree-twist.open {
+  transform: rotate(90deg);
+}
+/* Which disks of the array hold this folder. */
+.tree-disks {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.tree-disks span {
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--subtle);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.disk-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 .tree-crumbs {
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 0;
   font-size: 12px;
+}
+.per-disk {
+  margin: 4px 0 14px;
+  font-size: 12px;
+}
+.per-disk summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+.per-disk p {
+  margin: 8px 0;
 }
 .mark-list {
   display: flex;
@@ -2542,10 +2600,13 @@ kbd {
 .mark-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   font-size: 12px;
+  padding: 4px 0;
 }
-.mark-row > .link {
+.mark-row > .link,
+.mark-row > .path {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -2559,4 +2620,16 @@ kbd {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+@media (max-width: 900px) {
+  .tree-layout {
+    grid-template-columns: 1fr;
+  }
+  .tree-panel {
+    position: static;
+  }
+}
+.mark-help {
+  margin: 0 0 14px;
+  font-size: 12px;
 }
