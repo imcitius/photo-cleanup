@@ -487,3 +487,59 @@ impl Db {
         )
     }
 }
+
+/// Files found sitting in our quarantine folders during a walk.
+#[derive(Debug, Clone)]
+pub struct QuarantineFound {
+    pub path: String,
+    pub size: i64,
+    pub mtime: i64,
+    /// Whether the journal knows how to put this one back.
+    pub known: bool,
+}
+
+impl Db {
+    /// Replace what the last walk saw. The folders are the truth here; the
+    /// table is only a note of what was stepped over.
+    pub fn set_quarantine_found(&self, run_id: i64, found: &[(String, i64, i64)]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.conn.execute("DELETE FROM quarantine_found", [])?;
+        {
+            let mut st = self.conn.prepare(
+                "INSERT OR REPLACE INTO quarantine_found(path, size, mtime, seen_run)
+                 VALUES(?1, ?2, ?3, ?4)",
+            )?;
+            for (path, size, mtime) in found {
+                st.execute(rusqlite::params![path, size, mtime, run_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// What is in quarantine on disk, and whether the journal can undo it.
+    ///
+    /// A file the journal does not know about was put there by a database
+    /// that is no longer here. It is not rubbish and not indexed either: it
+    /// simply belongs to nobody until someone says what to do with it.
+    pub fn quarantine_found(&self) -> Result<Vec<QuarantineFound>> {
+        let mut st = self.conn.prepare(
+            "SELECT q.path, q.size, q.mtime,
+                    EXISTS(SELECT 1 FROM journal j
+                            WHERE j.dst = q.path AND j.status = 'done') AS known
+               FROM quarantine_found q
+              ORDER BY q.path",
+        )?;
+        let rows = st
+            .query_map([], |r| {
+                Ok(QuarantineFound {
+                    path: r.get(0)?,
+                    size: r.get(1)?,
+                    mtime: r.get(2)?,
+                    known: r.get::<_, i64>(3)? != 0,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+}

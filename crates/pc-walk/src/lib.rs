@@ -80,12 +80,27 @@ pub struct ProtectedHit {
     pub name: String,
 }
 
+/// A file sitting in one of our own quarantine folders.
+///
+/// The walk does not index these — that is the whole point of quarantine —
+/// but it counts them. A database can be reset or moved while the files stay
+/// on disk, and then nothing in the tool knows they exist: the journal that
+/// could put them back is gone with the old database, and the interface shows
+/// an empty quarantine over gigabytes of files.
+#[derive(Debug, Clone)]
+pub struct QuarantinedHit {
+    pub path: PathBuf,
+    pub size: u64,
+    pub mtime: i64,
+}
+
 #[derive(Debug, Default)]
 pub struct ScanResult {
     pub bundles: Vec<BundleHit>,
     pub catalogs: Vec<CatalogHit>,
     pub files: Vec<FileHit>,
     pub protected: Vec<ProtectedHit>,
+    pub quarantined: Vec<QuarantinedHit>,
     pub dirs_visited: u64,
     pub errors: Vec<String>,
 }
@@ -96,12 +111,37 @@ impl ScanResult {
         self.catalogs.extend(other.catalogs);
         self.files.extend(other.files);
         self.protected.extend(other.protected);
+        self.quarantined.extend(other.quarantined);
         self.dirs_visited += other.dirs_visited;
         self.errors.extend(other.errors);
     }
 }
 
 /// Recursive size/count/mtime of a bundle directory. Symlinks are not followed.
+/// Everything inside one quarantine folder, flat: that is how it is written.
+fn quarantined_files(root: &Path, control: &pc_core::work::Control) -> Vec<QuarantinedHit> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if control.check().is_err() {
+            break;
+        }
+        let Ok(md) = entry.metadata() else { continue };
+        if !md.is_file() {
+            continue;
+        }
+        out.push(QuarantinedHit {
+            path: entry.path().to_path_buf(),
+            size: md.len(),
+            mtime: pc_core::time::mtime_unix(&md),
+        });
+    }
+    out
+}
+
 fn dir_stats(root: &Path, control: &pc_core::work::Control) -> (u64, u64, i64) {
     let mut count = 0u64;
     let mut size = 0u64;
@@ -164,6 +204,7 @@ fn walk_dir(
 
         if ft.is_dir() {
             if name == pc_core::QUARANTINE_DIR {
+                out.quarantined.extend(quarantined_files(&path, control));
                 continue;
             }
             // Photo libraries own their contents; we neither index nor touch.

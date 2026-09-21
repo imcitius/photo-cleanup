@@ -58,6 +58,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/plan/apply", post(routes::apply_plan))
         .route("/api/quarantine", get(routes::quarantine))
         .route("/api/quarantine/{id}/undo", post(routes::undo))
+        .route("/api/quarantine/orphans", get(service::quarantine_orphans))
+        .route("/api/quarantine/orphans", post(service::quarantine_adopt))
         .route("/api/thumb/{key}", get(routes::thumb))
         .route("/api/file/{id}", get(routes::original))
         .route("/api/file/{id}/preview", get(routes::full_preview))

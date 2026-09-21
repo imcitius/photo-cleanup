@@ -50,6 +50,16 @@ pub fn run_controlled(
         catalogs = result.catalogs.len(),
         "обход завершён"
     );
+    // What the walk stepped over: our own quarantine folders. Written down
+    // so the interface can say what is in them, even when the journal that
+    // put them there belonged to a database that is gone.
+    let quarantined: Vec<(String, i64, i64)> = result
+        .quarantined
+        .iter()
+        .map(|q| (q.path.display().to_string(), q.size as i64, q.mtime))
+        .collect();
+    db.set_quarantine_found(run_id, &quarantined)?;
+
     for e in result.errors.iter().take(20) {
         tracing::warn!("{e}");
     }
@@ -248,8 +258,8 @@ fn report(db: &Db) -> Result<()> {
         .map(|b| b.size as u64)
         .sum();
     println!(
-        "\nОпись готова: {} бандлов, к переносу пригодно {}.\n\
-         Подробности: photo-cleanup derived list",
+        "\nInventory done: {} bundles, {} of it can be moved.\n\
+         Details: photo-cleanup derived list",
         all.len(),
         fmt_bytes(removable)
     );

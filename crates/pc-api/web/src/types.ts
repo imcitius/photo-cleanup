@@ -305,3 +305,17 @@ export type Page =
   | "quarantine"
   | "journal"
   | "settings";
+
+/** Quarantined files this database did not put there. */
+export interface Orphans {
+  files: number;
+  bytes: number;
+  known_files: number;
+  items: {
+    path: string;
+    name: string;
+    restore_to: string;
+    size: number;
+    mtime: number;
+  }[];
+}

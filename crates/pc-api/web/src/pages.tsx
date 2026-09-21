@@ -31,6 +31,7 @@ import type {
   Catalog,
   Job,
   Journal,
+  Orphans,
   Page,
   PlanItem,
   QuarantineItem,
@@ -929,6 +930,13 @@ export function Quarantine({
   revision: number;
 }) {
   const r = useResource<QuarantineItem[]>("/quarantine", revision),
+    // Files sitting in quarantine folders that this database never put there
+    // — left by an earlier one, and invisible everywhere else in the tool.
+    orphans = useResource<Orphans>("/quarantine/orphans", revision),
+    [orphanBusy, setOrphanBusy] = useState(false),
+    [orphanWord, setOrphanWord] = useState(""),
+    [orphanNote, setOrphanNote] = useState(""),
+    [orphanError, setOrphanError] = useState(""),
     [days, setDays] = useState(7),
     [purge, setPurge] = useState(false),
     [view, setView] = useState<{ images: ImageRef[]; start: number } | null>(
@@ -941,8 +949,88 @@ export function Quarantine({
   const viewable: ImageRef[] = items
     .filter((j) => j.file_id !== null)
     .map((j) => ({ file_id: j.file_id!, name: j.name, thumb: j.thumb }));
+  const handleOrphans = async (remove: boolean) => {
+    setOrphanBusy(true);
+    setOrphanError("");
+    setOrphanNote("");
+    try {
+      const res = await post<{ done: number; refused: { why: string }[] }>(
+        "/quarantine/orphans",
+        remove ? { delete: true, confirmation: orphanWord } : {},
+      );
+      setOrphanNote(
+        t("nichejnye_itog", number(res.done), number(res.refused.length)),
+      );
+      setOrphanWord("");
+      orphans.reload();
+    } catch (e) {
+      setOrphanError((e as Error).message);
+    } finally {
+      setOrphanBusy(false);
+    }
+  };
   return (
     <>
+      {/* Said first, because it is the part nothing else in the tool can
+          show: the journal knows nothing about these files, so without this
+          they are gigabytes that only the filesystem remembers. */}
+      {!!orphans.data?.files && (
+        <section className="panel">
+          <div className="section-heading">
+            <div>
+              <h3>{t("nichejnyy_karantin")}</h3>
+              <Totals files={orphans.data.files} size={orphans.data.bytes} />
+            </div>
+            <span className="badge warning">{t("ne_v_zhurnale")}</span>
+          </div>
+          <p className="muted">{ui.orphanQuarantineHelp}</p>
+          {orphanError && <ErrorBox message={orphanError} />}
+          {orphanNote && <Notice>{orphanNote}</Notice>}
+          <div className="toolbar">
+            <Button
+              kind="primary"
+              disabled={disabled || orphanBusy}
+              onClick={() => handleOrphans(false)}
+            >
+              {ui.orphanRestore}
+            </Button>
+            <input
+              className="short-input"
+              aria-label={ui.purgeWord}
+              placeholder={ui.purgeWord}
+              value={orphanWord}
+              onChange={(e) => setOrphanWord(e.target.value)}
+            />
+            <Button
+              kind="danger"
+              disabled={disabled || orphanBusy || !orphanWord}
+              onClick={() => handleOrphans(true)}
+            >
+              {ui.orphanDelete}
+            </Button>
+          </div>
+          <details>
+            <summary>{t("chto_imenno_naydeno")}</summary>
+            <div>
+              {orphans.data.items.map((o) => (
+                <div className="journal-row" key={o.path}>
+                  <div>
+                    <strong>{o.name}</strong>
+                    <code className="path" title={o.path}>
+                      {o.path}
+                    </code>
+                    <small className="muted">
+                      {t("vernyotsya_v")}
+                      {o.restore_to}
+                    </small>
+                  </div>
+                  <span>{bytes(o.size)}</span>
+                </div>
+              ))}
+            </div>
+          </details>
+        </section>
+      )}
       <section className="panel">
         <div className="section-heading">
           <div>

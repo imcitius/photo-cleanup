@@ -285,6 +285,22 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE files ADD COLUMN chroma      REAL;
     ALTER TABLE files ADD COLUMN tonal_range REAL;
     "#,
+    // 012 — what is already in quarantine, as the disk has it.
+    //
+    // Quarantine is a folder beside the photograph and a row in the journal.
+    // The folder outlives the database: reset the index, or move it, and the
+    // files stay where they were put with nothing left that knows how to
+    // bring them back. The walk skips those folders — it must, or the tool
+    // would keep re-discovering its own work — so this is where it writes
+    // down what it stepped over.
+    r#"
+    CREATE TABLE quarantine_found(
+        path     TEXT PRIMARY KEY,
+        size     INTEGER NOT NULL,
+        mtime    INTEGER NOT NULL,
+        seen_run INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

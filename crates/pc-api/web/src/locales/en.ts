@@ -212,6 +212,10 @@ export const ui = {
     "Mark this frame as unwanted. It joins the move plan; the file stays where it is until you approve that plan.",
   keepFrame: "Keep it",
   keepFrameHelp: "Clear the mark: the frame stays in the archive.",
+  orphanQuarantineHelp:
+    "These files sit in quarantine folders, but the journal knows nothing about them: another database moved them — an earlier one, or one from another machine. They can go back where they came from, one level up from where they lie. Deleting is for good.",
+  orphanRestore: "Put everything back",
+  orphanDelete: "Delete for good",
   notACopyOfKept:
     "Not a copy of the file being kept: the pixels differ. Keep the file it is a copy of instead.",
   folderHasNoCopies:
@@ -552,6 +556,11 @@ export const messages = {
   zadat_datu_vsemu_sobytiyu: "Set the date for the whole event",
   primer_puti_k_arhivu: "For example, /home/name/Pictures",
   mesto_po_kachestvu: "#{0} by quality",
+  nichejnyy_karantin: "Quarantine with no journal",
+  ne_v_zhurnale: "not from this database",
+  chto_imenno_naydeno: "What exactly was found",
+  vernyotsya_v: "Goes back to: ",
+  nichejnye_itog: "Handled: {0}. Refused: {1}.",
   perenesyono_v_karantin: "Moved to quarantine: {0}. The journal puts it back.",
   papka_teper_hranimaya:
     "Groups changed: {0}. The kept files are now the ones in {1}",

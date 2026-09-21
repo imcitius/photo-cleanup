@@ -1117,6 +1117,120 @@ pub async fn prefer_folder(State(st): State<Arc<AppState>>, Json(v): Json<Value>
     })
 }
 
+/// What sits in quarantine folders that no journal entry accounts for.
+///
+/// These are files a previous database put there. Nothing in the index knows
+/// them, the quarantine screen cannot show them, and the disk still carries
+/// them. Counting them is the whole of the answer; what to do about them is
+/// the user's call.
+pub async fn quarantine_orphans(State(st): State<Arc<AppState>>) -> Response {
+    respond((|| {
+        let db = st.db.lock().unwrap();
+        let found = db.quarantine_found()?;
+        let orphans: Vec<_> = found.iter().filter(|f| !f.known).collect();
+        Ok(json!({
+            "files": orphans.len(),
+            "bytes": orphans.iter().map(|f| f.size).sum::<i64>(),
+            "known_files": found.len() - orphans.len(),
+            "items": orphans.iter().take(200).map(|f| json!({
+                "path": f.path,
+                "name": pc_core::base_name(&f.path),
+                "restore_to": restore_target(&f.path),
+                "size": f.size,
+                "mtime": f.mtime,
+            })).collect::<Vec<_>>(),
+        }))
+    })())
+}
+
+/// Where a quarantined file came from: one level up, out of the hidden
+/// folder it was put in. That is the only move quarantine ever makes, so it
+/// is the only one that has to be undone.
+fn restore_target(path: &str) -> String {
+    let inside = pc_core::dir_name(path);
+    let parent = pc_core::dir_name(inside);
+    format!(
+        "{parent}{}{}",
+        std::path::MAIN_SEPARATOR,
+        pc_core::base_name(path)
+    )
+}
+
+/// Put the unaccounted-for files back where they came from, or delete them.
+///
+/// Restoring refuses to overwrite: if a file of that name is back in the
+/// folder, the quarantined one stays put and is reported. Deleting asks for
+/// the word, like every other deletion here.
+pub async fn quarantine_adopt(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Response {
+    let delete = v["delete"].as_bool().unwrap_or(false);
+    let confirmed = v["confirmation"].as_str() == Some(pc_core::tr!("УДАЛИТЬ", "DELETE"));
+    mutate(&st, |db| {
+        if delete && !confirmed {
+            bail!(
+                "{}",
+                pc_core::tf!(
+                    "Для окончательного удаления введите {0}",
+                    "Type {0} to delete for good",
+                    pc_core::tr!("УДАЛИТЬ", "DELETE")
+                )
+            );
+        }
+        let found = db.quarantine_found()?;
+        let mut done = 0u64;
+        let mut refused: Vec<Value> = Vec::new();
+        // What is no longer in the quarantine folder is no longer news. The
+        // table is refreshed by a walk, and waiting for one would leave the
+        // screen claiming files that have just been dealt with.
+        let mut settled: Vec<String> = Vec::new();
+        for f in found.iter().filter(|f| !f.known) {
+            let src = std::path::Path::new(&f.path);
+            if !src.is_file() {
+                continue;
+            }
+            if delete {
+                match std::fs::remove_file(src) {
+                    Ok(()) => {
+                        settled.push(f.path.clone());
+                        done += 1;
+                    }
+                    Err(e) => refused.push(json!({"path": f.path, "why": e.to_string()})),
+                }
+                continue;
+            }
+            let dst = restore_target(&f.path);
+            if std::path::Path::new(&dst).exists() {
+                refused.push(json!({
+                    "path": f.path,
+                    "why": pc_core::tr!(
+                        "на месте уже лежит файл с таким именем",
+                        "a file of that name is already back in place"
+                    ),
+                }));
+                continue;
+            }
+            match std::fs::rename(src, &dst) {
+                Ok(()) => {
+                    settled.push(f.path.clone());
+                    done += 1;
+                }
+                Err(e) => refused.push(json!({"path": f.path, "why": e.to_string()})),
+            }
+        }
+        {
+            let tx = db.conn.unchecked_transaction()?;
+            let mut st = db
+                .conn
+                .prepare("DELETE FROM quarantine_found WHERE path = ?1")?;
+            for path in &settled {
+                st.execute([path])?;
+            }
+            drop(st);
+            tx.commit()?;
+        }
+        Ok(json!({"done": done, "refused": refused}))
+    })
+}
+
 pub fn mutate(st: &AppState, f: impl FnOnce(&Db) -> Result<Value>) -> Response {
     let _gate = st.mutation.lock().unwrap();
     if let Err(e) = jobs::idle(st) {
