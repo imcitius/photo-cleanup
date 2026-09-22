@@ -61,6 +61,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/files/{id}/date", post(service::date))
         .route("/api/status", get(routes::status))
         .route("/api/review", get(review::queue))
+        .route("/api/review/decisions", get(review::decisions))
         .route("/api/review/{id}", post(review::decide))
         .route("/api/review/batch-preview", post(review::batch_preview))
         .route("/api/review/batch", post(review::batch))

@@ -1,4 +1,5 @@
 import { t } from "./i18n";
+import { ReviewDecisions } from "./review-decisions";
 import { useEffect, useState } from "react";
 import { api, post, useResource } from "./api";
 import {
@@ -727,7 +728,10 @@ export function Policy({
         </Button>
       </div>
       {reviewed ? (
-        <Notice>{t("rq_reviewed_help")}</Notice>
+        <>
+          <Notice>{t("rq_reviewed_help")}</Notice>
+          <ReviewDecisions revision={revision} />
+        </>
       ) : (
         <section className="panel">
           <h3>{t("kakie_versii_perenosit")}</h3>

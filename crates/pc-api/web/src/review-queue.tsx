@@ -8,10 +8,10 @@ import {
   Loading,
   Modal,
   Notice,
-  Thumb,
 } from "./components";
 import { Families as DetailedFamilies } from "./curation";
 import { bytes, number, t, ui } from "./i18n";
+import { ReviewBrowser } from "./review-browser";
 import { ReviewComparison } from "./review-comparison";
 import {
   openReviewedPlan,
@@ -27,7 +27,8 @@ export function ReviewShortcuts() {
         ["A", t("rq_add")],
         ["S", t("rq_keep")],
         ["D", t("rq_defer")],
-        ["J / K", t("sleduyuschee_predyduschee_semeystvo")],
+        ["J / ←", t("rq_previous")],
+        ["K / →", t("rq_next")],
         ["Z", t("rq_zoom")],
         ["P", t("rq_open_plan")],
         ["⌘ / Ctrl Z", t("rq_undo")],
@@ -42,14 +43,6 @@ export function ReviewShortcuts() {
     </dl>
   );
 }
-const decisionName = (state: string) =>
-  state === "plan"
-    ? t("rq_planned")
-    : state === "keep"
-      ? t("rq_kept")
-      : state === "defer"
-        ? t("rq_deferred")
-        : t("rq_pending");
 export function ReviewQueue(props: {
   revision: number;
   disabled: boolean;
@@ -97,12 +90,7 @@ function Queue({
       )
         return;
       if (e.ctrlKey || e.metaKey) {
-        if (
-          e.code === "KeyZ" &&
-          !e.shiftKey &&
-          q.history.length &&
-          !q.blocked
-        ) {
+        if (e.code === "KeyZ" && !e.shiftKey && q.canUndo) {
           e.preventDefault();
           void q.undo();
         }
@@ -110,7 +98,17 @@ function Queue({
       }
       const key = e.code || `Key${e.key.toUpperCase()}`;
       if (
-        !["KeyA", "KeyS", "KeyD", "KeyJ", "KeyK", "KeyZ", "KeyP"].includes(key)
+        ![
+          "KeyA",
+          "KeyS",
+          "KeyD",
+          "KeyJ",
+          "KeyK",
+          "KeyZ",
+          "KeyP",
+          "ArrowLeft",
+          "ArrowRight",
+        ].includes(key)
       )
         return;
       e.preventDefault();
@@ -120,8 +118,8 @@ function Queue({
       }
       if (q.blocked) return;
       if (key === "KeyZ") setZoom((v) => !v);
-      else if (key === "KeyJ" || key === "KeyK")
-        q.move(key === "KeyJ" ? 1 : -1);
+      else if (["KeyJ", "KeyK", "ArrowLeft", "ArrowRight"].includes(key))
+        q.move(key === "KeyK" || key === "ArrowRight" ? 1 : -1);
       else
         void q.decide(
           (
@@ -149,18 +147,6 @@ function Queue({
   const g = q.current;
   return (
     <div className="review-queue">
-      <div className="queue-intro">
-        <div>
-          <h2>{t("rq_title")}</h2>
-          <p className="muted">{t("rq_intro")}</p>
-        </div>
-        <Button
-          disabled={!q.history.length || q.blocked}
-          onClick={() => void q.undo()}
-        >
-          {t("rq_undo")} <kbd>⌘/Ctrl Z</kbd>
-        </Button>
-      </div>
       <div className="queue-toolbar">
         <label className="search-field">
           <Icon name="search" />
@@ -184,10 +170,14 @@ function Queue({
             <option value="pending">{t("rq_pending")}</option>
             <option value="defer">{t("rq_deferred")}</option>
             <option value="all">{t("rq_all_states")}</option>
+            <option value="reviewed">{t("rq_reviewed")}</option>
             <option value="plan">{t("rq_planned")}</option>
             <option value="keep">{t("rq_kept")}</option>
           </select>
         </label>
+        <Button disabled={!q.canUndo} onClick={() => void q.undo()}>
+          {t("rq_undo")} <kbd>⌘/Ctrl Z</kbd>
+        </Button>
         <Button onClick={() => setHelp(true)}>
           {ui.keyboard} <kbd>?</kbd>
         </Button>
@@ -215,7 +205,7 @@ function Queue({
             {t("rq_batch")}
           </Button>
           <Button onClick={openReviewedPlan}>
-            {t("rq_open_plan")} · {number(q.r.data?.counts.plan || 0)}{" "}
+            {t("rq_open_plan")}
             <kbd>P</kbd>
           </Button>
         </div>
@@ -228,23 +218,6 @@ function Queue({
             number(q.r.data?.counts.defer || 0),
           )}
         </span>
-        {g && (
-          <label>
-            {t("rq_position")}
-            <input
-              aria-label={t("rq_position")}
-              type="number"
-              min="1"
-              max={q.total}
-              value={q.cursor + 1}
-              disabled={q.blocked}
-              onChange={(e) => {
-                if (e.target.value) q.jump(+e.target.value - 1);
-              }}
-            />
-            / {number(q.total)}
-          </label>
-        )}
         <Button onClick={onDetailed} disabled={q.busy}>
           {t("rq_detailed")}
         </Button>
@@ -252,113 +225,93 @@ function Queue({
       {(q.error || batchError) && (
         <ErrorBox message={q.error || batchError} retry={q.r.reload} />
       )}
-      {q.r.error ? (
-        <ErrorBox message={q.r.error} retry={q.r.reload} />
-      ) : q.r.loading && !q.r.data ? (
-        <Loading />
-      ) : !g ? (
-        <Empty
-          title={t("rq_empty")}
-          action={
-            <Button
-              onClick={() =>
-                q.filter(q.queue === "defer" ? "pending" : "defer", "queue")
-              }
-            >
-              {q.queue === "defer" ? t("rq_pending") : t("rq_deferred")}
-            </Button>
-          }
-        >
-          {t("rq_empty_hint")}
-        </Empty>
-      ) : (
-        <>
-          <div className="queue-strip" aria-label={t("rq_queue")}>
-            {q.groups.slice(q.start, q.start + 3).map((group, i) => (
-              <button
-                className="queue-group"
-                key={group.id}
-                aria-pressed={group.id === g.id}
-                disabled={q.blocked}
-                onClick={() => q.select(q.start + i)}
-              >
-                <Thumb thumb={group.members[0]?.thumb} name="" />
-                <span>
-                  <strong>{group.members[0]?.name}</strong>
-                  <small>
-                    {group.members.length} {t("faylov")} ·{" "}
-                    {group.exact ? t("rq_exact") : t("rq_versions")}
-                  </small>
-                  <span className="green">
-                    {decisionName(group.review_state)}
-                  </span>
-                </span>
-              </button>
-            ))}
-          </div>
-          <div className="queue-desk" aria-busy={q.blocked}>
-            <ReviewComparison
-              key={g.id}
-              group={g}
-              zoom={zoom}
-              setZoom={setZoom}
-            />
-            <aside className="queue-decision">
-              <span className="eyebrow">{t("rq_evidence")}</span>
-              <h3>{g.can_plan ? t("rq_verified") : t("rq_needs_review")}</h3>
-              <p>{g.can_plan ? t("rq_exact_help") : t("rq_not_eligible")}</p>
-              {g.review_reasons?.length > 0 && (
-                <ul className="queue-reasons">
-                  {g.review_reasons.map((reason, i) => (
-                    <li key={i}>{reason}</li>
-                  ))}
-                </ul>
-              )}
-              {g.members.some((m) => m.is_rejected) && (
-                <Notice>{t("rq_manual_choices")}</Notice>
-              )}
-              <div className="queue-decision-buttons">
-                <Button
-                  kind="primary"
-                  disabled={
-                    q.blocked || !g.can_plan || g.review_state === "plan"
-                  }
-                  onClick={() => void q.decide("plan")}
-                >
-                  {t("rq_add")} <kbd>A</kbd>
-                </Button>
-                <Button
-                  disabled={q.blocked || g.review_state === "keep"}
-                  onClick={() => void q.decide("keep")}
-                >
-                  {t("rq_keep")} <kbd>S</kbd>
-                </Button>
-                <Button
-                  disabled={q.blocked || g.review_state === "defer"}
-                  onClick={() => void q.decide("defer")}
-                >
-                  {t("rq_defer")} <kbd>D</kbd>
-                </Button>
-              </div>
-              <small className="muted">{t("rq_after")}</small>
-              <div className="queue-navigation">
+      <div className="review-workspace">
+        <ReviewBrowser q={q} />
+        <div className="review-workspace-detail">
+          {q.r.error ? (
+            <ErrorBox message={q.r.error} retry={q.r.reload} />
+          ) : q.r.loading && !q.r.data ? (
+            <Loading />
+          ) : !g ? (
+            <Empty title={t("rq_empty")}>
+              <p>{t("rq_empty_hint")}</p>
+            </Empty>
+          ) : (
+            <>
+              <div className="review-stepper">
                 <Button
                   disabled={q.blocked || q.cursor === 0}
                   onClick={() => q.move(-1)}
                 >
-                  ← <kbd>K</kbd>
+                  ← {t("rq_previous")} <kbd>J</kbd>
                 </Button>
+                <span>
+                  {number(q.cursor + 1)} / {number(q.total)}
+                </span>
                 <Button
                   disabled={q.blocked || q.cursor >= q.total - 1}
                   onClick={() => q.move(1)}
                 >
-                  {ui.nextFrame} <kbd>J</kbd> →
+                  {t("rq_next")} <kbd>K</kbd> →
                 </Button>
               </div>
-            </aside>
-          </div>
-        </>
-      )}
+              <div className="queue-desk" aria-busy={q.blocked}>
+                <div className="queue-decision-buttons">
+                  <Button
+                    kind="primary"
+                    disabled={
+                      q.blocked || !g.can_plan || g.review_state === "plan"
+                    }
+                    onClick={() => void q.decide("plan")}
+                  >
+                    {t("rq_add")} <kbd>A</kbd>
+                  </Button>
+                  <Button
+                    disabled={q.blocked || g.review_state === "keep"}
+                    onClick={() => void q.decide("keep")}
+                  >
+                    {t("rq_keep")} <kbd>S</kbd>
+                  </Button>
+                  <Button
+                    disabled={q.blocked || g.review_state === "defer"}
+                    onClick={() => void q.decide("defer")}
+                  >
+                    {t("rq_defer")} <kbd>D</kbd>
+                  </Button>
+                </div>
+                <ReviewComparison
+                  key={g.id}
+                  group={g}
+                  zoom={zoom}
+                  setZoom={setZoom}
+                />
+                <aside className="queue-decision">
+                  <details>
+                    <summary>
+                      {t("rq_evidence")} ·{" "}
+                      {g.can_plan ? t("rq_verified") : t("rq_needs_review")}
+                    </summary>
+                    <p>
+                      {g.can_plan ? t("rq_exact_help") : t("rq_not_eligible")}
+                    </p>
+                    {g.review_reasons?.length > 0 && (
+                      <ul className="queue-reasons">
+                        {g.review_reasons.map((reason, i) => (
+                          <li key={i}>{reason}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {g.members.some((m) => m.is_rejected) && (
+                      <Notice>{t("rq_manual_choices")}</Notice>
+                    )}
+                  </details>
+                  <small className="muted">{t("rq_after")}</small>
+                </aside>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
       <p className="queue-note" role="status">
         {q.note || t("rq_no_move")}
       </p>

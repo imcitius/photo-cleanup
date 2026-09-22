@@ -82,7 +82,10 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     fullPage: true,
   });
 
-  await page.keyboard.press("d");
+  await page
+    .getByRole("combobox", { name: "Queue", exact: true })
+    .selectOption("pending");
+  await page.getByRole("button", { name: /Defer D/ }).click();
   await expect(
     page.getByRole("heading", { name: "No groups in this queue" }),
   ).toBeVisible();

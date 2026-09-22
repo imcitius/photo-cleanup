@@ -294,9 +294,29 @@ export const ui = {
 
 // Screen text and parameterized messages. Keep all translations in this file.
 export const messages = {
-  rq_title: "Один снимок. Что оставить?",
-  rq_intro:
-    "Сравните версии и соберите план. Файлы пока остаются на своих местах.",
+  rq_browse: "Навигация по фотографиям",
+  rq_folder_tree: "Папки с группами",
+  rq_expand_folder: "Раскрыть или свернуть {0}",
+  rq_prev_page: "Предыдущие группы",
+  rq_next_page: "Следующие группы",
+  rq_previous: "Предыдущая группа",
+  rq_next: "Следующая группа",
+  rq_reviewed: "Принятые решения",
+  rq_source_folder: "Правило папки с оригиналами",
+  rq_source_manual: "Ручной выбор",
+  rq_open_photo: "Открыть фото: {0}",
+  rq_blend: "Смешивание A и B",
+  rq_overlay_help:
+    "A — сохраняемый файл, B — сравниваемая версия. Точные копии выглядят одинаково при любом смешивании. Кликните по фото для увеличения.",
+  rq_recorded: "Ваши сохранённые решения",
+  rq_manual_keepers: "Выбранные сохраняемые файлы",
+  rq_manual_rejects: "Файлы, отклонённые вручную",
+  rq_original_rules: "Папки с оригиналами",
+  rq_all_disks: "На всех дисках архива",
+  rq_one_disk: "На одном диске",
+  rq_decisions_help:
+    "Оставить или отложить группу — сохранённое решение без переноса. Выбор сохраняемого файла или папки с оригиналами предлагает только проверенные копии; другие версии остаются, пока вы явно не отклоните их. Ниже — план переносов и причины отказов.",
+
   rq_add: "Копии в план",
   rq_keep: "Оставить все",
   rq_defer: "Отложить",
@@ -314,7 +334,6 @@ export const messages = {
   rq_deferred: "Отложенные",
   rq_all_states: "Все состояния",
   rq_queue: "Очередь",
-  rq_position: "Номер группы",
   rq_search: "Поиск по имени или пути",
   rq_open_plan: "Открыть мой план",
   rq_batch: "Точные копии пакетом",
@@ -348,7 +367,7 @@ export const messages = {
   rq_reviewed_plan: "Мои решения",
   rq_suggested_plan: "Автоматические предложения",
   rq_reviewed_help:
-    "Здесь только точные копии из групп, добавленных вами в план. Оставленные и отложенные файлы не предлагаются и в автоматическом плане.",
+    "Здесь учитываются решения очереди, выбор сохраняемых файлов, ручные отклонения и правила папок с оригиналами. Оставленные и отложенные файлы не попадают в планы переноса.",
 
   pe_folder_prev: "Предыдущие папки",
   pe_folder_next: "Следующие папки",
@@ -465,7 +484,6 @@ export const messages = {
   snachala_plan_zatem_deystvie: "Сначала план. Затем действие.",
   photo_cleanup_lokalno_na_vashem_servere:
     "photo-cleanup · локально на вашем сервере",
-  sleduyuschee_predyduschee_semeystvo: "Следующая / предыдущая группа",
   sdelat_vybrannyy_fayl_hranimym: "Сделать выбранный файл хранимым",
   otkryt_vybrannyy_kadr_krupno: "Открыть выбранный кадр крупно",
   poisk_v_semeystvah: "Поиск по группам",

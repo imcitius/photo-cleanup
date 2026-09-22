@@ -5,17 +5,18 @@ import { t } from "./i18n";
 
 export type Decision = "plan" | "keep" | "defer";
 export interface ReviewGroup extends Family {
-  review_state: Decision | "pending";
+  review_state: Decision | "pending" | "reviewed";
   review_token: string;
   exact: boolean;
   can_plan: boolean;
   review_reasons: string[];
+  decision_source?: "queue" | "manual" | "folder" | null;
 }
 interface QueuePage {
   groups: ReviewGroup[];
   total: number;
   offset: number;
-  counts: Record<Decision | "pending", number>;
+  counts: Record<Decision | "pending" | "reviewed", number>;
 }
 export interface Batch {
   token: string;
@@ -24,7 +25,7 @@ export interface Batch {
   bytes: number;
 }
 interface Undo {
-  windowStart: number;
+  folder: string;
   operation: number;
   cursor: number;
   queue: string;
@@ -43,9 +44,9 @@ export function useReviewQueue(
 ) {
   const [search, setSearch] = useState(""),
     [kind, setKind] = useState("all"),
-    [queue, setQueue] = useState("pending"),
+    [queue, setQueue] = useState("all"),
+    [folder, setFolder] = useState(""),
     [cursor, setCursor] = useState(0),
-    [windowStart, setWindowStart] = useState(0),
     [history, setHistory] = useState<Undo[]>([]),
     [error, setError] = useState(""),
     [note, setNote] = useState(""),
@@ -54,8 +55,12 @@ export function useReviewQueue(
   const lock = useRef(false);
   const query = useDebounce(search, 200),
     offset = Math.floor(cursor / 50) * 50;
-  const path = `/review?${new URLSearchParams({ search: query, kind, queue, offset: String(offset), limit: "50" })}`;
+  const path = `/review?${new URLSearchParams({ search: query, kind, queue, folder, offset: String(offset), limit: "50" })}`;
   const r = useResource<QueuePage>(path, revision);
+  const tree = useResource<{ folders: { path: string; groups: number }[] }>(
+    `/review?${new URLSearchParams({ search: query, kind, queue, folders: "true" })}`,
+    revision,
+  );
   const groups = r.data?.groups || [],
     total = r.data?.total || 0;
   const at = Math.max(
@@ -63,15 +68,6 @@ export function useReviewQueue(
     Math.min(groups.length - 1, cursor - (r.data?.offset || 0)),
   );
   const current = groups[at];
-  // Selection and viewport are separate: clicking a visible card never moves it.
-  const start = Math.max(
-    0,
-    Math.min(
-      at < windowStart ? at : at >= windowStart + 3 ? at - 2 : windowStart,
-      Math.max(0, groups.length - 3),
-    ),
-  );
-  useEffect(() => setWindowStart(start), [start]);
   useEffect(() => {
     if (r.data) {
       setRefreshing(false);
@@ -88,18 +84,23 @@ export function useReviewQueue(
     r.loading ||
     query !== search ||
     !!r.error;
-  const filter = (value: string, type: "search" | "queue" | "kind") => {
+  const canUndo = history.length > 0 && !disabled && !busy;
+  const filter = (
+    value: string,
+    type: "search" | "queue" | "kind" | "folder",
+  ) => {
     if (lock.current) return;
-    ({ search: setSearch, queue: setQueue, kind: setKind })[type](value);
+    ({ search: setSearch, queue: setQueue, kind: setKind, folder: setFolder })[
+      type
+    ](value);
     setCursor(0);
-    setWindowStart(0);
     setError("");
   };
   const move = (by: number) => {
     if (!blocked) setCursor(Math.max(0, Math.min(total - 1, cursor + by)));
   };
   const mutate = async (path: string, body: unknown, undoing = false) => {
-    if (lock.current || blocked) return;
+    if (lock.current || (undoing ? !canUndo : blocked)) return;
     lock.current = true;
     setBusy(true);
     setError("");
@@ -108,7 +109,7 @@ export function useReviewQueue(
       const result = await post<{ operation: number }>(path, body);
       if (undoing && previous) {
         setHistory((h) => h.slice(0, -1));
-        setWindowStart(previous.windowStart);
+        setFolder(previous.folder);
         setCursor(previous.cursor);
         setQueue(previous.queue);
         setKind(previous.kind);
@@ -118,7 +119,7 @@ export function useReviewQueue(
         setHistory((h) => [
           ...h.slice(-99),
           {
-            windowStart: start,
+            folder,
             operation: result.operation,
             cursor,
             queue,
@@ -131,6 +132,7 @@ export function useReviewQueue(
       }
       setRefreshing(true);
       r.reload();
+      tree.reload();
       onChange();
     } catch (e) {
       setError((e as Error).message);
@@ -157,7 +159,9 @@ export function useReviewQueue(
     kind,
     queue,
     cursor,
-    start,
+    folder,
+    tree,
+    offset: r.data?.offset || 0,
     at,
     current,
     groups,
@@ -167,6 +171,7 @@ export function useReviewQueue(
     note,
     blocked,
     busy,
+    canUndo,
     filter,
     move,
     select: (at: number) => {

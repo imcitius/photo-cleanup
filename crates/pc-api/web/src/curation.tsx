@@ -55,6 +55,15 @@ export function ImageViewer({
   };
   useEffect(() => {
     const listener = (e: KeyboardEvent) => {
+      if (
+        e.isComposing ||
+        e.altKey ||
+        e.ctrlKey ||
+        e.metaKey ||
+        (e.target instanceof HTMLElement &&
+          e.target.closest("input,textarea,select,[contenteditable=true]"))
+      )
+        return;
       if (e.key === "ArrowRight" || e.key === "ArrowDown") {
         e.preventDefault();
         step(1);
@@ -412,13 +421,20 @@ export function Families({
         e.preventDefault();
         searchRef.current?.focus();
       }
-      if (e.key === "j" || e.key === "k") {
+      if (
+        !e.repeat &&
+        !e.isComposing &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        (e.code === "KeyJ" || e.code === "KeyK")
+      ) {
         e.preventDefault();
         const index =
           [...cache].find(([, f]) => f.id === selected?.id)?.[0] ?? 0;
         const next = Math.min(
           total - 1,
-          Math.max(0, index + (e.key === "j" ? 1 : -1)),
+          Math.max(0, index + (e.code === "KeyK" ? 1 : -1)),
         );
         if (cache.has(next)) setSelected(cache.get(next)!);
         listRef.current?.scrollTo({ top: Math.max(0, (next - 2) * rowHeight) });

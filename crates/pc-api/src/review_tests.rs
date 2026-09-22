@@ -333,3 +333,134 @@ async fn ten_thousand_groups_return_only_the_requested_window() {
     );
     assert_eq!(queue["groups"][0]["members"][0]["name"], "9997-0.jpg");
 }
+
+#[tokio::test]
+async fn my_decisions_include_existing_keepers_rejections_and_originals_rules() {
+    let f = Fixture::new();
+    let (hand, a, b) = group(&f, "Chosen", true);
+    let (_, _, copy) = group(&f, "Originals", true);
+    let (versions, original, other) = group(&f, "Versions", false);
+    let (_, _, untouched) = group(&f, "Automatic", true);
+    // Preview checks the source filesystem before choosing a quarantine path.
+    for name in ["Chosen", "Originals", "Versions", "Automatic"] {
+        let dir = f.archive.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in 0..2 {
+            std::fs::write(dir.join(format!("{n}.jpg")), b"preview fixture").unwrap();
+        }
+    }
+
+    {
+        let db = f.state.db.lock().unwrap();
+        db.set_manual_keeper(hand, a).unwrap();
+        db.set_manual_keeper(versions, original).unwrap();
+        db.mark_original(
+            &f.archive.join("Originals").display().to_string(),
+            pc_db::MarkScope::Absolute,
+        )
+        .unwrap();
+    }
+    let p = f
+        .preview("plan-apply", json!({"roles":["copy"],"reviewed_only":true}))
+        .await;
+    let ids: Vec<_> = p["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["file_id"].as_i64().unwrap())
+        .collect();
+    assert!(ids.contains(&b), "{p}");
+    assert!(ids.contains(&copy));
+    assert!(!ids.contains(&untouched));
+    assert!(
+        !ids.contains(&other),
+        "Choosing a keeper must not approve different pixels"
+    );
+    assert!(!p["refusals"].as_array().unwrap().is_empty());
+    let (s, _) = f
+        .req(
+            "POST",
+            &format!("/api/files/{other}/reject"),
+            json!({"rejected":true}),
+        )
+        .await;
+    assert_eq!(s, 200);
+    let p = f
+        .preview("plan-apply", json!({"roles":["copy"],"reviewed_only":true}))
+        .await;
+    assert!(p["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["file_id"] == other));
+    // A later keep/defer is stronger than either an old rejection or a folder rule.
+    choose(&f, hand, "keep").await;
+    choose(&f, versions, "defer").await;
+    let p = f
+        .preview("plan-apply", json!({"roles":["copy"],"reviewed_only":true}))
+        .await;
+    assert_eq!(p["items"].as_array().unwrap().len(), 1);
+    assert_eq!(p["items"][0]["file_id"], copy);
+    let (_, summary) = f.req("GET", "/api/review/decisions", Value::Null).await;
+    assert_eq!(summary["keep"], 1);
+    assert_eq!(summary["defer"], 1);
+    assert_eq!(summary["manual_keepers"], 2);
+    assert_eq!(summary["manual_rejects"], 1);
+    assert_eq!(summary["folders"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn folder_queue_merges_roots_and_filters_at_path_boundaries() {
+    let f = Fixture::new();
+    let (first, _, _) = group(&f, "disk1/D/Photo", true);
+    group(&f, "disk2/D/Photo", true);
+    group(&f, "disk2/D/Photographs", true);
+    {
+        let db = f.state.db.lock().unwrap();
+        db.conn
+            .execute(
+                "INSERT OR REPLACE INTO settings(key,value) VALUES('roots',?1)",
+                [json!([f.archive.join("disk1"), f.archive.join("disk2")]).to_string()],
+            )
+            .unwrap();
+        // A singleton explains nonconsecutive group ids, but belongs in neither queue nor folder counts.
+        let run = db.start_run(&[], "singleton").unwrap();
+        let file = db
+            .upsert_file(
+                &pc_db::NewFile {
+                    path: f.archive.join("disk1/D/Alone/1.jpg").display().to_string(),
+                    name: "1.jpg".into(),
+                    ..Default::default()
+                },
+                run,
+            )
+            .unwrap();
+        let family = db
+            .insert_family("linked", None, None, Some(file), run)
+            .unwrap();
+        db.insert_family_member(family, file, "original", None, 1.0, "")
+            .unwrap();
+    }
+    let (_, tree) = f
+        .req("GET", "/api/review?folders=true&queue=all", Value::Null)
+        .await;
+    let nodes = tree["folders"].as_array().unwrap();
+    assert_eq!(
+        nodes.iter().find(|v| v["path"] == "D/Photo").unwrap()["groups"],
+        2
+    );
+    assert!(!nodes.iter().any(|v| v["path"] == "D/Alone"));
+    let (_, queue) = f
+        .req("GET", "/api/review?folder=D%2FPhoto&queue=all", Value::Null)
+        .await;
+    assert_eq!(queue["total"], 2);
+    assert_eq!(queue["groups"][0]["id"], first);
+    let (_, none) = f
+        .req(
+            "GET",
+            "/api/review?folder=D%2FMissing&queue=all",
+            Value::Null,
+        )
+        .await;
+    assert_eq!(none["total"], 0);
+}

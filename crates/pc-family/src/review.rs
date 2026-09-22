@@ -21,11 +21,50 @@ pub struct Group {
     pub paths: Vec<String>,
     pub untouched: bool,
     pub reasons: Vec<String>,
+    pub decision_source: Option<String>,
+}
+
+/// Existing decisions are authoritative too: the queue is another view of
+/// the same archive, not a separate approval database.
+struct Sources {
+    keepers: HashSet<i64>,
+    rejected: HashSet<i64>,
+    marks: pc_db::Marks,
+}
+impl Sources {
+    fn load(db: &Db) -> Result<Self> {
+        let mut stmt = db
+            .conn
+            .prepare("SELECT file_id FROM manual_keepers WHERE source='hand'")?;
+        let keepers = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let rejected = db
+            .rejected_rows_scoped(None)?
+            .into_iter()
+            .map(|r| r.file_id)
+            .collect();
+        Ok(Self {
+            keepers,
+            rejected,
+            marks: db.original_marks()?,
+        })
+    }
+    fn keeper_source(&self, keeper: &PlanRow) -> Option<&'static str> {
+        if self.keepers.contains(&keeper.file_id) {
+            Some("manual")
+        } else if self.marks.covering(&keeper.path).is_some() {
+            Some("folder")
+        } else {
+            None
+        }
+    }
 }
 
 pub fn groups(db: &Db, family: Option<i64>) -> Result<Vec<Group>> {
     let rows = db.plan_rows_scoped(family, None, None)?;
     let choices = db.review_choices()?;
+    let sources = Sources::load(db)?;
     let plan = plan::compute_before_review(
         db,
         &Policy::default(),
@@ -91,6 +130,12 @@ pub fn groups(db: &Db, family: Option<i64>) -> Result<Vec<Group>> {
                 .filter(|m| !m.is_keeper)
                 .all(|m| candidates.contains(&m.file_id));
         let states: Vec<_> = members.iter().map(|m| choices.get(&m.file_id)).collect();
+        let inherited = keeper.and_then(|k| sources.keeper_source(k)).or_else(|| {
+            members
+                .iter()
+                .any(|m| sources.rejected.contains(&m.file_id))
+                .then_some("manual")
+        });
         let state = states
             .first()
             .copied()
@@ -103,8 +148,20 @@ pub fn groups(db: &Db, family: Option<i64>) -> Result<Vec<Group>> {
                 })
             })
             .map(|v| v.state.clone())
-            .unwrap_or_else(|| "pending".into());
+            .unwrap_or_else(|| {
+                if inherited.is_some() {
+                    "reviewed"
+                } else {
+                    "pending"
+                }
+                .into()
+            });
         result.push(Group {
+            decision_source: if state != "pending" && state != "reviewed" {
+                Some("queue".into())
+            } else {
+                inherited.map(str::to_string)
+            },
             reasons: reasons.remove(&id).unwrap_or_default(),
             id,
             state,
@@ -119,7 +176,7 @@ pub fn groups(db: &Db, family: Option<i64>) -> Result<Vec<Group>> {
             snapshot,
             revision: states.iter().map(|v| v.map(|c| c.operation)).collect(),
             paths: members.iter().map(|m| m.path.clone()).collect(),
-            untouched: states.iter().all(|s| s.is_none()),
+            untouched: inherited.is_none() && states.iter().all(|s| s.is_none()),
         });
     }
     Ok(result)
@@ -143,9 +200,25 @@ pub fn reviewed_plan(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
         .filter(|g| g.state == "plan")
         .map(|g| g.id)
         .collect();
+    let sources = Sources::load(db)?;
+    let rows = db.plan_rows_scoped(
+        scope.family,
+        scope.folder.as_deref(),
+        scope.keeper_folder.as_deref(),
+    )?;
+    let decided: HashSet<_> = rows
+        .iter()
+        .filter(|r| r.is_keeper && sources.keeper_source(r).is_some())
+        .map(|r| r.family_id)
+        .collect();
+    let included = |family, file| {
+        approved.contains(&family) || decided.contains(&family) || sources.rejected.contains(&file)
+    };
     let mut plan = plan::compute_scoped(db, policy, scope)?;
+    // A keeper choice only proposes proven copies. Different versions require
+    // an explicit file rejection; all existing safety gates still run first.
     plan.candidates
-        .retain(|c| approved.contains(&c.family_id) && c.role == Role::Copy && !c.manual);
-    plan.refusals.retain(|r| approved.contains(&r.family_id));
+        .retain(|c| included(c.family_id, c.file_id) && (c.role == Role::Copy || c.manual));
+    plan.refusals.retain(|r| included(r.family_id, r.file_id));
     Ok(plan)
 }

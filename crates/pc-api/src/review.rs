@@ -24,6 +24,10 @@ pub struct Filter {
     #[serde(default)]
     search: String,
     #[serde(default)]
+    folder: String,
+    #[serde(default)]
+    folders: bool,
+    #[serde(default)]
     queue: String,
     #[serde(default)]
     kind: String,
@@ -35,11 +39,12 @@ pub async fn queue(State(st): State<Arc<AppState>>, Query(q): Query<Filter>) -> 
     let db = st.db.lock().unwrap();
     service::respond((|| {
         let groups = review::groups(&db, None)?;
-        let mut counts = json!({"pending":0,"plan":0,"keep":0,"defer":0});
+        let mut counts = json!({"pending":0,"plan":0,"keep":0,"defer":0,"reviewed":0});
         for g in &groups {
             counts[&g.state] = json!(counts[&g.state].as_u64().unwrap_or(0) + 1);
         }
         let search = q.search.to_lowercase();
+        let roots = db.archive_roots()?;
         let filtered: Vec<_> = groups
             .into_iter()
             .filter(|g| {
@@ -50,6 +55,43 @@ pub async fn queue(State(st): State<Arc<AppState>>, Query(q): Query<Filter>) -> 
                         || (q.kind == "versions" && !g.exact))
                     && (search.is_empty()
                         || g.paths.iter().any(|p| p.to_lowercase().contains(&search)))
+            })
+            .collect();
+        // Count each group once per folder, even when multiple members share it.
+        // Keys are relative to archive roots, just like the archive tree on NAS.
+        let relative = |path: &str| {
+            let rel = roots
+                .iter()
+                .find_map(|root| pc_core::relative_key(path, root))
+                .unwrap_or_else(|| path.into());
+            pc_core::path_parts(&rel).join("/")
+        };
+        if q.folders {
+            let mut folders = std::collections::BTreeMap::<String, usize>::new();
+            for g in &filtered {
+                let mut seen = std::collections::HashSet::new();
+                for path in &g.paths {
+                    let rel = relative(path);
+                    let parts = pc_core::path_parts(&rel);
+                    for end in 1..parts.len() {
+                        seen.insert(parts[..end].join("/"));
+                    }
+                }
+                for folder in seen {
+                    *folders.entry(folder).or_default() += 1;
+                }
+            }
+            return Ok(
+                json!({"folders":folders.into_iter().map(|(path,groups)|json!({"path":path,"groups":groups})).collect::<Vec<_>>()}),
+            );
+        }
+        let filtered: Vec<_> = filtered
+            .into_iter()
+            .filter(|g| {
+                q.folder.is_empty()
+                    || g.paths
+                        .iter()
+                        .any(|p| pc_core::under(&relative(p), &q.folder))
             })
             .collect();
         let total = filtered.len();
@@ -63,6 +105,7 @@ pub async fn queue(State(st): State<Arc<AppState>>, Query(q): Query<Filter>) -> 
             if let Some(family) = db.family(g.id)? {
                 let mut out = serde_json::to_value(routes::to_out(family, &db))?;
                 out["review_state"] = json!(g.state);
+                out["decision_source"] = json!(g.decision_source);
                 out["exact"] = json!(g.exact);
                 out["can_plan"] = json!(g.eligible);
                 out["review_reasons"] = json!(g.reasons);
@@ -122,4 +165,17 @@ pub async fn undo(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> R
         db.undo_review(body["operation"].as_i64().context("No decision given")?)?;
         Ok(json!({"ok":true}))
     })
+}
+
+/// Show decisions even when they correctly produce no files to move.
+pub async fn decisions(State(st): State<Arc<AppState>>) -> Response {
+    let db = st.db.lock().unwrap();
+    service::respond((|| {
+        let groups = review::groups(&db, None)?;
+        let count = |state: &str| groups.iter().filter(|g| g.state == state).count();
+        let keepers: i64 = db.conn.query_row("SELECT count(*) FROM manual_keepers k JOIN files f ON f.id=k.file_id WHERE k.source='hand' AND f.state='present'", [], |r| r.get(0))?;
+        Ok(
+            json!({"plan":count("plan"),"keep":count("keep"),"defer":count("defer"),"manual_keepers":keepers,"manual_rejects":db.rejected_rows_scoped(None)?.len(),"folders":db.original_marks()?.marks.iter().map(|m|json!({"path":m.path,"scope":m.scope.as_str()})).collect::<Vec<_>>()}),
+        )
+    })())
 }

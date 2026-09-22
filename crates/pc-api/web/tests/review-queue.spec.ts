@@ -21,6 +21,16 @@ async function fixture(page: Page) {
   });
   await page.route("**/api/review**", async (route) => {
     const url = new URL(route.request().url());
+    if (url.searchParams.get("folders") === "true")
+      return route.fulfill({
+        json: {
+          folders: [
+            { path: "archive", groups: 10000 },
+            { path: "archive/originals", groups: 10000 },
+            { path: "archive/copies", groups: 10000 },
+          ],
+        },
+      });
     if (route.request().method() === "GET") {
       const queue = url.searchParams.get("queue") || "pending",
         search = url.searchParams.get("search") || "";
@@ -90,7 +100,7 @@ async function fixture(page: Page) {
     r.fulfill({ status: 404, body: "No preview" }),
   );
   await page.goto("/#families");
-  await expect(page.locator(".queue-group")).toHaveCount(3);
+  await expect(page.locator(".queue-group")).toHaveCount(50);
   return {
     writes,
     decisions,
@@ -111,24 +121,27 @@ test("10000 groups keep card order and keyboard navigation crosses page boundari
   await expect(page.locator(".queue-photo-header h2")).toHaveText(
     "DSC00003.jpg",
   );
-  await page.keyboard.press("j");
+  await page.keyboard.press("k");
   await expect(page.locator(".queue-photo-header h2")).toHaveText(
     "DSC00004.jpg",
   );
-  await page.getByRole("spinbutton", { name: "Group position" }).fill("50");
+  await page.locator(".queue-group").nth(49).click();
   await expect(page.locator(".queue-photo-header h2")).toHaveText(
     "DSC00050.jpg",
-  );
-  await page.getByRole("spinbutton").blur();
-  await page.keyboard.press("j");
-  await expect(page.locator(".queue-photo-header h2")).toHaveText(
-    "DSC00051.jpg",
   );
   await page.keyboard.press("k");
   await expect(page.locator(".queue-photo-header h2")).toHaveText(
+    "DSC00051.jpg",
+  );
+  await page.keyboard.press("j");
+  await expect(page.locator(".queue-photo-header h2")).toHaveText(
     "DSC00050.jpg",
   );
-  await page.getByRole("spinbutton").fill("9999");
+  await page.getByRole("button", { name: "More groups", exact: true }).click();
+  await expect(page.locator(".queue-group").first()).toContainText(
+    "DSC00051.jpg",
+  );
+  await page.getByRole("searchbox").fill("DSC09999");
   await expect(page.locator(".queue-photo-header h2")).toHaveText(
     "DSC09999.jpg",
   );
@@ -161,7 +174,7 @@ test("choices and undo preserve selection; typing, errors and dialogs cannot tri
   expect(f.writes).toEqual([3]);
   await search.fill("");
   await search.blur();
-  await expect(page.locator(".queue-group")).toHaveCount(3);
+  await expect(page.locator(".queue-group")).toHaveCount(50);
   await page.evaluate(() =>
     document.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -232,4 +245,77 @@ test("review comparison is accessible and fits mobile, tablet and desktop", asyn
       fullPage: true,
     });
   }
+});
+
+test("folders stay selectable, photos open on click and overlay exposes both endpoints", async ({
+  page,
+}) => {
+  await fixture(page);
+  const tree = page.getByRole("navigation", { name: "Folders with groups" });
+  await tree
+    .getByRole("button", { name: "Expand or collapse archive", exact: true })
+    .click();
+  await tree.getByRole("button", { name: /originals/ }).click();
+  await expect(page.locator(".review-folder-path")).toHaveText(
+    "archive/originals",
+  );
+  await expect(page.locator(".queue-group")).toHaveCount(50);
+  await page.locator(".queue-photo").first().click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Overlay", exact: true }).click();
+  const slider = page.getByRole("slider", { name: "Blend A and B" });
+  await expect(slider).toBeVisible();
+  await page.getByRole("button", { name: /^A ·/ }).click();
+  await expect(slider).toHaveValue("0");
+  await expect(page.locator(".queue-photo").nth(1)).toHaveCSS("opacity", "0");
+  await page.getByRole("button", { name: /^B ·/ }).click();
+  await expect(slider).toHaveValue("100");
+  await expect(page.locator(".queue-photo").nth(1)).toHaveCSS("opacity", "1");
+  await slider.fill("37");
+  await expect(page.locator(".queue-photo").nth(1)).toHaveCSS(
+    "opacity",
+    "0.37",
+  );
+  await page.locator(".queue-photo").nth(1).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+});
+
+test("saved decisions remain visible even when no photo should move", async ({
+  page,
+}) => {
+  await page.route("**/api/review/decisions", (r) =>
+    r.fulfill({
+      json: {
+        plan: 0,
+        keep: 1,
+        defer: 2,
+        manual_keepers: 3,
+        manual_rejects: 4,
+        folders: [{ path: "D/Originals", scope: "every-root" }],
+      },
+    }),
+  );
+  await page.route("**/api/preview", (r) =>
+    r.fulfill({
+      json: {
+        kind: "plan-apply",
+        params: {},
+        token: "empty",
+        items: [],
+        refusals: [],
+        total_files: 0,
+        total_bytes: 0,
+      },
+    }),
+  );
+  await page.goto("/#plan");
+  await page.getByRole("button", { name: "My decisions", exact: true }).click();
+  const summary = page.getByRole("region", { name: "Your saved decisions" });
+  await expect(summary).toContainText("D/Originals");
+  await expect(summary).toContainText("Across all archive roots");
+  await expect(
+    summary.locator("dl > div").filter({ hasText: "Kept" }),
+  ).toContainText("1");
+  await expect(summary).toContainText("no move");
 });

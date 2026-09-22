@@ -29,8 +29,11 @@ export function ReviewComparison({
       <header className="queue-photo-header">
         <div>
           <span className="eyebrow">
-            {t("semeystvo")}
-            {group.id}
+            {group.decision_source === "folder"
+              ? t("rq_source_folder")
+              : group.decision_source === "manual"
+                ? t("rq_source_manual")
+                : t("versii_snimka")}
           </span>
           <h2>{keeper.name}</h2>
           <p className="muted">
@@ -76,17 +79,38 @@ export function ReviewComparison({
         </div>
       </div>
       {overlay && (
-        <label className="queue-opacity">
-          {t("prozrachnost")}
-          <input
-            type="range"
-            min="0"
-            max="100"
-            value={opacity}
-            onChange={(e) => setOpacity(+e.target.value)}
-          />
-          {opacity}%
-        </label>
+        <div className="queue-overlay-controls">
+          <div className="inline">
+            <Button onClick={() => setOpacity(0)} aria-pressed={opacity === 0}>
+              A · {ui.willStay}
+            </Button>
+            <Button
+              onClick={() => setOpacity(50)}
+              aria-pressed={opacity === 50}
+            >
+              50 / 50
+            </Button>
+            <Button
+              onClick={() => setOpacity(100)}
+              aria-pressed={opacity === 100}
+            >
+              B · {t("rq_compare_version")}
+            </Button>
+          </div>
+          <label className="queue-opacity">
+            {t("prozrachnost")}
+            <input
+              aria-label={t("rq_blend")}
+              type="range"
+              min="0"
+              max="100"
+              value={opacity}
+              onChange={(e) => setOpacity(+e.target.value)}
+            />
+            <output>{opacity}% B</output>
+          </label>
+          <small>{t("rq_overlay_help")}</small>
+        </div>
       )}
       <div
         className={`queue-photos ${overlay ? "overlay" : ""} ${zoom ? "zoom" : ""}`}
@@ -109,13 +133,16 @@ export function ReviewComparison({
         }}
       >
         {images.map((m, i) => (
-          <div
+          <button
+            type="button"
             className="queue-photo"
+            aria-label={t("rq_open_photo", m.name)}
+            onClick={() => setFull(true)}
             key={m.file_id}
             style={overlay && i === 1 ? { opacity: opacity / 100 } : undefined}
           >
             <ReviewPhoto key={m.file_id} id={m.file_id} name={m.name} />
-          </div>
+          </button>
         ))}
       </div>
       <div className="queue-captions">

@@ -113,6 +113,14 @@ test("one mark on the merged tree clears the copies on every disk", async ({
     })
   ).json();
   expect(after.total_files).toBe(2);
+  await page.goto("/#plan");
+  await page.getByRole("button", { name: "My decisions", exact: true }).click();
+  await expect(page.locator(".plan-row")).toHaveCount(2);
+  await expect(
+    page.getByRole("region", { name: "Your saved decisions" }),
+  ).toContainText(good);
+  await page.goto("/#tree");
+
   await page.reload();
 
   await page

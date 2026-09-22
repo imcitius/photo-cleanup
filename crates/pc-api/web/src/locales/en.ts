@@ -299,9 +299,29 @@ export const ui = {
 } as const satisfies Shape<typeof ru>;
 
 export const messages = {
-  rq_title: "One photograph. What stays?",
-  rq_intro:
-    "Compare versions and build a plan. Files stay where they are for now.",
+  rq_browse: "Browse photographs",
+  rq_folder_tree: "Folders with groups",
+  rq_expand_folder: "Expand or collapse {0}",
+  rq_prev_page: "Previous groups",
+  rq_next_page: "More groups",
+  rq_previous: "Previous group",
+  rq_next: "Next group",
+  rq_reviewed: "Existing decisions",
+  rq_source_folder: "Originals folder rule",
+  rq_source_manual: "Manual choice",
+  rq_open_photo: "Open photo: {0}",
+  rq_blend: "Blend A and B",
+  rq_overlay_help:
+    "A is the kept file, B is the compared version. Exact copies look the same at any blend. Click the photo to open full size.",
+  rq_recorded: "Your saved decisions",
+  rq_manual_keepers: "Chosen keepers",
+  rq_manual_rejects: "Files set aside manually",
+  rq_original_rules: "Folders containing originals",
+  rq_all_disks: "Across all archive roots",
+  rq_one_disk: "On one disk",
+  rq_decisions_help:
+    "Keeping or deferring a group is a saved decision with no move. Choosing a keeper or an originals folder proposes only verified copies; other versions remain unless you explicitly set them aside. The plan below shows what can move and what was refused.",
+
   rq_add: "Add copies to plan",
   rq_keep: "Keep all files",
   rq_defer: "Defer",
@@ -319,7 +339,6 @@ export const messages = {
   rq_deferred: "Deferred",
   rq_all_states: "All states",
   rq_queue: "Queue",
-  rq_position: "Group position",
   rq_search: "Search groups by name or path",
   rq_open_plan: "Open my plan",
   rq_batch: "Batch exact copies",
@@ -353,7 +372,7 @@ export const messages = {
   rq_reviewed_plan: "My decisions",
   rq_suggested_plan: "Automatic suggestions",
   rq_reviewed_help:
-    "Only exact copies from groups you approved appear here. Kept and deferred files are also excluded from automatic suggestions.",
+    "Includes queue decisions, chosen keepers, manual file rejections and originals folder rules. Kept and deferred files stay out of all move plans.",
 
   pe_folder_prev: "Previous folders",
   pe_folder_next: "Next folders",
@@ -470,7 +489,6 @@ export const messages = {
   snachala_plan_zatem_deystvie: "The plan first. Then the action.",
   photo_cleanup_lokalno_na_vashem_servere:
     "photo-cleanup · local, on your own server",
-  sleduyuschee_predyduschee_semeystvo: "Next / previous group",
   sdelat_vybrannyy_fayl_hranimym: "Keep the selected file",
   otkryt_vybrannyy_kadr_krupno: "Open the selected frame large",
   poisk_v_semeystvah: "Search the groups",

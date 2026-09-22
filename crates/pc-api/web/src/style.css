@@ -3074,7 +3074,6 @@ select {
 .review-queue {
   min-width: 0;
 }
-.queue-intro,
 .queue-filter-row,
 .queue-progress,
 .queue-photo-header,
@@ -3084,18 +3083,6 @@ select {
   align-items: center;
   gap: 16px;
   flex-wrap: wrap;
-}
-.queue-intro {
-  margin-bottom: 12px;
-}
-.queue-intro h2 {
-  font-size: 18px;
-  letter-spacing: -0.025em;
-  margin: 0 0 4px;
-}
-.queue-intro p {
-  margin: 0;
-  font-size: 12px;
 }
 .queue-toolbar {
   display: flex;
@@ -3125,21 +3112,9 @@ select {
   color: var(--muted);
   font-size: 12px;
 }
-.queue-progress label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-}
 .queue-progress input {
   width: 80px;
   min-height: 36px;
-}
-.queue-strip {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
 }
 .queue-group {
   display: flex;
@@ -3311,11 +3286,6 @@ select {
   border-left: 1px solid var(--subtle);
   padding-left: 24px;
 }
-.queue-decision h3 {
-  margin: 8px 0;
-  font-size: 20px;
-  letter-spacing: -0.025em;
-}
 .queue-decision p {
   font-size: 13px;
   color: var(--muted);
@@ -3334,14 +3304,6 @@ select {
 }
 .queue-decision-buttons .button {
   justify-content: space-between;
-}
-.queue-navigation {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  border-top: 1px solid var(--subtle);
-  margin-top: 24px;
-  padding-top: 16px;
 }
 .queue-note {
   font-size: 12px;
@@ -3373,9 +3335,6 @@ select {
   }
 }
 @media (max-width: 700px) {
-  .queue-strip {
-    gap: 6px;
-  }
   .queue-group {
     flex-direction: column;
     align-items: flex-start;
@@ -3425,5 +3384,255 @@ select {
   main:has(.review-queue) .page-heading .eyebrow,
   main:has(.review-queue) .page-heading p {
     display: none;
+  }
+}
+
+/* Archive navigation stays visible while the selected comparison changes. */
+.review-workspace {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.review-workspace-detail {
+  min-width: 0;
+}
+.review-browser {
+  min-width: 0;
+  border: 1px solid var(--subtle);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.review-folders {
+  padding: 12px;
+  border-bottom: 1px solid var(--subtle);
+}
+.review-folders h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.review-folders > .button {
+  width: 100%;
+  justify-content: flex-start;
+  margin-bottom: 8px;
+}
+.review-folder-row {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  min-width: 0;
+}
+.folder-toggle,
+.folder-spacer {
+  flex: 0 0 28px;
+  width: 28px;
+}
+.folder-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  height: 32px;
+}
+.review-folder {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+  gap: 8px;
+  padding: 8px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12px;
+  text-align: left;
+}
+.review-folder > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.review-folder small {
+  color: var(--muted);
+}
+.review-folder[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.review-folder-path {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  margin-bottom: 0;
+}
+.review-list-heading,
+.review-list-pages {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  font-size: 12px;
+}
+.review-list-heading span {
+  color: var(--muted);
+}
+.review-list-pages .button {
+  font-size: 11px;
+  min-width: 0;
+  padding: 8px;
+}
+.review-group-list {
+  position: relative;
+  overflow: auto;
+  height: clamp(220px, 46vh, 560px);
+  padding: 4px;
+  overscroll-behavior: contain;
+}
+.review-group-list .queue-group {
+  width: 100%;
+  border-radius: 4px;
+  margin: 0 0 4px;
+  padding: 8px;
+  gap: 8px;
+  min-height: 78px;
+  flex-direction: row;
+}
+.review-group-list .queue-group strong {
+  font-size: 12px;
+}
+.review-group-list .queue-group .thumb {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+}
+.review-group-list .queue-group > span {
+  flex: 1;
+}
+.review-stepper {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.review-stepper span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.review-workspace .queue-desk {
+  grid-template-columns: minmax(0, 1fr);
+}
+.review-workspace .queue-decision {
+  border-left: 0;
+  border-top: 1px solid var(--subtle);
+  padding: 16px 0 0;
+}
+.review-workspace .queue-decision-buttons {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+.queue-photo {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 4px;
+  padding: 0;
+  background: transparent;
+  color: var(--ink);
+  cursor: zoom-in;
+}
+.queue-photo:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+.queue-overlay-controls {
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--subtle);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.queue-overlay-controls > .inline {
+  flex-wrap: wrap;
+}
+.queue-overlay-controls small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+.queue-overlay-controls .queue-opacity {
+  padding: 12px 0;
+}
+.queue-photos.overlay .queue-photo:first-child {
+  pointer-events: none;
+}
+.decision-summary {
+  padding: 16px 0;
+}
+.decision-summary h3 {
+  margin: 0 0 12px;
+}
+.decision-summary dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 32px;
+}
+.decision-summary dt {
+  font-size: 12px;
+  color: var(--muted);
+}
+.decision-summary dd {
+  font-size: 20px;
+  margin: 4px 0 0;
+}
+.decision-folder-rules {
+  font-size: 13px;
+}
+.decision-folder-rules ul {
+  padding: 0;
+  max-height: 180px;
+  overflow: auto;
+  list-style: none;
+}
+.decision-folder-rules li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin-bottom: 8px;
+}
+.decision-folder-rules code {
+  overflow-wrap: anywhere;
+}
+.decision-folder-rules span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.decision-summary > p {
+  font-size: 12px;
+}
+@media (max-width: 1050px) {
+  .review-workspace {
+    grid-template-columns: 230px minmax(0, 1fr);
+    gap: 16px;
+  }
+  .review-stepper {
+    flex-wrap: wrap;
+  }
+  .review-workspace .queue-decision-buttons {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 700px) {
+  .review-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .review-group-list {
+    height: 240px;
+  }
+  .review-stepper .button {
+    font-size: 12px;
   }
 }

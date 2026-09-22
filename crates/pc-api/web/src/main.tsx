@@ -448,7 +448,9 @@ function App() {
               <dt>
                 <kbd>J</kbd> / <kbd>K</kbd>
               </dt>
-              <dd>{t("sleduyuschee_predyduschee_semeystvo")}</dd>
+              <dd>
+                {t("rq_previous")} / {t("rq_next")}
+              </dd>
             </div>
             <div>
               <dt>
