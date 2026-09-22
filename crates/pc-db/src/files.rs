@@ -773,18 +773,22 @@ impl Db {
     /// are not equally revocable: taking a folder's mark back has to undo
     /// what the folder decided and leave what a person decided alone. So the
     /// row says which it was.
+    ///
+    /// A rule may not take a file the person has set aside, and may not clear
+    /// that decision. A press may: pressing "keep this one" on a frame you
+    /// had rejected *is* taking the rejection back, and doing anything else
+    /// would leave the group saying two opposite things at once.
     pub fn set_manual_keeper_from(
         &self,
         family_id: i64,
         file_id: i64,
         source: KeeperSource,
     ) -> Result<bool> {
-        let previous = self.family_keeper(family_id)?;
-        if !self.set_family_keeper(family_id, file_id)? {
+        if source == KeeperSource::Folder && self.is_rejected(file_id)? {
             return Ok(false);
         }
-        if let Some(previous) = previous.filter(|p| *p != file_id) {
-            self.trade_roles(family_id, previous, file_id)?;
+        if !self.set_family_keeper(family_id, file_id)? {
+            return Ok(false);
         }
         self.conn.execute(
             "DELETE FROM manual_keepers WHERE file_id IN
@@ -795,66 +799,17 @@ impl Db {
             "INSERT OR REPLACE INTO manual_keepers(file_id, marked_at, source) VALUES(?1, ?2, ?3)",
             params![file_id, crate::pc_core_now(), source.as_str()],
         )?;
-        self.conn
-            .execute("DELETE FROM manual_rejects WHERE file_id = ?1", [file_id])?;
+        if source == KeeperSource::Hand {
+            self.conn
+                .execute("DELETE FROM manual_rejects WHERE file_id = ?1", [file_id])?;
+        }
         Ok(true)
     }
 
-    /// Hand the outgoing keeper's role to the incoming one, and its own back.
-    ///
-    /// A copy is a copy *of the file being kept*. The roles were settled when
-    /// the group was built, against whichever file it kept then: the keeper
-    /// held whatever it is — a raw frame, an unknown — and the file beside it
-    /// was called a copy of that. Changing which one is kept turns the
-    /// sentence around, and leaving the old words in place says the opposite
-    /// of what is true: the file now set aside is described as the one
-    /// everything else duplicates, and no plan will ever offer to move it.
-    ///
-    /// Only when the two hold the same picture. That is the only case where
-    /// the claim "this is a copy of that" survives being reversed; between a
-    /// scan and the export made from it, neither is a copy of the other and
-    /// the roles stay as they were.
-    fn trade_roles(&self, family_id: i64, old: i64, new: i64) -> Result<()> {
-        let identity = |id: i64| -> rusqlite::Result<Option<Vec<u8>>> {
-            self.conn.query_row(
-                "SELECT COALESCE(content_hash, pixel_hash) FROM files WHERE id = ?1",
-                [id],
-                |r| r.get(0),
-            )
-        };
-        let (before, after) = (identity(old)?, identity(new)?);
-        if before.is_none() || before != after {
-            return Ok(());
-        }
-        let role_of = |id: i64| -> rusqlite::Result<Option<String>> {
-            self.conn
-                .query_row(
-                    "SELECT role FROM family_members WHERE family_id = ?1 AND file_id = ?2",
-                    params![family_id, id],
-                    |r| r.get(0),
-                )
-                .optional()
-        };
-        let (Some(old_role), Some(new_role)) = (role_of(old)?, role_of(new)?) else {
-            return Ok(());
-        };
-        for (id, role) in [(old, new_role), (new, old_role)] {
-            self.conn.execute(
-                "UPDATE family_members SET role = ?3 WHERE family_id = ?1 AND file_id = ?2",
-                params![family_id, id, role],
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Whether a group's kept file was chosen by a person rather than by a
-    /// standing rule. A rule never overrules a person.
-    pub fn keeper_chosen_by_hand(&self, family_id: i64) -> Result<bool> {
+    pub fn is_rejected(&self, file_id: i64) -> Result<bool> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM manual_keepers k
-               JOIN family_members m ON m.file_id = k.file_id
-              WHERE m.family_id = ?1 AND k.source = 'hand'",
-            [family_id],
+            "SELECT COUNT(*) FROM manual_rejects WHERE file_id = ?1",
+            [file_id],
             |r| r.get(0),
         )?;
         Ok(n > 0)
@@ -931,13 +886,25 @@ impl Db {
         Ok(out)
     }
 
-    /// Point a family at a different member as its best version.
-    /// Returns false when the file is not part of that family.
+    /// Point a family at a different member as its best version, and make
+    /// the roles say so.
+    ///
+    /// Returns false when the file is not a present member of that family.
+    /// A group cannot keep what is no longer in the archive: a keeper
+    /// pointing into quarantine makes every other member a copy of something
+    /// that is not there, and the plan then offers to move the last one left.
+    ///
+    /// This is the only door. Every way a group's kept file can change — the
+    /// press on one frame, a folder named as holding the originals, a burst
+    /// settled into the folder that holds most of it — goes through here, so
+    /// that the words the group uses about itself are settled in one place
+    /// rather than in four that drift apart.
     pub fn set_family_keeper(&self, family_id: i64, file_id: i64) -> Result<bool> {
         let belongs: Option<i64> = self
             .conn
             .query_row(
-                "SELECT 1 FROM family_members WHERE family_id = ?1 AND file_id = ?2",
+                "SELECT 1 FROM family_members m JOIN files f ON f.id = m.file_id
+                  WHERE m.family_id = ?1 AND m.file_id = ?2 AND f.state = 'present'",
                 params![family_id, file_id],
                 |r| r.get(0),
             )
@@ -949,6 +916,73 @@ impl Db {
             "UPDATE families SET keeper_file = ?1 WHERE id = ?2",
             params![file_id, family_id],
         )?;
+        self.reconcile_roles(family_id, file_id)
+    }
+
+    /// Make a group's roles say what it now keeps.
+    ///
+    /// `copy` is the only role that is about *another* file: it means "the
+    /// same picture as the one being kept". Every other role describes the
+    /// file itself — a raw frame is a raw frame whoever it sits beside.
+    ///
+    /// So when the kept file changes, the word `copy` has to move with it.
+    /// Leaving it where it was states the opposite of what is true: the file
+    /// now set aside is described as the one everything else duplicates, and
+    /// no plan will ever offer to move it. That is not a cosmetic slip — it
+    /// is a whole archive's worth of exact copies quietly disappearing from
+    /// the plan after the next rebuild.
+    ///
+    /// Only files holding the same picture are touched. Between a scan and
+    /// the export made from it neither is a copy of the other, and their
+    /// roles say what they are regardless of which one is kept.
+    fn reconcile_roles(&self, family_id: i64, keeper: i64) -> Result<bool> {
+        let members: Vec<(i64, String, Option<Vec<u8>>)> = {
+            let mut st = self.conn.prepare(
+                "SELECT m.file_id, m.role, COALESCE(f.content_hash, f.pixel_hash)
+                   FROM family_members m JOIN files f ON f.id = m.file_id
+                  WHERE m.family_id = ?1 AND f.state = 'present'",
+            )?;
+            let rows = st
+                .query_map([family_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        let Some(identity) = members
+            .iter()
+            .find(|(id, _, _)| *id == keeper)
+            .and_then(|(_, _, h)| h.clone())
+        else {
+            return Ok(true);
+        };
+        let twins: Vec<&(i64, String, Option<Vec<u8>>)> = members
+            .iter()
+            .filter(|(_, _, h)| h.as_ref() == Some(&identity))
+            .collect();
+
+        // The keeper cannot be a copy of itself. Whatever the group used to
+        // call the file it kept — the raw frame, the unknown — is the word
+        // this one inherits, because that is the file it now stands for.
+        let mut keeper_role = twins
+            .iter()
+            .find(|(id, _, _)| *id == keeper)
+            .map(|(_, role, _)| role.clone())
+            .unwrap_or_default();
+        if keeper_role == "copy" {
+            keeper_role = twins
+                .iter()
+                .find(|(id, role, _)| *id != keeper && role != "copy")
+                .map(|(_, role, _)| role.clone())
+                .unwrap_or_else(|| "unknown".into());
+        }
+        for (id, role, _) in &twins {
+            let wanted = if *id == keeper { &keeper_role } else { "copy" };
+            if role != wanted {
+                self.conn.execute(
+                    "UPDATE family_members SET role = ?3 WHERE family_id = ?1 AND file_id = ?2",
+                    params![family_id, id, wanted],
+                )?;
+            }
+        }
         Ok(true)
     }
 }
@@ -1040,6 +1074,10 @@ impl Db {
                     disk: r.get(8)?,
                     pixel_hash: None,
                     content_hash: None,
+                    // A hand-made decision needs no evidence of likeness: it
+                    // is about the file, not about what it duplicates.
+                    pixel_source: None,
+                    partial_hash: None,
                     is_keeper: false,
                     group_keeper: r.get(10)?,
                 })
@@ -1070,7 +1108,7 @@ impl Db {
         let mut st = self.conn.prepare(
             "SELECT fm.family_id, fm.file_id, fm.role, f.path, f.size, f.width, f.height,
                     f.mtime, f.inode, f.dev, f.disk, f.pixel_hash,
-                    fa.keeper_file, f.content_hash
+                    fa.keeper_file, f.content_hash, f.pixel_source, f.partial_hash
                FROM family_members fm
                JOIN files f    ON f.id = fm.file_id
                JOIN families fa ON fa.id = fm.family_id
@@ -1103,6 +1141,8 @@ impl Db {
                         disk: r.get(10)?,
                         pixel_hash: r.get(11)?,
                         content_hash: r.get(13)?,
+                        pixel_source: r.get(14)?,
+                        partial_hash: r.get(15)?,
                         is_keeper: r.get::<_, Option<i64>>(12)? == Some(file_id),
                         // The plan fills this in from the group's own rows.
                         group_keeper: None,
@@ -1111,6 +1151,53 @@ impl Db {
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+}
+
+/// What proves two files hold the same picture.
+///
+/// Not one hash but a pair, because the archive decodes two different things.
+/// A JPEG or a TIFF is decoded whole, and the hash of that frame is the
+/// evidence: two files with the same one are the same picture, full stop.
+///
+/// A raw file is not decoded whole — the tool reads the preview the camera
+/// wrote inside it, because decoding sensor data is a different program — so
+/// the hash describes a proxy. Two raw containers can carry the same preview
+/// and different photographs, and calling them exact copies on that evidence
+/// is a claim the tool cannot support. For those the file's own bytes have to
+/// come into it: size, head and tail, which is what `partial_hash` is.
+///
+/// The final check before a move reads both files in full and compares them,
+/// and it always did. This is about what may be *offered* — a plan that
+/// proposes a move its own last check will refuse is a plan that wastes the
+/// only safety that matters.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Identity<'a> {
+    frame: &'a [u8],
+    /// The file's own bytes, when the frame alone is a proxy for them.
+    bytes: Option<&'a [u8]>,
+}
+
+impl<'a> Identity<'a> {
+    pub fn of(
+        content_hash: Option<&'a Vec<u8>>,
+        pixel_hash: Option<&'a Vec<u8>>,
+        pixel_source: Option<&str>,
+        partial_hash: Option<&'a Vec<u8>>,
+    ) -> Option<Self> {
+        // An archive indexed before the whole-frame hash existed falls back
+        // to the old grey square rather than losing every group at once — it
+        // is what those rows were built with, and re-reading replaces it.
+        let frame = content_hash.or(pixel_hash)?.as_slice();
+        let proxy = pixel_source == Some("preview");
+        Some(Self {
+            frame,
+            bytes: if proxy {
+                Some(partial_hash?.as_slice())
+            } else {
+                None
+            },
+        })
     }
 }
 
@@ -1151,6 +1238,10 @@ pub struct PlanRow {
     pub disk: String,
     pub pixel_hash: Option<Vec<u8>>,
     pub content_hash: Option<Vec<u8>>,
+    /// What was decoded to make the hash: a whole frame, or the preview
+    /// inside a raw file, which only stands for one.
+    pub pixel_source: Option<String>,
+    pub partial_hash: Option<Vec<u8>>,
     pub is_keeper: bool,
     /// The file this one's group keeps, when the group has chosen one.
     pub group_keeper: Option<String>,

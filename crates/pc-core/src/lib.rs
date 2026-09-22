@@ -163,27 +163,92 @@ pub fn dir_name(path: &str) -> &str {
     split_path(path).0
 }
 
-/// True when `path` is the directory `dir` or lies anywhere beneath it.
+/// Are two path components the same component?
 ///
-/// Prefix comparison alone is not this question: `/foto/2014-old` starts with
-/// `/foto/2014` and is a different folder. The separator has to be there, or
-/// the path has to be the folder itself.
-///
-/// A trailing separator on `dir` is ignored, so a folder named by hand as
-/// `/foto/` and one read from the index as `/foto` mean the same thing.
-pub fn under(path: &str, dir: &str) -> bool {
-    let dir = dir.trim_end_matches(SEPARATORS);
-    // The root of a Unix filesystem trims away to nothing, and everything is
-    // under it. An empty `dir` from anywhere else means "no folder given",
-    // and the caller has to say what that means; here it covers everything,
-    // which is what an unnarrowed scope is.
-    if dir.is_empty() {
-        return true;
+/// On Windows a path can come back in more than one spelling — the index
+/// writes what the operating system gave it, a root can be typed by hand with
+/// forward slashes, and the same directory answers to either case. Comparing
+/// the raw bytes would then say that a folder is not inside the root it is
+/// plainly inside of.
+fn same_component(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
     }
-    let Some(rest) = path.strip_prefix(dir) else {
-        return false;
-    };
-    rest.is_empty() || rest.starts_with(SEPARATORS)
+}
+
+/// What is left of `path` below the directory `dir`, or `None` when `path`
+/// does not lie there at all.
+///
+/// Compared component by component rather than by raw prefix, for two
+/// reasons. A prefix match alone answers the wrong question — `/foto/2014-old`
+/// starts with `/foto/2014` and is a different folder — and on Windows the
+/// same directory is spelled several ways, so the bytes of the two strings
+/// disagree where the folders do not.
+///
+/// An empty `dir` means "no folder given", and the whole path is what lies
+/// below it: a path relative to nothing is itself. That is deliberate, and it
+/// is what an archive with no roots configured is read against — the paths
+/// stay absolute, leading separator and all.
+pub fn relative_to<'a>(path: &'a str, dir: &str) -> Option<&'a str> {
+    // Almost always the two are spelled the same way — both came off the same
+    // filesystem — and then this is one comparison instead of one per folder.
+    // The archive asks this question once per file per root, sixty thousand
+    // times over, so the common case is worth having.
+    let plain = trim_trailing_separators(dir);
+    if plain.is_empty() {
+        return Some(path);
+    }
+    if let Some(rest) = path.strip_prefix(plain) {
+        if rest.is_empty() || rest.starts_with(SEPARATORS) {
+            return Some(trim_leading_separators(rest));
+        }
+    }
+    let mut rest = path;
+    let mut named = false;
+    for wanted in dir.split(SEPARATORS).filter(|c| !c.is_empty()) {
+        named = true;
+        rest = trim_leading_separators(rest);
+        let end = rest.find(SEPARATORS).unwrap_or(rest.len());
+        if !same_component(&rest[..end], wanted) {
+            return None;
+        }
+        rest = &rest[end..];
+    }
+    // A folder whose name merely starts the same way is a different folder,
+    // and the walk above has already refused it: what is left here can only
+    // be empty or begin at a separator.
+    Some(if named {
+        trim_leading_separators(rest)
+    } else {
+        path
+    })
+}
+
+/// True when `path` is the directory `dir` or lies anywhere beneath it.
+pub fn under(path: &str, dir: &str) -> bool {
+    relative_to(path, dir).is_some()
+}
+
+/// A root and a path below it, joined the way this platform writes paths.
+///
+/// Not `format!("{root}/{rel}")`: on Windows that produces `C:\\archive/D`,
+/// which no file in the index is ever called, and an absolute mark built from
+/// it would match nothing at all.
+pub fn join_path(root: &str, rel: &str) -> String {
+    let root = trim_trailing_separators(root);
+    // No root means the path below it is already the whole path, leading
+    // separator and all — `relative_to` hands it back untouched, and putting
+    // it together again must not quietly make it relative.
+    if root.is_empty() {
+        return rel.to_string();
+    }
+    let rel = trim_leading_separators(rel);
+    if rel.is_empty() {
+        return root.to_string();
+    }
+    format!("{root}{}{rel}", std::path::MAIN_SEPARATOR)
 }
 
 /// A path with its leading separators removed, as after stripping a root off
@@ -268,6 +333,37 @@ mod path_tests {
         assert!(under("/foto/2014/raw/DSC_0001.NEF", "/foto/2014"));
         assert!(under("/foto/2014/DSC_0001.JPG", "/foto/2014/"));
         assert!(under("/foto/2014/DSC_0001.JPG", "/"));
+    }
+
+    #[test]
+    fn what_lies_below_a_folder_is_the_path_without_it() {
+        assert_eq!(relative_to("/foto/2014/a.jpg", "/foto"), Some("2014/a.jpg"));
+        assert_eq!(relative_to("/foto/2014", "/foto/2014"), Some(""));
+        assert_eq!(
+            relative_to("/foto/2014/a.jpg", "/foto/"),
+            Some("2014/a.jpg")
+        );
+        assert_eq!(relative_to("/foto/2015/a.jpg", "/foto/2014"), None);
+    }
+
+    #[test]
+    fn a_path_relative_to_nothing_is_itself() {
+        // An archive with no roots configured is read against this, and the
+        // leading separator has to survive: the tree and the marks both build
+        // absolute paths back out of what this returns.
+        assert_eq!(relative_to("/disk/z/a.jpg", ""), Some("/disk/z/a.jpg"));
+        assert_eq!(join_path("", "/disk/z"), "/disk/z");
+    }
+
+    #[test]
+    fn a_root_and_a_folder_join_the_way_the_platform_writes_paths() {
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            join_path("/mnt/disk1", "D/театр"),
+            format!("/mnt/disk1{sep}D/театр")
+        );
+        assert_eq!(join_path("/mnt/disk1/", "/D"), format!("/mnt/disk1{sep}D"));
+        assert_eq!(join_path("/mnt/disk1", ""), "/mnt/disk1");
     }
 
     #[test]

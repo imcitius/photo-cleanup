@@ -47,6 +47,11 @@ jobs:
         working-directory: crates/pc-api/web
       - name: Embedded assets must match the sources
         run: git diff --exit-code -- crates/pc-api/web/dist
+      # Locale keys and CSS classes outlive the screens that used them, and
+      # nothing else notices: the compiler checks that a translation has every
+      # key, never that anyone still asks for it.
+      - run: npm run check:unused
+        working-directory: crates/pc-api/web
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --workspace --locked

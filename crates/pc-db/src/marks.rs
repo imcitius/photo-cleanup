@@ -17,7 +17,7 @@
 //!   grow underneath it.
 
 use anyhow::Result;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::Db;
 
@@ -72,20 +72,38 @@ impl Marks {
 
     /// The root this path lies under, and what is left of the path below it.
     ///
-    /// A file under no configured root — indexed when the roots were set
-    /// differently, and still in the archive — has no relative reading, and
-    /// only an absolute mark can speak about it.
+    /// Always answers, because the last root is the implicit one: with none
+    /// configured a path is read against nothing and is its own relative
+    /// form, leading separator and all. The tree is built on the same
+    /// fallback, and the two must agree — a node the tree calls covered and a
+    /// file the rule calls uncovered is the worst of both.
     pub fn split<'a>(&'a self, path: &'a str) -> Option<(&'a str, &'a str)> {
-        let root = self.roots.iter().find(|r| pc_core::under(path, r))?;
-        let rest = pc_core::trim_leading_separators(&path[root.len()..]);
-        Some((root.as_str(), rest))
+        self.roots
+            .iter()
+            .find_map(|r| pc_core::relative_to(path, r).map(|rest| (r.as_str(), rest)))
+    }
+
+    /// How specific a mark is about this path, in components below the root.
+    ///
+    /// Both kinds have to be measured in the same coordinates or they cannot
+    /// be compared at all. The length of the stored string is not those
+    /// coordinates: an absolute mark carries the mount point in front of it,
+    /// so `/very-long-disk-mount/D` would out-measure `D/театр` on nothing
+    /// but the name of the disk.
+    fn depth(&self, mark: &Mark, path: &str) -> Option<usize> {
+        let below = match mark.scope {
+            MarkScope::Absolute => pc_core::relative_to(&mark.path, self.split(path)?.0)?,
+            MarkScope::EveryRoot => &mark.path,
+        };
+        Some(pc_core::path_parts(below).len())
     }
 
     /// The mark covering this path, if any.
     ///
-    /// When several do, the most specific wins — the one whose own path is
-    /// longest. It only decides which mark is *reported*; whether the path is
-    /// covered at all is the same answer either way.
+    /// When several do, the deeper one wins: naming a folder inside another
+    /// marked folder is a narrower statement, and the narrower statement is
+    /// the one the person meant. At equal depth an absolute mark wins,
+    /// because naming one disk is more specific than naming all of them.
     pub fn covering(&self, path: &str) -> Option<&Mark> {
         let relative = self.split(path).map(|(_, rest)| rest);
         self.marks
@@ -94,7 +112,25 @@ impl Marks {
                 MarkScope::Absolute => pc_core::under(path, &m.path),
                 MarkScope::EveryRoot => relative.is_some_and(|r| pc_core::under(r, &m.path)),
             })
-            .max_by_key(|m| m.path.len())
+            .max_by_key(|m| {
+                (
+                    self.depth(m, path).unwrap_or(0),
+                    m.scope == MarkScope::Absolute,
+                )
+            })
+    }
+
+    /// Whether this one mark covers this path, ignoring every other.
+    ///
+    /// `covering` answers which mark speaks for a file; this answers what one
+    /// mark is responsible for, which is what its own counts are made of.
+    pub fn covers(&self, mark: &Mark, path: &str) -> bool {
+        match mark.scope {
+            MarkScope::Absolute => pc_core::under(path, &mark.path),
+            MarkScope::EveryRoot => self
+                .split(path)
+                .is_some_and(|(_, rest)| pc_core::under(rest, &mark.path)),
+        }
     }
 
     /// The mark covering a node of the *merged* tree, whose path is already
@@ -107,7 +143,7 @@ impl Marks {
         self.marks
             .iter()
             .filter(|m| m.scope == MarkScope::EveryRoot && pc_core::under(rel, &m.path))
-            .max_by_key(|m| m.path.len())
+            .max_by_key(|m| pc_core::path_parts(&m.path).len())
     }
 
     /// True when this folder is marked in its own right, rather than covered
@@ -140,6 +176,19 @@ impl Db {
             .collect();
         roots.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         roots.dedup();
+        // With none configured there is one implicit root: nothing. A path
+        // read against nothing is itself, and the tree is built on the same
+        // fallback — a database indexed from the command line has no roots in
+        // its settings, because that is where the roots of a *run* live. The
+        // two readings must agree, or the tree calls a folder covered while
+        // the rule calls its files uncovered.
+        //
+        // It is added only when there are no real roots. Where the archive
+        // says what it is made of, a file outside all of it has no relative
+        // reading, and only a mark naming it in full can speak about it.
+        if roots.is_empty() {
+            roots.push(String::new());
+        }
         Ok(roots)
     }
 
@@ -195,18 +244,30 @@ impl Db {
 
     /// Take the mark back, and with it every kept file it chose.
     ///
-    /// Only the ones it chose: a file the user pressed keeps its mark. What
-    /// the rule decided and nothing else now says is undone, and the groups
-    /// left without an answer fall back to their best version, which is where
-    /// they were before the folder was ever named.
-    ///
     /// Runs inside the caller's transaction, for the same reason as the mark.
     pub fn unmark_original(&self, path: &str, scope: MarkScope) -> Result<usize> {
         let removed = self.conn.execute(
             "DELETE FROM original_folders WHERE path = ?1 AND scope = ?2",
             params![path, scope.as_str()],
         )?;
-        let still = self.original_marks()?;
+        self.revoke_uncovered_folder_keepers()?;
+        Ok(removed)
+    }
+
+    /// Take back every decision a rule made that no rule makes any more.
+    ///
+    /// Only the ones a rule made: a file the person pressed keeps its mark.
+    /// A folder decision outlives the mark it came from in more ways than an
+    /// unmark — the set of roots can be edited on another screen, and a
+    /// relative mark then covers a different part of the archive than it did
+    /// yesterday — so this asks the current marks rather than remembering
+    /// which press undid what.
+    ///
+    /// Groups left without an answer fall back to their best present member,
+    /// which is a fresh automatic choice and not the history of what they
+    /// held before the folder was ever named. The interface says so.
+    pub fn revoke_uncovered_folder_keepers(&self) -> Result<usize> {
+        let marks = self.original_marks()?;
         let freed: Vec<(i64, i64)> = {
             let mut st = self.conn.prepare(
                 "SELECT k.file_id, m.family_id, f.path
@@ -225,22 +286,35 @@ impl Db {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows.into_iter()
-                .filter(|(_, _, p)| still.covering(p).is_none())
+                .filter(|(_, _, p)| marks.covering(p).is_none())
                 .map(|(file, family, _)| (file, family))
                 .collect()
         };
         for (file, family) in &freed {
             self.conn
                 .execute("DELETE FROM manual_keepers WHERE file_id = ?1", [file])?;
-            self.conn.execute(
-                "UPDATE families SET keeper_file =
-                   (SELECT file_id FROM family_members
-                     WHERE family_id = ?1 ORDER BY COALESCE(quality, 0) DESC, file_id LIMIT 1)
-                  WHERE id = ?1",
-                [family],
-            )?;
+            if let Some(best) = self.best_present_member(*family)? {
+                self.set_family_keeper(*family, best)?;
+            }
         }
-        Ok(removed)
+        Ok(freed.len())
+    }
+
+    /// The member a group would keep if nobody had ever said otherwise.
+    ///
+    /// Present only. A group whose every member has left the archive keeps
+    /// whatever it kept; there is nothing here to choose between.
+    fn best_present_member(&self, family_id: i64) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT m.file_id FROM family_members m JOIN files f ON f.id = m.file_id
+                  WHERE m.family_id = ?1 AND f.state = 'present'
+                  ORDER BY COALESCE(m.quality, 0) DESC, m.file_id LIMIT 1",
+                [family_id],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 }
 

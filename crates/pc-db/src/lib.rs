@@ -7,8 +7,8 @@ pub mod organize;
 pub mod schema;
 
 pub use files::{
-    FamilyBadge, FamilyRow, FileInfo, FileRow, IndexStats, MemberRow, NewFile, NewMeta, PlanRow,
-    SeriesMemberRow, SeriesRow, TreeFile,
+    FamilyBadge, FamilyRow, FileInfo, FileRow, Identity, IndexStats, MemberRow, NewFile, NewMeta,
+    PlanRow, SeriesMemberRow, SeriesRow, TreeFile,
 };
 pub use marks::{Mark, MarkScope, Marks};
 pub use model::{

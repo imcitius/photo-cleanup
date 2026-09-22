@@ -11,8 +11,21 @@ test("one mark on the merged tree clears the copies on every disk", async ({
 }, info) => {
   test.setTimeout(90000);
   await request.post("/api/reset", { data: { confirmation: "RESET" } });
+  // A reset forgets the index, not the rules built on top of it, and not the
+  // quarantine on disk. Both outlive this test otherwise: the next attempt
+  // finds its destinations occupied and a mark it never made.
+  for (const mark of (await (await request.get("/api/tree")).json()).marks) {
+    await request.post("/api/originals", {
+      data: { path: mark.path, scope: mark.scope, marked: false },
+    });
+  }
   const settings = await (await request.get("/api/settings")).json();
-  const base = join(dirname(settings.db_path), `tree-${info.project.name}`);
+  // A fresh archive per attempt, so a repeated run is a run, not a retry on
+  // somebody else's leftovers.
+  const base = join(
+    dirname(settings.db_path),
+    `tree-${info.project.name}-${info.repeatEachIndex}-${info.retry}`,
+  );
   const disks = ["disk1", "disk2"].map((d) => join(base, d));
   const good = "D/разобрано/даня/театр";
   for (const disk of disks) {
@@ -81,6 +94,27 @@ test("one mark on the merged tree clears the copies on every disk", async ({
   await expect(page.getByText("Groups holding a file here: 2")).toBeVisible();
 
   for (const copy of copies) expect(existsSync(copy)).toBe(true);
+
+  // The step that matters most, and the one the first version of this test
+  // did not take: rebuild the groups and ask again. A mark is a rule, and a
+  // rule that only holds until the next rebuild is worth nothing — the plan
+  // went silently empty, with the kept file labelled a copy of the one it
+  // had replaced.
+  await request.post("/api/jobs", { data: { kind: "families", params: {} } });
+  await expect
+    .poll(async () => (await (await request.get("/api/jobs")).json())[0]?.state)
+    .toBe("done");
+  const after = await (
+    await request.post("/api/preview", {
+      data: {
+        kind: "plan-apply",
+        params: { roles: ["copy"], originals: true },
+      },
+    })
+  ).json();
+  expect(after.total_files).toBe(2);
+  await page.reload();
+
   await page
     .getByRole("button", { name: "Move to quarantine", exact: true })
     .click();
@@ -100,7 +134,12 @@ test("one mark on the merged tree clears the copies on every disk", async ({
   // Scoped to the list of marks: the same row style carries the per-disk
   // breakdown of whichever folder is open, and that is not a mark.
   await expect(page.locator(".mark-list .mark-row")).toHaveCount(1);
-  await expect(page.getByText("on every disk")).toBeVisible();
+  // The badge, not the sentence above the folder list that also contains
+  // these words: which of the two is on screen depends on what the tree has
+  // finished loading, and the test would flake on that alone.
+  await expect(
+    page.locator(".mark-list .badge", { hasText: "on every disk" }),
+  ).toHaveCount(1);
   await page
     .getByRole("button", { name: "Take the mark back" })
     .first()

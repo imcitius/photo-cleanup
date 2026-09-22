@@ -24,17 +24,35 @@ impl AppState {
         let thumbs = std::path::absolute(thumbs)?;
         let quarantine = quarantine.map(std::path::absolute).transpose()?;
         let db = Db::open(&db_path)?;
-        db.conn.execute(
-            "UPDATE jobs SET state='interrupted', finished_at=?1, error=?2
-              WHERE state IN ('queued','running')",
-            rusqlite::params![
-                pc_core::time::now_unix(),
-                pc_core::tr!(
-                    "Сервер перезапущен. Проверьте журнал перед новым запуском.",
-                    "The server restarted. Check the journal before starting again."
-                )
-            ],
-        )?;
+        // A job still marked as running belongs to a process that is gone —
+        // unless it does not. A second server on the same database sees the
+        // first one's live work here, and calling it interrupted is a lie
+        // told about a job that is at that moment moving files.
+        //
+        // The writer's lock answers this: if it can be taken, nobody is
+        // writing, so whatever is still marked running stopped without
+        // saying so. It is let go again at once; this is a question, not a
+        // claim on the archive.
+        match pc_core::lock::take_writer(&db_path, "") {
+            Ok(writer) => {
+                db.conn.execute(
+                    "UPDATE jobs SET state='interrupted', finished_at=?1, error=?2
+                      WHERE state IN ('queued','running')",
+                    rusqlite::params![
+                        pc_core::time::now_unix(),
+                        pc_core::tr!(
+                            "Сервер перезапущен. Проверьте журнал перед новым запуском.",
+                            "The server restarted. Check the journal before starting again."
+                        )
+                    ],
+                )?;
+                drop(writer);
+            }
+            Err(e) if e.is::<pc_core::lock::Busy>() => {
+                tracing::info!("{e:#}");
+            }
+            Err(e) => return Err(e),
+        }
         Ok(Self {
             jobs: Default::default(),
             mutation: Mutex::new(()),

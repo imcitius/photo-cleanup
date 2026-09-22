@@ -1472,3 +1472,75 @@ async fn a_plan_of_the_originals_is_empty_when_no_folder_is_marked() {
 fn urlencoding(path: &str) -> String {
     path.replace('%', "%25").replace(' ', "%20")
 }
+
+#[tokio::test]
+async fn a_hand_made_change_waits_for_whoever_else_is_writing() {
+    // The gate in this server's memory says nothing about the command line or
+    // a second server on the same database. Jobs have always taken the
+    // operating system's lock; the hand-made changes went straight past it,
+    // which left "one writer at a time" true only of the slow half.
+    let f = Fixture::new();
+    let held = pc_core::lock::take_writer(&f.state.db_path, "another process").unwrap();
+
+    for (method, path, body) in [
+        ("POST", "/api/reset", json!({"confirmation": "RESET"})),
+        ("PUT", "/api/settings", json!({"phash_max": 8})),
+        (
+            "POST",
+            "/api/keepers/prefer-folder",
+            json!({"dir": "/foto"}),
+        ),
+    ] {
+        let (status, v) = f.req(method, path, body).await;
+        assert_eq!(status, 409, "{path} wrote past another writer: {v}");
+        assert!(
+            v["error"].as_str().unwrap_or_default().contains("another"),
+            "{path}: {v}"
+        );
+    }
+
+    // And once it lets go, the same calls go through.
+    drop(held);
+    let (status, v) = f.req("PUT", "/api/settings", json!({"phash_max": 8})).await;
+    assert_eq!(status, 200, "{v}");
+}
+
+#[tokio::test]
+async fn a_second_server_leaves_a_live_job_of_the_first_alone() {
+    // Starting up, a server marks whatever is still "running" as interrupted:
+    // it must be its own work from a previous life. Not if another process is
+    // holding the writer — that job is running right now, and calling it
+    // interrupted is a lie told about a job that is moving files.
+    let f = Fixture::new();
+    {
+        let db = f.state.db.lock().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO jobs(kind,params,state,started_at) VALUES('index','{}','running',1)",
+                [],
+            )
+            .unwrap();
+    }
+    let held = pc_core::lock::take_writer(&f.state.db_path, "another process").unwrap();
+
+    let second = AppState::new(&f.state.db_path, &f._tmp.path().join("t2"), None).unwrap();
+    let state: String = second
+        .db
+        .lock()
+        .unwrap()
+        .conn
+        .query_row("SELECT state FROM jobs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(state, "running", "чужая живая задача объявлена прерванной");
+
+    drop(held);
+    let third = AppState::new(&f.state.db_path, &f._tmp.path().join("t3"), None).unwrap();
+    let state: String = third
+        .db
+        .lock()
+        .unwrap()
+        .conn
+        .query_row("SELECT state FROM jobs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(state, "interrupted", "своя брошенная задача не подобрана");
+}

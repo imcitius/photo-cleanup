@@ -79,9 +79,18 @@ pub fn build_controlled(
         .prepare("SELECT file_id FROM manual_splits")?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    let manual_keepers: std::collections::HashSet<i64> = db
+    // Ordered, not a set. Two groups that were separate yesterday can be one
+    // today — a link found on reindexing joins them — and then a group holds
+    // two decisions at once. A person's answer outranks a rule's whatever
+    // their timestamps say, and between two of the same kind the later one
+    // stands. Without an order the group kept whichever row happened to come
+    // first, and a folder rule could quietly replace a press.
+    let manual_keepers: Vec<i64> = db
         .conn
-        .prepare("SELECT file_id FROM manual_keepers")?
+        .prepare(
+            "SELECT file_id FROM manual_keepers
+              ORDER BY CASE source WHEN 'hand' THEN 0 ELSE 1 END, marked_at DESC, file_id DESC",
+        )?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let may_join =
@@ -186,7 +195,17 @@ pub fn build_controlled(
             })
             .collect();
         let totals: Vec<f64> = scores.iter().map(|s| s.total).collect();
-        let member_roles = roles::assign(&files, members, &totals);
+        // What this group already keeps, if anything outside the measurement
+        // has said so. Asked before the roles are assigned, because `copy`
+        // means "the same picture as the kept file" and cannot be worked out
+        // without knowing which one that is. Doing it the other way round —
+        // roles first, keeper substituted afterwards — is how a rebuild used
+        // to leave the kept file labelled a copy of the one it replaced, and
+        // with it every exact copy in the archive vanished from the plan.
+        let decided = manual_keepers
+            .iter()
+            .find_map(|id| members.iter().position(|&m| files[m].id == *id));
+        let member_roles = roles::assign(&files, members, &totals, decided);
 
         // Roles exist only now, so the keeper is chosen here rather than from
         // the raw quality score: an original outranks a larger export.
@@ -217,10 +236,7 @@ pub fn build_controlled(
             })
             .unwrap_or(0);
 
-        let keeper_pos = members
-            .iter()
-            .position(|&m| manual_keepers.contains(&files[m].id))
-            .unwrap_or(keeper_pos);
+        let keeper_pos = decided.unwrap_or(keeper_pos);
         let rep = &files[members[keeper_pos]];
         let kind = if members.len() == 1 {
             "single"

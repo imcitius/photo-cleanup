@@ -106,12 +106,28 @@ fn has_camera_exif(f: &FileInfo) -> bool {
 ///
 /// `quality` decides which of several byte-identical members survives as the
 /// real thing and which become copies.
-/// What this file has to match, byte for byte, to be called a copy.
-fn identity(f: &FileInfo) -> Option<&Vec<u8>> {
-    f.content_hash.as_ref().or(f.pixel_hash.as_ref())
+/// What this file has to match to be called a copy of another.
+fn identity(f: &FileInfo) -> Option<pc_db::Identity<'_>> {
+    pc_db::Identity::of(
+        f.content_hash.as_ref(),
+        f.pixel_hash.as_ref(),
+        Some(&f.pixel_source),
+        f.partial_hash.as_ref(),
+    )
 }
 
-pub fn assign(files: &[FileInfo], members: &[usize], quality: &[f64]) -> Vec<Role> {
+/// `kept` names the member the group has already decided to keep, when
+/// something outside this measurement has decided it — a press on one frame,
+/// a folder named as holding the originals. It is never a copy of anything:
+/// the word `copy` means "the same picture as the file being kept", so it
+/// belongs to the others. Without it the tie-break below chooses, and the
+/// keeper is then chosen to match.
+pub fn assign(
+    files: &[FileInfo],
+    members: &[usize],
+    quality: &[f64],
+    kept: Option<usize>,
+) -> Vec<Role> {
     let mut roles = vec![Role::Unknown; members.len()];
     if members.is_empty() {
         return roles;
@@ -128,10 +144,8 @@ pub fn assign(files: &[FileInfo], members: &[usize], quality: &[f64]) -> Vec<Rol
         // size. The grey square that decides *likeness* cannot carry this
         // word: a red frame and a green one of equal brightness are the same
         // square, and so is a photograph beside its own downscaled export.
-        //
-        // An archive indexed before that hash existed falls back to the old
-        // one rather than losing every group at once — it is what those rows
-        // were built with, and re-reading the files replaces it.
+        // And for a raw file, whose preview is all the tool decoded, the
+        // frame alone is not the evidence either — `Identity` says so.
         let by_content = files[members[pos]].content_hash.is_some();
         let hash = match identity(&files[members[pos]]) {
             Some(h) => h,
@@ -140,7 +154,7 @@ pub fn assign(files: &[FileInfo], members: &[usize], quality: &[f64]) -> Vec<Rol
         let twins: Vec<usize> = (0..members.len())
             .filter(|&q| {
                 files[members[q]].content_hash.is_some() == by_content
-                    && identity(&files[members[q]]) == Some(hash)
+                    && identity(&files[members[q]]).as_ref() == Some(&hash)
             })
             .collect();
         if twins.len() < 2 {
@@ -148,24 +162,29 @@ pub fn assign(files: &[FileInfo], members: &[usize], quality: &[f64]) -> Vec<Rol
         }
         // Identical twins score identically, so the tie-break decides which
         // path is treated as the real one. It must be deterministic, and it
-        // must prefer the copy that is not buried in an archive folder.
-        let best = *twins
-            .iter()
-            .max_by(|&&x, &&y| {
-                let key = |i: usize| {
-                    let p = &files[members[i]].path;
-                    (
-                        quality[i],
-                        -(p.matches('/').count() as f64),
-                        -(p.len() as f64),
-                    )
-                };
-                key(x)
-                    .partial_cmp(&key(y))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| files[members[y]].path.cmp(&files[members[x]].path))
-            })
-            .unwrap();
+        // must prefer the copy that is not buried in an archive folder —
+        // unless the group already keeps one of them, in which case the
+        // question was settled before this measurement and the answer is
+        // simply read off.
+        let best = kept.filter(|k| twins.contains(k)).unwrap_or(
+            *twins
+                .iter()
+                .max_by(|&&x, &&y| {
+                    let key = |i: usize| {
+                        let p = &files[members[i]].path;
+                        (
+                            quality[i],
+                            -(p.matches('/').count() as f64),
+                            -(p.len() as f64),
+                        )
+                    };
+                    key(x)
+                        .partial_cmp(&key(y))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| files[members[y]].path.cmp(&files[members[x]].path))
+                })
+                .unwrap(),
+        );
         for t in twins {
             claimed[t] = true;
             if t != best {
@@ -285,7 +304,7 @@ mod tests {
     fn roles_of(files: &[FileInfo]) -> Vec<Role> {
         let members: Vec<usize> = (0..files.len()).collect();
         let q: Vec<f64> = files.iter().map(|f| f.pixels() as f64).collect();
-        assign(files, &members, &q)
+        assign(files, &members, &q, None)
     }
 
     #[test]
@@ -321,7 +340,7 @@ mod tests {
         b.pixel_hash = Some(vec![7; 32]);
         let members = vec![0usize, 1];
         // The first scores higher, so the second becomes the copy.
-        let r = assign(&[a, b], &members, &[100.0, 50.0]);
+        let r = assign(&[a, b], &members, &[100.0, 50.0], None);
         assert_eq!(r[0], Role::Original);
         assert_eq!(r[1], Role::Copy);
         assert!(r[1].removable_by_default());

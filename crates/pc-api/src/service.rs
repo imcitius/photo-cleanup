@@ -306,9 +306,13 @@ pub async fn settings(State(st): State<Arc<AppState>>) -> Response {
 }
 pub async fn save_settings(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Response {
     let _gate = st.mutation.lock().unwrap();
-    if let Err(e) = jobs::idle(&st) {
-        return error(409, &e.to_string());
-    }
+    let _writer = match as_writer(
+        &st,
+        pc_core::tr!("правка настроек", "settings being changed"),
+    ) {
+        Ok(lock) => lock,
+        Err(refusal) => return *refusal,
+    };
     respond((|| {
         validate(&Request {
             kind: "families".into(),
@@ -469,9 +473,11 @@ pub fn reset_word() -> &'static str {
 /// "rescan from scratch" does not mean "ask me everything again".
 pub async fn reset(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Response {
     let _gate = st.mutation.lock().unwrap();
-    if let Err(e) = jobs::idle(&st) {
-        return error(409, &e.to_string());
-    }
+    let _writer = match as_writer(&st, pc_core::tr!("сброс индекса", "the index being reset"))
+    {
+        Ok(lock) => lock,
+        Err(refusal) => return *refusal,
+    };
     if v["confirmation"].as_str() != Some(reset_word()) {
         return error(
             400,
@@ -1097,11 +1103,17 @@ fn split(db: &Db, family: i64, file: i64) -> Result<()> {
     db.conn.execute("DELETE FROM families WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM family_members WHERE family_id=?1)",[family])?;
     Ok(())
 }
+/// Put the decisions a person made back on top of a freshly built index.
+///
+/// The order matters and is the same one the builder uses: a person's answer
+/// outranks a rule's, and between two of a kind the later one stands. Two
+/// groups that were separate can be joined by a link found on reindexing, and
+/// the joined group then holds both of their decisions.
 pub fn restore_curation(db: &Db) -> Result<()> {
     for row in jobs::rows(db,"SELECT s.file_id,m.family_id FROM manual_splits s JOIN family_members m USING(file_id) WHERE (SELECT COUNT(*) FROM family_members x WHERE x.family_id=m.family_id)>1",&[])? {
         split(db,row["family_id"].as_i64().unwrap(),row["file_id"].as_i64().unwrap())?;
     }
-    db.conn.execute_batch("UPDATE families SET keeper_file=(SELECT k.file_id FROM manual_keepers k JOIN family_members m ON m.file_id=k.file_id WHERE m.family_id=families.id ORDER BY k.marked_at DESC, k.file_id DESC LIMIT 1) WHERE EXISTS(SELECT 1 FROM manual_keepers k JOIN family_members m ON m.file_id=k.file_id WHERE m.family_id=families.id); UPDATE series SET best_file=(SELECT k.file_id FROM manual_best k JOIN series_members m ON m.file_id=k.file_id WHERE m.series_id=series.id LIMIT 1) WHERE EXISTS(SELECT 1 FROM manual_best k JOIN series_members m ON m.file_id=k.file_id WHERE m.series_id=series.id);")?;
+    db.conn.execute_batch("UPDATE families SET keeper_file=(SELECT k.file_id FROM manual_keepers k JOIN family_members m ON m.file_id=k.file_id WHERE m.family_id=families.id ORDER BY CASE k.source WHEN 'hand' THEN 0 ELSE 1 END, k.marked_at DESC, k.file_id DESC LIMIT 1) WHERE EXISTS(SELECT 1 FROM manual_keepers k JOIN family_members m ON m.file_id=k.file_id WHERE m.family_id=families.id); UPDATE series SET best_file=(SELECT k.file_id FROM manual_best k JOIN series_members m ON m.file_id=k.file_id WHERE m.series_id=series.id LIMIT 1) WHERE EXISTS(SELECT 1 FROM manual_best k JOIN series_members m ON m.file_id=k.file_id WHERE m.series_id=series.id);")?;
     // A folder named as holding the originals is a rule, and a rule applies
     // to what the archive holds now — including the files this rebuild has
     // just seen for the first time.
@@ -1360,11 +1372,36 @@ pub async fn keep_all_versions(State(st): State<Arc<AppState>>, Path(id): Path<i
     })
 }
 
+/// Become the archive's writer for as long as one change takes.
+///
+/// The gate in this server's memory says nothing about the command line or
+/// about a second server on the same database, and a change made here writes
+/// to the same index a run out there is halfway through rebuilding. Jobs have
+/// always taken the operating system's lock; the hand-made changes did not,
+/// which left the promise of one writer true only of the slow half.
+fn as_writer(st: &AppState, what: &str) -> Result<pc_core::lock::WriterLock, Box<Response>> {
+    if let Err(e) = jobs::idle(st) {
+        return Err(Box::new(error(409, &e.to_string())));
+    }
+    pc_core::lock::take_writer(&st.db_path, what).map_err(|e| {
+        let code = if e.is::<pc_core::lock::Busy>() {
+            409
+        } else {
+            500
+        };
+        Box::new(error(code, &format!("{e:#}")))
+    })
+}
+
 pub fn mutate(st: &AppState, f: impl FnOnce(&Db) -> Result<Value>) -> Response {
     let _gate = st.mutation.lock().unwrap();
-    if let Err(e) = jobs::idle(st) {
-        return error(409, &e.to_string());
-    }
+    let _writer = match as_writer(
+        st,
+        pc_core::tr!("правка решения", "a decision being changed"),
+    ) {
+        Ok(lock) => lock,
+        Err(refusal) => return *refusal,
+    };
     let db = st.db.lock().unwrap();
     respond(f(&db))
 }
@@ -1597,38 +1634,34 @@ struct Node {
     by_root: std::collections::BTreeMap<String, (usize, i64)>,
 }
 
-/// The roots the tree is laid over.
-///
-/// Normally the folders the archive is configured to read. With none set —
-/// a database indexed by the command line, which takes its roots per run —
-/// there is one implicit root at the top of the filesystem, and the tree is
-/// the absolute one it was before there was anything to merge.
-fn tree_roots(db: &Db) -> Result<Vec<String>> {
-    let roots = db.archive_roots()?;
-    Ok(if roots.is_empty() {
-        vec![String::new()]
-    } else {
-        roots
-    })
-}
-
 /// Which root a path belongs to, and what is left of it below that root.
+///
+/// The roots come from `Db::archive_roots`, which is also what the marks are
+/// read against — the tree and the rule have to answer this the same way, or
+/// the tree shows a folder as covered while the rule says its files are not.
+/// A path under no configured root keeps its own name and is its own relative
+/// form, leading separator and all.
 fn split_root<'a>(roots: &'a [String], path: &'a str) -> (&'a str, &'a str) {
-    match roots.iter().find(|r| pc_core::under(path, r)) {
-        Some(root) => (
-            root.as_str(),
-            pc_core::trim_leading_separators(&path[root.len()..]),
-        ),
-        // Indexed when the roots were set differently and still in the
-        // archive. It has no relative reading, so it keeps its own name.
-        None => ("", pc_core::trim_leading_separators(path)),
-    }
+    roots
+        .iter()
+        .find_map(|r| pc_core::relative_to(path, r).map(|rest| (r.as_str(), rest)))
+        .unwrap_or(("", path))
 }
 
-fn merged_tree(files: &[pc_db::TreeFile], roots: &[String]) -> HashMap<String, Node> {
+/// Where every file sits: its root, and its path below that root.
+///
+/// Worked out once and handed to everyone who needs it. Splitting a path is
+/// cheap and doing it sixty thousand times over is not, and the tree, the
+/// file listing and the per-mark counts all ask the same question about the
+/// same files.
+fn split_all<'a>(roots: &'a [String], files: &'a [pc_db::TreeFile]) -> Vec<(&'a str, &'a str)> {
+    files.iter().map(|f| split_root(roots, &f.path)).collect()
+}
+
+fn merged_tree(files: &[pc_db::TreeFile], split: &[(&str, &str)]) -> HashMap<String, Node> {
     let mut nodes: HashMap<String, Node> = HashMap::new();
-    for f in files {
-        let (root, rel) = split_root(roots, &f.path);
+    for (f, (root, rel)) in files.iter().zip(split) {
+        let (root, rel) = (*root, *rel);
         let mut dir = pc_core::dir_name(rel);
         nodes.entry(dir.to_string()).or_default().here += 1;
         loop {
@@ -1693,13 +1726,7 @@ fn node_json(nodes: &HashMap<String, Node>, marks: &pc_db::Marks, path: &str, de
         "roots": node.map(|n| n.by_root.iter().map(|(root, (files, bytes))| {
             // Where this folder actually is on that root, for the times when
             // one disk of the array has to be singled out.
-            let full = if root.is_empty() {
-                path.to_string()
-            } else if path.is_empty() {
-                root.clone()
-            } else {
-                format!("{root}/{path}")
-            };
+            let full = pc_core::join_path(root, path);
             let covered = marks.covering(&full);
             json!({
                 "path": root,
@@ -1744,9 +1771,10 @@ pub async fn tree(
             .and_then(|d| d.parse().ok())
             .unwrap_or_else(default_depth)
             .min(8);
-        let roots = tree_roots(&db)?;
+        let roots = db.archive_roots()?;
         let files = db.tree_files()?;
-        let nodes = merged_tree(&files, &roots);
+        let split = split_all(&roots, &files);
+        let nodes = merged_tree(&files, &split);
         let marks = db.original_marks()?;
 
         let top = nodes.get("");
@@ -1762,15 +1790,27 @@ pub async fn tree(
             "merged": roots.len() > 1,
             "files": top.map(|n| n.files).unwrap_or(0),
             "bytes": top.map(|n| n.bytes).unwrap_or(0),
+            // What each mark is responsible for, asked of the mark rather
+            // than of the merged tree: a mark naming one disk has no node of
+            // its own there, and reporting nought files for it said the rule
+            // did nothing when it had done its work.
             "marks": marks.marks.iter().map(|m| {
-                let stats = matches!(m.scope, pc_db::MarkScope::EveryRoot)
-                    .then(|| nodes.get(&m.path))
-                    .flatten();
+                let (mut count, mut bytes) = (0usize, 0i64);
+                for (f, (_, rel)) in files.iter().zip(&split) {
+                    let covered = match m.scope {
+                        pc_db::MarkScope::Absolute => pc_core::under(&f.path, &m.path),
+                        pc_db::MarkScope::EveryRoot => pc_core::under(rel, &m.path),
+                    };
+                    if covered {
+                        count += 1;
+                        bytes += f.size;
+                    }
+                }
                 json!({
                     "path": m.path,
                     "scope": m.scope.as_str(),
-                    "files": stats.map(|n| n.files).unwrap_or(0),
-                    "bytes": stats.map(|n| n.bytes).unwrap_or(0),
+                    "files": count,
+                    "bytes": bytes,
                 })
             }).collect::<Vec<_>>(),
             "node": node_json(&nodes, &marks, &path, depth),
@@ -1792,16 +1832,18 @@ pub async fn tree_files(
         let path = q.get("path").cloned().unwrap_or_default();
         // One disk of the merged folder, when the answer is about that disk.
         let only = q.get("root").filter(|r| !r.is_empty());
-        let roots = tree_roots(&db)?;
+        let roots = db.archive_roots()?;
         let marks = db.original_marks()?;
         let all = db.tree_files()?;
+        let split = split_all(&roots, &all);
 
         let listed: Vec<&pc_db::TreeFile> = all
             .iter()
-            .filter(|f| {
-                let (root, rel) = split_root(&roots, &f.path);
-                pc_core::dir_name(rel) == path && only.is_none_or(|r| r == root)
+            .zip(&split)
+            .filter(|(_, (root, rel))| {
+                pc_core::dir_name(rel) == path && only.is_none_or(|r| r == *root)
             })
+            .map(|(f, _)| f)
             .collect();
         let ids: Vec<i64> = listed.iter().take(LISTING).map(|f| f.id).collect();
         let badges = db.family_badges(&ids)?;

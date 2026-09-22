@@ -509,10 +509,20 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
         }
     } else {
         // The photograph first: if it cannot come back, nothing should move.
-        rename_with_parents(&dst_path, &src_path)?;
+        // Unless it already has — an undo that failed halfway can be asked
+        // for again, and the retry must carry back what is still in
+        // quarantine without touching what is already home.
+        if dst_path.exists() || !src_path.exists() {
+            rename_with_parents(&dst_path, &src_path)?;
+        }
         for m in entry.manifest.iter().filter(|m| m.src != entry.src) {
-            let from = Path::new(&m.dst);
+            let (from, to) = (Path::new(&m.dst), Path::new(&m.src));
             if !from.exists() {
+                if to.exists() {
+                    // Came back on an earlier attempt. Nothing to report and
+                    // nothing to do.
+                    continue;
+                }
                 failed.push(pc_core::tf!(
                     "{0} — файла нет в карантине",
                     "{0} — not in quarantine any more",
@@ -520,7 +530,7 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
                 ));
                 continue;
             }
-            if let Err(e) = rename_with_parents(from, Path::new(&m.src)) {
+            if let Err(e) = rename_with_parents(from, to) {
                 failed.push(format!("{} — {e}", m.dst));
             }
         }
@@ -537,24 +547,13 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
         );
     }
 
-    if !failed.is_empty() {
-        // The photograph is home; saying so quietly while a sidecar stayed
-        // behind is how an archive loses its edits.
-        db.journal_finish(
-            journal_id,
-            JournalStatus::Done,
-            Some(&pc_core::tf!(
-                "откат: не вернулось {0}",
-                "undo: did not come back — {0}",
-                failed.join("; ")
-            )),
-        )?;
-    }
-    db.journal_mark_undone(journal_id)?;
-    // Which row in the index this concerns is decided by path, not by the id
-    // the entry was written with. After a reset those ids belong to other
-    // files, and an entry from an older database would otherwise reach into
-    // the new index and change a stranger.
+    // What did come back, the index should say is back: the photograph is in
+    // the archive whether or not its sidecar managed to follow.
+    //
+    // Which row this concerns is decided by path, not by the id the entry was
+    // written with. After a reset those ids belong to other files, and an
+    // entry from an older database would otherwise reach into the new index
+    // and change a stranger.
     match entry.op.as_str() {
         "quarantine" => {
             if let Some(id) = db.bundle_id_at(&entry.src)? {
@@ -575,6 +574,22 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
         }
         _ => {}
     }
+    if !failed.is_empty() {
+        // Half an undo is not an undo. Marking the entry `undone` would close
+        // the only door back to what stayed behind — the entry would stop
+        // being offered, and a sidecar holding a photograph's edits would sit
+        // in quarantine with nothing left pointing at it. It stays `done`,
+        // with the reason written down, and asking again carries on from
+        // where this stopped.
+        let why = pc_core::tf!(
+            "откат: не вернулось {0}",
+            "undo: did not come back — {0}",
+            failed.join("; ")
+        );
+        db.journal_finish(journal_id, JournalStatus::Done, Some(&why))?;
+        bail!("{why}");
+    }
+    db.journal_mark_undone(journal_id)?;
     Ok(())
 }
 
@@ -761,5 +776,84 @@ mod lightroom_tests {
         fs::remove_file(root.join("Library.lrcat.lock")).unwrap();
         assert_eq!(quarantine(&db, run, &b, None).unwrap(), Outcome::Moved);
         assert!(!previews.exists());
+    }
+}
+
+#[cfg(test)]
+mod undo_tests {
+    use super::*;
+    use pc_db::{Db, JournalStatus, Moved, NewJournalEntry};
+
+    /// One quarantined photograph and its sidecar, as the journal records it.
+    fn quarantined(db: &Db, run: i64, dir: &Path) -> (i64, PathBuf, PathBuf) {
+        let (src, dst) = (dir.join("archive/a.png"), dir.join("quarantine/a.png"));
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        fs::write(&dst, b"photo").unwrap();
+        fs::write(dst.with_extension("xmp"), b"the edits that went with it").unwrap();
+        let (s, d) = (src.display().to_string(), dst.display().to_string());
+        let id = db
+            .journal_begin(&NewJournalEntry {
+                run_id: run,
+                op: "quarantine-file",
+                target_id: None,
+                src: &s,
+                dst: Some(&d),
+                size: 32,
+                file_count: 2,
+                manifest: &[
+                    Moved {
+                        src: s.clone(),
+                        dst: d.clone(),
+                    },
+                    Moved {
+                        src: src.with_extension("xmp").display().to_string(),
+                        dst: dst.with_extension("xmp").display().to_string(),
+                    },
+                ],
+            })
+            .unwrap();
+        db.journal_finish(id, JournalStatus::Done, None).unwrap();
+        (id, src, dst)
+    }
+
+    #[test]
+    fn an_undo_that_could_not_finish_says_so_and_can_be_asked_again() {
+        // Half an undo is not an undo. The photograph came home and its
+        // sidecar could not follow, because something was already sitting
+        // where it belonged — and the entry was marked undone anyway. That
+        // closed the only door back: the entry stopped being offered, and a
+        // file holding a photograph's edits sat in quarantine with nothing
+        // left pointing at it.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("pc.db")).unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+        let (id, src, dst) = quarantined(&db, run, tmp.path());
+        let occupied = src.with_extension("xmp");
+        fs::write(&occupied, b"newer edits").unwrap();
+
+        let refused = undo(&db, id).unwrap_err();
+
+        assert!(src.exists(), "снимок не вернулся");
+        assert!(dst.with_extension("xmp").exists(), "чужой файл затёрт");
+        assert_eq!(fs::read(&occupied).unwrap(), b"newer edits");
+        assert!(format!("{refused:#}").contains("xmp"), "{refused:#}");
+        let entry = db.journal_entry(id).unwrap().unwrap();
+        assert_eq!(
+            entry.status,
+            JournalStatus::Done,
+            "частичный откат объявлен завершённым"
+        );
+
+        // And asking again carries on rather than starting over: the
+        // photograph is already home and must not be moved a second time.
+        fs::remove_file(&occupied).unwrap();
+        undo(&db, id).unwrap();
+        assert!(src.exists());
+        assert!(occupied.exists(), "спутник не вернулся со второй попытки");
+        assert_eq!(
+            db.journal_entry(id).unwrap().unwrap().status,
+            JournalStatus::Undone
+        );
     }
 }

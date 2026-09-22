@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build && node scripts/check-bundle.mjs",
+    "check:unused": "node scripts/check-unused.cjs",
     "test": "playwright test",
     "preview": "vite preview --host 127.0.0.1",
     "format:check": "prettier --check src tests scripts *.ts *.json index.html"

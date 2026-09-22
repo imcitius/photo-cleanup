@@ -17,7 +17,9 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Report {
-    /// Groups the marked folders have a file in.
+    /// Groups the marked folders have a file in. Every one of them, whatever
+    /// happened next — this is the number the interface calls "groups with a
+    /// file here", and it has to mean that.
     pub groups: u64,
     /// Groups whose kept file this moved into a marked folder.
     pub moved: u64,
@@ -25,15 +27,44 @@ pub struct Report {
     /// of the one being kept — a scan and the JPEG exported from it. Nothing
     /// measurable settles those, so the rule leaves them for a person.
     pub untouched: u64,
+    /// Groups the rule did not touch because a person had already answered
+    /// them, by pressing "keep this one" or by setting the file aside.
+    pub by_hand: u64,
 }
 
 struct Member {
     file_id: i64,
     path: String,
     quality: f64,
-    identity: Option<Vec<u8>>,
+    frame: Option<Vec<u8>>,
+    source: Option<String>,
+    bytes: Option<Vec<u8>>,
     keeper: Option<i64>,
-    keeper_identity: Option<Vec<u8>>,
+    keeper_frame: Option<Vec<u8>>,
+    keeper_source: Option<String>,
+    keeper_bytes: Option<Vec<u8>>,
+}
+
+impl Member {
+    /// What this file has to match to be a copy of what the group keeps, and
+    /// what the kept file offers in return. One model for both — the same one
+    /// the roles and the plan use.
+    fn pair(&self) -> Option<(pc_db::Identity<'_>, pc_db::Identity<'_>)> {
+        Some((
+            pc_db::Identity::of(
+                self.frame.as_ref(),
+                None,
+                self.source.as_deref(),
+                self.bytes.as_ref(),
+            )?,
+            pc_db::Identity::of(
+                self.keeper_frame.as_ref(),
+                None,
+                self.keeper_source.as_deref(),
+                self.keeper_bytes.as_ref(),
+            )?,
+        ))
+    }
 }
 
 /// Apply every mark, for every group.
@@ -45,6 +76,13 @@ struct Member {
 /// No transaction of its own: it runs at the end of a rebuild, inside the one
 /// that wrote the groups, and opening a second there is an error.
 pub fn settle(db: &Db) -> Result<Report> {
+    // First take back what no mark covers any more. The set of marks is not
+    // the only thing that changes under a folder decision: editing the roots
+    // on the settings screen changes what a relative mark reaches, and a
+    // decision left over from the old reading would go on overriding the
+    // automatic choice with nothing behind it.
+    db.revoke_uncovered_folder_keepers()?;
+
     let marks = db.original_marks()?;
     if marks.is_empty() {
         return Ok(Report::default());
@@ -60,14 +98,25 @@ pub fn settle(db: &Db) -> Result<Report> {
         )?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+    // And frames a person set aside. A rule may not choose one of those, and
+    // may not quietly take the rejection back: the whole promise of the mark
+    // is that it does not overrule a human answer.
+    let rejected: HashSet<i64> = db
+        .conn
+        .prepare("SELECT file_id FROM manual_rejects")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
 
     let mut by_family: HashMap<i64, Vec<Member>> = HashMap::new();
     {
         let mut st = db.conn.prepare(
             "SELECT fm.family_id, fm.file_id, f.path, COALESCE(fm.quality, 0),
-                    COALESCE(f.content_hash, f.pixel_hash), fa.keeper_file,
+                    COALESCE(f.content_hash, f.pixel_hash), f.pixel_source, f.partial_hash,
+                    fa.keeper_file,
                     (SELECT COALESCE(k.content_hash, k.pixel_hash) FROM files k
-                      WHERE k.id = fa.keeper_file)
+                      WHERE k.id = fa.keeper_file),
+                    (SELECT k.pixel_source FROM files k WHERE k.id = fa.keeper_file),
+                    (SELECT k.partial_hash FROM files k WHERE k.id = fa.keeper_file)
                FROM family_members fm
                JOIN files f     ON f.id = fm.file_id
                JOIN families fa ON fa.id = fm.family_id
@@ -80,9 +129,13 @@ pub fn settle(db: &Db) -> Result<Report> {
                     file_id: r.get(1)?,
                     path: r.get(2)?,
                     quality: r.get(3)?,
-                    identity: r.get(4)?,
-                    keeper: r.get(5)?,
-                    keeper_identity: r.get(6)?,
+                    frame: r.get(4)?,
+                    source: r.get(5)?,
+                    bytes: r.get(6)?,
+                    keeper: r.get(7)?,
+                    keeper_frame: r.get(8)?,
+                    keeper_source: r.get(9)?,
+                    keeper_bytes: r.get(10)?,
                 },
             ))
         })?;
@@ -94,32 +147,43 @@ pub fn settle(db: &Db) -> Result<Report> {
 
     let mut report = Report::default();
     for (family, members) in &by_family {
-        if by_hand.contains(family) {
+        // Whether the marks reach this group at all is asked before anything
+        // else is decided about it: "groups with a file here" is a fact about
+        // the archive, not about what the rule got to do.
+        let covered = members.iter().any(|m| marks.covering(&m.path).is_some());
+        if !covered {
             continue;
         }
-        // How specific the mark covering this file is. Two marks can cover
-        // one file — a disk named on its own inside a path named everywhere —
-        // and the deeper of them decides, so that naming one disk more
-        // narrowly is a way of preferring it.
-        let depth = |path: &str| marks.covering(path).map(|m| m.path.len());
+        report.groups += 1;
+        if by_hand.contains(family) {
+            report.by_hand += 1;
+            continue;
+        }
+        // How specific the mark covering this file is, in folders below the
+        // root. Two marks can cover one file — a disk named on its own inside
+        // a path named everywhere — and the deeper of them decides, so that
+        // naming one disk more narrowly is a way of preferring it.
+        let depth = |path: &str| {
+            marks
+                .covering(path)
+                .map(|m| pc_core::path_parts(&m.path).len())
+        };
         let mut best: Option<(usize, f64, i64)> = None;
-        let mut covered = false;
         let mut matched = false;
         for m in members {
             let Some(depth) = depth(&m.path) else {
                 continue;
             };
-            covered = true;
+            if rejected.contains(&m.file_id) {
+                continue;
+            }
             // A group is one photograph, and that is not one set of pixels: a
             // scan and the JPEG exported from it belong together and share no
             // byte. Moving the kept file onto something that does not match
             // would leave every other member a "copy" of a picture it is not,
             // and the move refuses at the last moment, for ever. So the rule
             // only takes over the groups whose picture the folder holds.
-            let same = match (&m.identity, &m.keeper_identity) {
-                (Some(a), Some(b)) => a == b,
-                _ => false,
-            };
+            let same = m.pair().is_some_and(|(mine, kept)| mine == kept);
             if !same {
                 continue;
             }
@@ -129,10 +193,6 @@ pub fn settle(db: &Db) -> Result<Report> {
                 best = Some(candidate);
             }
         }
-        if !covered {
-            continue;
-        }
-        report.groups += 1;
         if !matched {
             report.untouched += 1;
             continue;
@@ -187,7 +247,14 @@ mod tests {
                 mtime: 1,
                 container: Some("jpeg".into()),
                 pixel_hash: Some(vec![pixels; 32]),
+                content_hash: Some(vec![pixels; 32]),
+                partial_hash: Some(vec![pixels; 32]),
+                pixel_source: Some("full".into()),
                 phash: Some(1),
+                dhash: Some(1),
+                phash_canon: Some(1),
+                width: Some(1000),
+                height: Some(800),
                 thumb_key: Some("k".into()),
                 ..Default::default()
             },
@@ -205,6 +272,17 @@ mod tests {
                 .unwrap();
         }
         id
+    }
+
+    fn keeper_of_file(w: &World, file: i64) -> bool {
+        w.db.conn
+            .query_row(
+                "SELECT COUNT(*) FROM families WHERE keeper_file = ?1",
+                [file],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0
     }
 
     fn keeper_of(w: &World, family: i64) -> i64 {
@@ -232,7 +310,8 @@ mod tests {
             Report {
                 groups: 1,
                 moved: 1,
-                untouched: 0
+                untouched: 0,
+                by_hand: 0
             }
         );
         assert_eq!(keeper_of(&w, fam), deep);
@@ -273,7 +352,8 @@ mod tests {
             Report {
                 groups: 3,
                 moved: 3,
-                untouched: 0
+                untouched: 0,
+                by_hand: 0
             }
         );
         for (fam, good) in families {
@@ -322,6 +402,39 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_set_aside_by_hand_is_not_chosen_by_the_rule() {
+        // The other half of the same promise. A rule may not pick a file the
+        // person has rejected, and may not take the rejection back on its way
+        // past: the group would then say two opposite things at once.
+        let w = world();
+        let backup = file(&w, "/backup/2014", "DSC_0001.JPG", 1);
+        let original = file(&w, "/foto/2014", "DSC_0001.JPG", 1);
+        let fam = family(&w, backup, &[backup, original]);
+        w.db.conn
+            .execute(
+                "INSERT INTO manual_rejects(file_id, marked_at) VALUES(?1, 1)",
+                [original],
+            )
+            .unwrap();
+
+        w.db.mark_original("/foto", MarkScope::Absolute).unwrap();
+        let report = settle(&w.db).unwrap();
+
+        assert_eq!(report.groups, 1);
+        assert_eq!(report.moved, 0, "правило взяло отклонённый файл");
+        assert_eq!(keeper_of(&w, fam), backup);
+        let still: i64 =
+            w.db.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM manual_rejects WHERE file_id = ?1",
+                    [original],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        assert_eq!(still, 1, "правило стёрло решение человека");
+    }
+
+    #[test]
     fn a_different_photograph_in_the_marked_folder_is_left_for_a_person() {
         let w = world();
         let backup = file(&w, "/backup/2014", "DSC_0001.JPG", 1);
@@ -336,7 +449,8 @@ mod tests {
             Report {
                 groups: 1,
                 moved: 0,
-                untouched: 1
+                untouched: 1,
+                by_hand: 0
             }
         );
         assert_eq!(keeper_of(&w, fam), backup, "кадр подменён на другой снимок");
@@ -351,8 +465,62 @@ mod tests {
         w.db.set_manual_keeper(fam, backup).unwrap();
 
         w.db.mark_original("/foto", MarkScope::Absolute).unwrap();
-        assert_eq!(settle(&w.db).unwrap(), Report::default());
+        // The group is counted — the folder does hold a file of it, and that
+        // is what "groups with a file here" means — and then left alone,
+        // under its own heading. Reporting nothing at all made the rule look
+        // as though it had missed the folder entirely.
+        assert_eq!(
+            settle(&w.db).unwrap(),
+            Report {
+                groups: 1,
+                moved: 0,
+                untouched: 0,
+                by_hand: 1
+            }
+        );
         assert_eq!(keeper_of(&w, fam), backup);
+    }
+
+    #[test]
+    fn a_rebuild_leaves_the_rule_and_its_plan_where_they_were() {
+        // The worst failure this feature has had. Roles were worked out
+        // against whichever file the measurement liked, the kept file was
+        // swapped in afterwards, and nobody went back to fix the words: the
+        // kept file was left labelled a copy of the one it had replaced, so
+        // the copy was no longer a copy of anything and no plan would offer
+        // it. A whole archive's worth of exact copies vanished from the plan
+        // on the next rebuild, silently.
+        let w = world();
+        let store = pc_core::ThumbStore::new(w._tmp.path().join("thumbs"));
+        let loose = file(&w, "/mnt/disk1/D/свалка", "IMG.JPG", 1);
+        let good = file(&w, "/mnt/disk1/D/разобрано/театр", "IMG.JPG", 1);
+        crate::build(&w.db, &store, &Default::default()).unwrap();
+
+        w.db.mark_original("/mnt/disk1/D/разобрано/театр", MarkScope::Absolute)
+            .unwrap();
+        settle(&w.db).unwrap();
+        let plan = |w: &World| {
+            crate::plan::compute(&w.db, &Default::default())
+                .unwrap()
+                .candidates
+                .len()
+        };
+        assert_eq!(plan(&w), 1, "отметка не дала плана");
+        assert!(keeper_of_file(&w, good));
+
+        crate::build(&w.db, &store, &Default::default()).unwrap();
+        settle(&w.db).unwrap();
+        assert_eq!(plan(&w), 1, "пересборка потеряла точную копию");
+        assert!(keeper_of_file(&w, good), "пересборка сменила хранимый файл");
+        let role: String =
+            w.db.conn
+                .query_row(
+                    "SELECT role FROM family_members WHERE file_id = ?1",
+                    [loose],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        assert_eq!(role, "copy", "роли разошлись с хранимым файлом");
     }
 
     #[test]

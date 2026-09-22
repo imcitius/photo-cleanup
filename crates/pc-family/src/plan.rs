@@ -103,15 +103,15 @@ pub struct Scope {
     pub keeper_folder: Option<String>,
 }
 
-fn keeper_id_of(db: &Db, family: i64) -> i64 {
-    db.family_keeper(family).unwrap_or(None).unwrap_or(0)
-}
-
-/// What a file has to match to be called a copy of another: the whole frame
-/// in colour, falling back to the old grey square only for rows written
-/// before that evidence existed.
-fn identity(r: &PlanRow) -> Option<&Vec<u8>> {
-    r.content_hash.as_ref().or(r.pixel_hash.as_ref())
+/// What a file has to match to be called a copy of another. One model, the
+/// same one the roles were assigned with — see `pc_db::Identity`.
+fn identity(r: &PlanRow) -> Option<pc_db::Identity<'_>> {
+    pc_db::Identity::of(
+        r.content_hash.as_ref(),
+        r.pixel_hash.as_ref(),
+        r.pixel_source.as_deref(),
+        r.partial_hash.as_ref(),
+    )
 }
 
 pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
@@ -134,6 +134,23 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
     for r in rows {
         by_family.entry(r.family_id).or_default().push(r);
     }
+
+    // What every group holds, counted once from the rows already in hand.
+    //
+    // The check at the end of this function — no plan may empty a group —
+    // used to ask the database this per group. On sixty thousand files that
+    // is twelve thousand queries, each of which SQLite answers by walking the
+    // archive, and the plan simply never came back. The rows were here all
+    // along: `plan_rows_scoped` narrows by *group*, so whichever groups it
+    // returns, it returns all of their present members.
+    let present: HashMap<i64, i64> = by_family
+        .iter()
+        .map(|(family, members)| (*family, members.len() as i64))
+        .collect();
+    let kept_by: HashMap<i64, i64> = by_family
+        .iter()
+        .filter_map(|(family, members)| keeper_of(members).map(|k| (*family, k.file_id)))
+        .collect();
 
     let mut plan = Plan::default();
     for (_family, members) in by_family {
@@ -343,13 +360,23 @@ pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
     }
     let mut rescued: Vec<usize> = Vec::new();
     for (family, taken) in &leaving {
-        let present = db.family_present_count(*family)?;
-        if taken.len() as i64 >= present && present > 0 {
+        // A hand-made decision arrives with a group this scope never read —
+        // it is about the file, not about the group — so that one is asked
+        // for by name. Everything else was counted above.
+        let count = match present.get(family) {
+            Some(n) => *n,
+            None => db.family_present_count(*family)?,
+        };
+        if taken.len() as i64 >= count && count > 0 {
+            let kept = match kept_by.get(family) {
+                Some(k) => Some(*k),
+                None => db.family_keeper(*family)?,
+            };
             let keep = *taken
                 .iter()
                 .max_by_key(|&&i| {
                     let c = &plan.candidates[i];
-                    (c.file_id == keeper_id_of(db, *family), c.size)
+                    (Some(c.file_id) == kept, c.size)
                 })
                 .unwrap();
             rescued.push(keep);
@@ -415,6 +442,8 @@ mod tests {
             disk: "d".into(),
             pixel_hash: Some(vec![1; 32]),
             content_hash: Some(vec![1; 32]),
+            pixel_source: Some("full".into()),
+            partial_hash: Some(vec![2; 32]),
             is_keeper: keeper,
             group_keeper: None,
         }
