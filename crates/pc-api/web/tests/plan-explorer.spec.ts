@@ -110,11 +110,33 @@ test("plan browser stays within the viewport and accessible in both themes", asy
   await expect(page.locator(".explorer-row").first()).toBeVisible();
   for (const width of [320, 768, 1024, 1440]) {
     await page.setViewportSize({ width, height: 1000 });
-    expect(
-      await page.evaluate(
-        () => document.documentElement.scrollWidth <= innerWidth,
-      ),
-    ).toBe(true);
+    for (const scope of ["originals", "reviewed", "all"]) {
+      await page
+        .getByRole("combobox", { name: "Plan scope", exact: true })
+        .selectOption(scope);
+      const layout = await page.evaluate(
+        (viewport) => ({
+          inner: innerWidth,
+          width: document.documentElement.scrollWidth,
+          overflow: [...document.querySelectorAll("body *")]
+            .filter((el) => {
+              const rect = el.getBoundingClientRect();
+              return (
+                rect.width > 0 &&
+                (rect.right > viewport || el.scrollWidth > el.clientWidth)
+              );
+            })
+            .slice(0, 8)
+            .map((el) => ({
+              tag: el.tagName,
+              className: el.className,
+              width: el.getBoundingClientRect().width,
+            })),
+        }),
+        width,
+      );
+      expect(layout.width, JSON.stringify(layout)).toBeLessThanOrEqual(width);
+    }
   }
   await page
     .locator(".plan-explorer")
@@ -126,6 +148,7 @@ test("plan browser stays within the viewport and accessible in both themes", asy
     );
     const result = await new AxeBuilder({ page })
       .include(".plan-explorer")
+      .include(".plan-scope-panel")
       .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
       .analyze();
     expect(
@@ -182,4 +205,44 @@ test("sidecars can be found separately and selecting a photo only loads its pair
   await expect(page.locator(".explorer-detail")).toContainText(
     "Moves with the photo DSC00000.ARW",
   );
+});
+
+test("the combined plan is the default and queue navigation clears a limited scope", async ({
+  page,
+}, info) => {
+  await page.addInitScript(() =>
+    sessionStorage.setItem("pc-reviewed-plan", "true"),
+  );
+  const first = page.waitForRequest((r) => r.url().endsWith("/api/preview"));
+  await page.goto("/#plan");
+  expect((await first).postDataJSON().params).toMatchObject({
+    reviewed_only: false,
+    originals: false,
+    roles: ["copy"],
+    allow_lightroom: false,
+  });
+  const scope = page.getByRole("combobox", { name: "Plan scope", exact: true });
+  await expect(scope).toHaveValue("all");
+  await expect(
+    page.getByRole("heading", { name: "Combined cleanup plan", exact: true }),
+  ).toBeVisible();
+  await scope.selectOption("reviewed");
+  await expect(
+    page.getByRole("heading", { name: "Only my decisions", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Show the combined plan", exact: true })
+    .click();
+  await expect(scope).toHaveValue("all");
+  await scope.selectOption("originals");
+  await page.reload();
+  await expect(scope).toHaveValue("originals");
+  await page.goto("/#families");
+  await page.getByRole("button", { name: /Open combined plan/ }).click();
+  await expect(scope).toHaveValue("all");
+  await expect(page.locator(".explorer-row").first()).toBeVisible();
+  await page.screenshot({
+    path: `test-results/combined-plan-${info.project.name}.png`,
+    fullPage: true,
+  });
 });

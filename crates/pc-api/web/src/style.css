@@ -3327,9 +3327,7 @@ select {
   margin: 24px 0;
   font-size: 20px;
 }
-.plan-source-tabs {
-  margin: 20px 0;
-}
+
 @media (max-width: 1200px) {
   .queue-desk {
     grid-template-columns: minmax(0, 1fr);
@@ -3374,9 +3372,6 @@ select {
     flex-wrap: wrap;
   }
   .queue-toolbar > label.inline {
-    flex-wrap: wrap;
-  }
-  .plan-source-tabs {
     flex-wrap: wrap;
   }
 }
@@ -3645,4 +3640,36 @@ select {
   .review-stepper .button {
     font-size: 12px;
   }
+}
+
+.plan-scope-panel h2 {
+  font-size: 18px;
+  margin: 0 0 12px;
+}
+.plan-scope-panel p {
+  font-size: 13px;
+}
+.plan-scope-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+}
+.plan-scope-controls .field {
+  flex: 1 1 280px;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+.plan-scope-controls select {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.plan-scope-controls .button {
+  white-space: normal;
+}
+.plan-decision-details {
+  margin: 20px 0;
 }

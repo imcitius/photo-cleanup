@@ -34,8 +34,8 @@ interface Undo {
   search: string;
 }
 
-export function openReviewedPlan() {
-  openPlan("reviewed");
+export function openCleanupPlan() {
+  openPlan("all");
 }
 export function useReviewQueue(
   revision: number,
@@ -147,7 +147,7 @@ export function useReviewQueue(
       setNote(t("rq_not_eligible"));
       return;
     }
-    if (state === "plan") savePlanSource("reviewed");
+    if (state === "plan") savePlanSource("all");
     return mutate(`/review/${current.id}`, {
       state,
       token: current.review_token,

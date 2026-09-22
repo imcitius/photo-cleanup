@@ -714,47 +714,52 @@ export function Policy({
   return (
     <>
       <Notice>{ui.quarantineExplained}</Notice>
-      <div
-        className="segmented plan-source-tabs"
-        role="group"
-        aria-label={t("plan_source")}
-      >
-        {(
-          [
-            ["reviewed", t("rq_reviewed_plan")],
-            ["originals", t("plan_originals")],
-            ["automatic", t("rq_suggested_plan")],
-          ] as const
-        ).map(([value, label]) => (
-          <Button
-            key={value}
-            kind={source === value ? "selected" : ""}
-            aria-pressed={source === value}
-            onClick={() => chooseSource(value)}
-          >
-            {label}
-          </Button>
-        ))}
-      </div>
-      {reviewed ? (
-        <>
-          <Notice>{t("rq_reviewed_help")}</Notice>
+      <section className="panel plan-scope-panel">
+        <h2>
+          {reviewed
+            ? t("plan_only_reviewed")
+            : originals
+              ? t("plan_only_originals")
+              : t("plan_combined_title")}
+        </h2>
+        <p className="muted">{t("plan_combined_help")}</p>
+        <div className="plan-scope-controls">
+          <label className="field">
+            {t("plan_scope")}
+            <select
+              value={source}
+              onChange={(e) => chooseSource(e.target.value as PlanSource)}
+            >
+              <option value="all">{t("plan_all")}</option>
+              <option value="reviewed">{t("plan_only_reviewed")}</option>
+              <option value="originals">{t("plan_only_originals")}</option>
+            </select>
+          </label>
+          {source !== "all" && (
+            <Button kind="primary" onClick={() => chooseSource("all")}>
+              {t("plan_show_all")}
+            </Button>
+          )}
+        </div>
+        <p className="muted">{t("plan_scope_help")}</p>
+        {reviewed && <p>{t("rq_reviewed_help")}</p>}
+        {originals && <p>{t("plan_originals_help")}</p>}
+        <details className="plan-decision-details">
+          <summary>{t("plan_decisions")}</summary>
           <ReviewDecisions revision={revision} />
-        </>
-      ) : originals ? (
-        <Notice>
-          <p>{t("plan_originals_help")}</p>
-          <Button
-            icon="folder"
-            onClick={() => {
-              location.hash = "tree";
-            }}
-          >
-            {t("plan_edit_originals")}
-          </Button>
-        </Notice>
-      ) : (
-        <section className="panel">
+        </details>
+        <Button
+          icon="folder"
+          onClick={() => {
+            location.hash = "tree";
+          }}
+        >
+          {t("plan_edit_originals")}
+        </Button>
+      </section>
+      {source === "all" && (
+        <details className="panel">
+          <summary>{t("plan_advanced")}</summary>
           <h3>{t("kakie_versii_perenosit")}</h3>
           <p className="muted">
             {t(
@@ -815,7 +820,7 @@ export function Policy({
             {t("zaschischat_fayly_iz_katalogov_lightroom")}
           </label>
           {allow && <Notice tone="warning">{ui.lrWarning}</Notice>}
-        </section>
+        </details>
       )}
       <Review
         kind="plan-apply"

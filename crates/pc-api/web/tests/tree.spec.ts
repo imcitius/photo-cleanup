@@ -128,7 +128,12 @@ test("one mark on the merged tree clears the copies on every disk", async ({
   ).json();
   expect(after.total_files).toBe(2);
   await page.goto("/#plan");
-  await page.getByRole("button", { name: "My decisions", exact: true }).click();
+  await page
+    .getByRole("combobox", { name: "Plan scope", exact: true })
+    .selectOption("reviewed");
+  await page
+    .getByText("Saved decisions and folder rules", { exact: true })
+    .click();
   await expect(page.locator(".plan-row")).toHaveCount(2);
   await expect(
     page.getByRole("region", { name: "Your saved decisions" }),
@@ -166,20 +171,18 @@ test("one mark on the merged tree clears the copies on every disk", async ({
     allow_lightroom: false,
   });
   await expect(page).toHaveURL(/#plan$/);
-  const originals = page.getByRole("button", {
-    name: "Originals folders",
-    exact: true,
-  });
-  await expect(originals).toHaveAttribute("aria-pressed", "true");
+  const scope = page.getByRole("combobox", { name: "Plan scope", exact: true });
+  await expect(scope).toHaveValue("originals");
   await expect(page.locator(".plan-row")).toHaveCount(2);
   await page.reload();
-  await expect(originals).toHaveAttribute("aria-pressed", "true");
+  await expect(scope).toHaveValue("originals");
   await expect(page.locator(".plan-row")).toHaveCount(2);
   await page
-    .getByRole("button", { name: "Automatic suggestions", exact: true })
+    .getByRole("button", { name: "Show the combined plan", exact: true })
     .click();
+  await expect(scope).toHaveValue("all");
   await expect(page.locator(".plan-row")).toHaveCount(3);
-  await originals.click();
+  await scope.selectOption("originals");
   await expect(page.locator(".plan-row")).toHaveCount(2);
   await page.screenshot({
     path: `test-results/originals-plan-${info.project.name}.png`,

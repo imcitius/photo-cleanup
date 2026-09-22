@@ -393,6 +393,21 @@ async fn my_decisions_include_existing_keepers_rejections_and_originals_rules() 
         .unwrap()
         .iter()
         .any(|v| v["file_id"] == other));
+    // The whole-archive plan already combines automatic copies and manual
+    // decisions. Narrowed views overlap it; they are not batches to add up.
+    let all = f.preview("plan-apply", json!({"roles":["copy"]})).await;
+    let ids: std::collections::HashSet<_> = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["file_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [b, copy, other, untouched].into_iter().collect());
+    assert_eq!(
+        all["items"].as_array().unwrap().len(),
+        ids.len(),
+        "A file is included only once"
+    );
     // A later keep/defer is stronger than either an old rejection or a folder rule.
     choose(&f, hand, "keep").await;
     choose(&f, versions, "defer").await;
@@ -401,6 +416,18 @@ async fn my_decisions_include_existing_keepers_rejections_and_originals_rules() 
         .await;
     assert_eq!(p["items"].as_array().unwrap().len(), 1);
     assert_eq!(p["items"][0]["file_id"], copy);
+    let all = f.preview("plan-apply", json!({"roles":["copy"]})).await;
+    let ids: std::collections::HashSet<_> = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["file_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [copy, untouched].into_iter().collect(),
+        "Keep and defer override old decisions in the combined plan too"
+    );
     let (_, summary) = f.req("GET", "/api/review/decisions", Value::Null).await;
     assert_eq!(summary["keep"], 1);
     assert_eq!(summary["defer"], 1);

@@ -294,6 +294,19 @@ export const ui = {
 } as const satisfies Shape<typeof ru>;
 
 export const messages = {
+  plan_combined_title: "Combined cleanup plan",
+  plan_combined_help:
+    "Automatic selection and your decisions are combined in one plan. Your chosen originals and folder rules determine what stays; files you set aside manually are included when allowed. Kept and deferred files stay out of the move plan. By default, automatic selection adds only exact copies.",
+  plan_scope: "Plan scope",
+  plan_all: "Whole archive",
+  plan_only_reviewed: "Only my decisions",
+  plan_only_originals: "Only marked originals folders",
+  plan_show_all: "Show the combined plan",
+  plan_scope_help:
+    "The limited scopes are parts of the combined plan, not separate batches to run one after another. Each file is counted once. Confirmation applies the selected scope.",
+  plan_decisions: "Saved decisions and folder rules",
+  plan_advanced: "Automatic selection settings",
+
   tree_next_step: "Next: review the copies",
   tree_plan_help:
     "Mark the folders holding your originals here. On Plan and move, check which copies can move, which files stay and why. Moving requires a separate confirmation there.",
@@ -302,10 +315,8 @@ export const messages = {
     "Marked folders: {0}. The plan covers all of them across the archive, regardless of the folder currently open above.",
   tree_plan_empty:
     "First open a folder holding your originals and choose “The originals are here”.",
-  plan_source: "Plan source",
-  plan_originals: "Originals folders",
   plan_originals_help:
-    "Exact copies of files in all marked originals folders, wherever those copies are stored. The originals stay. Search and folder selection narrow the view; confirmation applies the entire plan shown by its totals.",
+    "This part of the combined plan covers groups whose kept file is in a marked originals folder. Your manual decisions still apply. Copies may be anywhere in the archive.",
   plan_edit_originals: "Choose originals folders",
 
   rq_browse: "Browse photographs",
@@ -349,7 +360,7 @@ export const messages = {
   rq_all_states: "All states",
   rq_queue: "Queue",
   rq_search: "Search groups by name or path",
-  rq_open_plan: "Open my plan",
+  rq_open_plan: "Open combined plan",
   rq_batch: "Batch exact copies",
   rq_batch_scope:
     "All untouched exact-copy groups across the archive. Queue filters do not narrow this batch.",
@@ -378,8 +389,6 @@ export const messages = {
   rq_metadata: "File metadata and paths",
   rq_manual_choices:
     "This group already contains manually rejected files. Inspect them in detailed review.",
-  rq_reviewed_plan: "My decisions",
-  rq_suggested_plan: "Automatic suggestions",
   rq_reviewed_help:
     "Includes queue decisions, chosen keepers, manual file rejections and originals folder rules. Kept and deferred files stay out of all move plans.",
 

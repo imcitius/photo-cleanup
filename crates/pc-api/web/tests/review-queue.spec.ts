@@ -310,7 +310,9 @@ test("saved decisions remain visible even when no photo should move", async ({
     }),
   );
   await page.goto("/#plan");
-  await page.getByRole("button", { name: "My decisions", exact: true }).click();
+  await page
+    .getByText("Saved decisions and folder rules", { exact: true })
+    .click();
   const summary = page.getByRole("region", { name: "Your saved decisions" });
   await expect(summary).toContainText("D/Originals");
   await expect(summary).toContainText("Across all archive roots");

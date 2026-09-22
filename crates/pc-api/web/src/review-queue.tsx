@@ -14,7 +14,7 @@ import { bytes, number, t, ui } from "./i18n";
 import { ReviewBrowser } from "./review-browser";
 import { ReviewComparison } from "./review-comparison";
 import {
-  openReviewedPlan,
+  openCleanupPlan,
   useReviewQueue,
   type Batch,
   type Decision,
@@ -113,7 +113,7 @@ function Queue({
         return;
       e.preventDefault();
       if (key === "KeyP") {
-        openReviewedPlan();
+        openCleanupPlan();
         return;
       }
       if (q.blocked) return;
@@ -204,7 +204,7 @@ function Queue({
           <Button disabled={q.blocked || batchBusy} onClick={previewBatch}>
             {t("rq_batch")}
           </Button>
-          <Button onClick={openReviewedPlan}>
+          <Button onClick={openCleanupPlan}>
             {t("rq_open_plan")}
             <kbd>P</kbd>
           </Button>

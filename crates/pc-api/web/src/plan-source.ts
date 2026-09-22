@@ -1,12 +1,10 @@
-export type PlanSource = "reviewed" | "originals" | "automatic";
+export type PlanSource = "reviewed" | "originals" | "all";
 
 export function savedPlanSource(): PlanSource {
   const saved = sessionStorage.getItem("pc-plan-source");
-  if (saved === "reviewed" || saved === "originals" || saved === "automatic")
+  if (saved === "reviewed" || saved === "originals" || saved === "all")
     return saved;
-  return sessionStorage.getItem("pc-reviewed-plan") === "true"
-    ? "reviewed"
-    : "automatic";
+  return "all";
 }
 export function savePlanSource(source: PlanSource) {
   sessionStorage.setItem("pc-plan-source", source);
