@@ -1544,3 +1544,240 @@ async fn a_second_server_leaves_a_live_job_of_the_first_alone() {
         .unwrap();
     assert_eq!(state, "interrupted", "своя брошенная задача не подобрана");
 }
+
+#[tokio::test]
+async fn a_tree_with_no_roots_configured_hands_back_paths_that_can_be_marked() {
+    // A database indexed from the command line has no roots in its settings —
+    // that is where the roots of a *run* live — and the tree is then read
+    // against nothing: a path relative to nothing is itself. It has to stay
+    // itself, leading separator and all. Trimming it produced a folder whose
+    // "mark this disk" button carried a path no file was ever called, so the
+    // node looked covered and the rule covered nothing.
+    let f = Fixture::new();
+    let dir = f.archive.join("shots");
+    std::fs::create_dir_all(&dir).unwrap();
+    let img = image::RgbImage::from_fn(64, 64, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 10])
+    });
+    img.save(dir.join("a.png")).unwrap();
+    let id = f
+        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+
+    // Asked for by the path the tree itself hands back, the way the browser
+    // asks once a folder is opened.
+    let (_, node) = f
+        .req(
+            "GET",
+            &format!(
+                "/api/tree?depth=0&path={}",
+                urlencoding(&dir.display().to_string())
+            ),
+            Value::Null,
+        )
+        .await;
+    let node = node["node"].clone();
+    let full = node["roots"][0]["full"].as_str().unwrap().to_string();
+    assert_eq!(full, dir.display().to_string(), "{node}");
+
+    // And a mark made with that path covers the file that is actually there.
+    let (s, v) = f
+        .req(
+            "POST",
+            "/api/originals",
+            json!({"path": full, "scope": "absolute"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let marks = f.state.db.lock().unwrap().original_marks().unwrap();
+    assert!(
+        marks
+            .covering(&dir.join("a.png").display().to_string())
+            .is_some(),
+        "отметка из дерева не накрывает свой же файл"
+    );
+}
+
+#[tokio::test]
+async fn an_interrupted_move_can_be_read_against_the_disk_and_undone() {
+    // A killed process leaves a `pending` row: the list of what it meant to
+    // move, and no word on how far it got. It is rightly not offered as a
+    // whole reversible operation — it is not one — and that used to be the
+    // end of it. "Check the journal" is advice, not an operation.
+    let f = Fixture::new();
+    let src = f.archive.join("a.jpg");
+    let dst = f.quarantine.join("a.jpg");
+    std::fs::write(&dst, b"a photograph").unwrap();
+    let (s, d) = (src.display().to_string(), dst.display().to_string());
+    let id = {
+        let db = f.state.db.lock().unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+        db.journal_begin(&pc_db::NewJournalEntry {
+            run_id: run,
+            op: "quarantine-file",
+            target_id: None,
+            src: &s,
+            dst: Some(&d),
+            size: 12,
+            file_count: 1,
+            manifest: &[pc_db::Moved {
+                src: s.clone(),
+                dst: d.clone(),
+            }],
+        })
+        .unwrap()
+    };
+
+    let plan = f
+        .preview("journal-reconcile", json!({ "journal_id": id }))
+        .await;
+    assert_eq!(plan["total_files"], 1, "{plan}");
+    assert_eq!(plan["items"][0]["dst"], json!(s), "{plan}");
+    let done = f.apply(&plan).await;
+    assert_eq!(done["state"], "done", "{done}");
+    assert!(src.exists(), "снимок не вернулся");
+    assert!(!dst.exists());
+    let entry = f
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .journal_entry(id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.status, pc_db::JournalStatus::Undone);
+}
+
+#[tokio::test]
+async fn an_interrupted_move_whose_file_is_in_two_places_is_left_to_a_person() {
+    // Two files, and choosing between them is not the tool's decision. It
+    // says so and changes nothing — including the entry, which stays the
+    // `pending` it truthfully is.
+    let f = Fixture::new();
+    let src = f.archive.join("a.jpg");
+    let dst = f.quarantine.join("a.jpg");
+    std::fs::write(&src, b"one of them").unwrap();
+    std::fs::write(&dst, b"the other").unwrap();
+    let (s, d) = (src.display().to_string(), dst.display().to_string());
+    let id = {
+        let db = f.state.db.lock().unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+        db.journal_begin(&pc_db::NewJournalEntry {
+            run_id: run,
+            op: "quarantine-file",
+            target_id: None,
+            src: &s,
+            dst: Some(&d),
+            size: 11,
+            file_count: 1,
+            manifest: &[pc_db::Moved {
+                src: s.clone(),
+                dst: d.clone(),
+            }],
+        })
+        .unwrap()
+    };
+
+    let plan = f
+        .preview("journal-reconcile", json!({ "journal_id": id }))
+        .await;
+    assert_eq!(plan["total_files"], 0, "{plan}");
+    assert_eq!(plan["refusals"].as_array().unwrap().len(), 1, "{plan}");
+    assert_eq!(std::fs::read(&src).unwrap(), b"one of them");
+    assert_eq!(std::fs::read(&dst).unwrap(), b"the other");
+    assert_eq!(
+        f.state
+            .db
+            .lock()
+            .unwrap()
+            .journal_entry(id)
+            .unwrap()
+            .unwrap()
+            .status,
+        pc_db::JournalStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn a_gathered_quarantine_says_where_its_files_came_from() {
+    // Quarantine gathered in one folder holds `<disk label>/<path from that
+    // disk>`, and a label is a short name that means nothing on its own. The
+    // way home used to be guessed from the path, which brought a file back to
+    // `collected/root/<its own old absolute path>` — bytes intact, address
+    // invented. Now the layout is written down beside the data, and a
+    // database is not needed to read it back.
+    let f = Fixture::new();
+    let collected = f._tmp.path().join("collected");
+    let state = Arc::new(
+        AppState::new(
+            &f._tmp.path().join("gathered.db"),
+            &f._tmp.path().join("t"),
+            Some(collected.clone()),
+        )
+        .unwrap(),
+    );
+    let img = image::RgbImage::from_fn(64, 64, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 7])
+    });
+    std::fs::create_dir_all(f.archive.join("b")).unwrap();
+    let home = f.archive.join("b/frame.png");
+    img.save(&home).unwrap();
+    std::fs::copy(&home, f.archive.join("b/frame copy.png")).unwrap();
+
+    let other = Fixture { state, ..f };
+    let id = other
+        .start("index", json!({"roots":[other.archive],"min_size":0}))
+        .await;
+    assert_eq!(other.wait(id).await["state"], "done");
+    let id = other.start("families", json!({})).await;
+    assert_eq!(other.wait(id).await["state"], "done");
+    let plan = other.preview("plan-apply", json!({"roles":["copy"]})).await;
+    assert_eq!(plan["total_files"], 1, "{plan}");
+    assert_eq!(other.apply(&plan).await["state"], "done");
+
+    // Hidden under the name the walk steps over, so a later scan cannot index
+    // quarantined files as photographs of the archive.
+    let inside = collected.join(pc_core::QUARANTINE_DIR);
+    assert!(
+        inside.is_dir(),
+        "собранный карантин не помечен как карантин"
+    );
+    assert!(inside.join(pc_core::QUARANTINE_LAYOUT).is_file());
+
+    // And whatever landed there knows its way home, without the database.
+    let moved = walk(&inside)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "png"))
+        .expect("файл в карантине");
+    let origin = pc_core::quarantine_origin_of(&moved.display().to_string());
+    assert_eq!(
+        origin.as_deref(),
+        Some(
+            other
+                .archive
+                .join("b/frame copy.png")
+                .display()
+                .to_string()
+                .as_str()
+        ),
+        "{moved:?}"
+    );
+}
+
+/// Every file under a directory, for looking at what an operation left.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}

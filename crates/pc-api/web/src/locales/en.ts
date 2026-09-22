@@ -288,6 +288,9 @@ export const ui = {
     "This looks like a pixel-shift set, so thinning it is not offered: if it is one, every frame is part of one photograph and losing any loses it. What was measured:",
   seriesNote:
     "No frame becomes a candidate for removal merely by belonging to a burst.",
+  reconcile: "Read against the disk",
+  reconcileHelp:
+    "We read the entry’s manifest and look at where each file actually is. The ones that went to quarantine and never came back are carried home; if a file turns out to be in both places, that is yours to settle and nothing is touched.",
   pendingNote:
     "The operation was interrupted. Check the source and the destination: the file may have moved before the journal was updated. If permanent deletion had started, some data may already be gone.",
   jobNote: "You can close the tab — the job carries on on the server.",

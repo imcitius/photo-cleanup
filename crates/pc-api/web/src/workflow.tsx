@@ -513,7 +513,10 @@ export function Review({
   const purge = kind === "derived-purge" || kind === "quarantine-purge";
   // Adopting orphaned quarantine carries files *out* of it, the same
   // direction as an undo — and the button has to say so.
-  const restoring = kind.includes("undo") || kind === "quarantine-adopt";
+  const restoring =
+    kind.includes("undo") ||
+    kind === "quarantine-adopt" ||
+    kind === "journal-reconcile";
   const apply = async () => {
     if (!plan) return;
     setSending(true);
@@ -541,6 +544,9 @@ export function Review({
       ) : (
         plan && (
           <>
+            {kind === "journal-reconcile" && (
+              <Notice>{ui.reconcileHelp}</Notice>
+            )}
             <section className="review-summary">
               <div>
                 <div className="eyebrow">{ui.preview}</div>
@@ -809,6 +815,22 @@ export function JournalPage({
                     }
                   >
                     {ui.undo}
+                  </Button>
+                )}
+                {/* An operation a killed process left half-done. The journal
+                    says what it meant to move; only the disk knows how far it
+                    got, and until now the answer to that was a sentence of
+                    advice rather than something you could press. */}
+                {j.status === "pending" && j.op !== "purge" && (
+                  <Button
+                    onClick={() =>
+                      setReview({
+                        kind: "journal-reconcile",
+                        params: { journal_id: j.id },
+                      })
+                    }
+                  >
+                    {ui.reconcile}
                   </Button>
                 )}
               </div>

@@ -64,6 +64,7 @@ pub fn validate(r: &Request) -> Result<()> {
             | "journal-undo"
             | "quarantine-adopt"
             | "quarantine-purge"
+            | "journal-reconcile"
     ) {
         bail!(
             "{}",
@@ -545,6 +546,8 @@ pub enum Action {
     /// carried back to where it came from, or deleted for good.
     Adopt(pc_db::QuarantineFound),
     Abandon(pc_db::QuarantineFound),
+    /// An operation a killed process left half-done, read against the disk.
+    Reconcile(pc_db::JournalEntry),
 }
 impl Action {
     pub fn path(&self) -> &str {
@@ -553,7 +556,7 @@ impl Action {
             Self::Bundle(x) => &x.path,
             Self::Adopt(x) | Self::Abandon(x) => &x.path,
             Self::Move(x) => &x.src,
-            Self::Undo(x) | Self::Purge(x) => &x.src,
+            Self::Undo(x) | Self::Purge(x) | Self::Reconcile(x) => &x.src,
         }
     }
     pub fn source_path(&self) -> &str {
@@ -568,7 +571,7 @@ impl Action {
             Self::Bundle(x) => x.size,
             Self::Move(x) => x.size,
             Self::Adopt(x) | Self::Abandon(x) => x.size,
-            Self::Undo(x) | Self::Purge(x) => x.size,
+            Self::Undo(x) | Self::Purge(x) | Self::Reconcile(x) => x.size,
         }
         .max(0) as u64
     }
@@ -835,12 +838,12 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     actions.push(Action::Abandon(f));
                     continue;
                 }
-                let Some(dst) = pc_core::quarantine_origin(&f.path) else {
+                let Some(dst) = pc_core::quarantine_origin_of(&f.path) else {
                     add_refusal(
                         f.path.clone(),
                         pc_core::tr!(
-                            "Непонятно, откуда этот файл: он не лежит в папке карантина",
-                            "There is no telling where this came from: it is not inside a quarantine folder"
+                            "Непонятно, откуда этот файл: он не лежит в папке карантина, либо собранный карантин не записал свою раскладку",
+                            "There is no telling where this came from: it is not inside a quarantine folder, or a gathered quarantine left no note of its layout"
                         )
                         .into(),
                     );
@@ -898,6 +901,53 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 }
                 items.push(item);
                 actions.push(Action::Undo(e));
+            }
+        }
+        // An operation a killed process left half-done. The journal says what
+        // it meant to move; the disk says how far it got, and the two are
+        // read against each other here rather than left as "check the
+        // journal", which is advice and not an operation.
+        "journal-reconcile" => {
+            let id = num(&r.params, "journal_id", 0);
+            let entry = db
+                .journal_entry(id)?
+                .context(pc_core::tr!("Нет записи журнала", "No such journal entry"))?;
+            let read = pc_apply::reconcile(db, id)?;
+            // Nothing is carried anywhere while one file of the operation is
+            // unaccounted for: a half-reconciled entry is the state this is
+            // meant to get the archive out of.
+            let clear = read.iter().all(|i| {
+                !matches!(
+                    i.standing,
+                    pc_apply::Standing::Both | pc_apply::Standing::Gone
+                )
+            });
+            for item in read {
+                match item.standing {
+                    pc_apply::Standing::Moved => items.push(
+                        json!({"journal_id":id,"path":item.dst,"dst":item.src,"size":0,"file_count":1}),
+                    ),
+                    pc_apply::Standing::Home => {}
+                    pc_apply::Standing::Both => add_refusal(
+                        item.src.clone(),
+                        pc_core::tr!(
+                            "Файл есть и на исходном месте, и в карантине: выберите сами",
+                            "The file is at its source and in quarantine: settle it yourself"
+                        )
+                        .into(),
+                    ),
+                    pc_apply::Standing::Gone => add_refusal(
+                        item.src.clone(),
+                        pc_core::tr!(
+                            "Файла нет ни там, ни там",
+                            "The file is at neither path"
+                        )
+                        .into(),
+                    ),
+                }
+            }
+            if clear {
+                actions.push(Action::Reconcile(entry));
             }
         }
         _ => bail!(
@@ -977,7 +1027,7 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
         items.retain(|i| !blocked.contains(i["path"].as_str().unwrap_or("")));
         actions.retain(|a| {
             let src = match a {
-                Action::Undo(e) => e.dst.as_deref().unwrap_or(&e.src),
+                Action::Undo(e) | Action::Reconcile(e) => e.dst.as_deref().unwrap_or(&e.src),
                 _ => a.path(),
             };
             !blocked.contains(src)
@@ -1046,9 +1096,12 @@ pub fn apply_action(
             }
         }
         Action::Undo(e) => pc_apply::undo(db, e.id)?,
+        Action::Reconcile(e) => {
+            pc_apply::reconcile_undo(db, e.id)?;
+        }
         Action::Purge(e) => pc_apply::purge_entry_controlled(db, e.id, control)?,
         Action::Adopt(f) => {
-            let dst = pc_core::quarantine_origin(&f.path).context(pc_core::tr!(
+            let dst = pc_core::quarantine_origin_of(&f.path).context(pc_core::tr!(
                 "Непонятно, откуда этот файл",
                 "There is no telling where this came from"
             ))?;
@@ -1246,7 +1299,7 @@ pub async fn quarantine_orphans(State(st): State<Arc<AppState>>) -> Response {
             "items": orphans.iter().take(200).map(|f| json!({
                 "path": f.path,
                 "name": pc_core::base_name(&f.path),
-                "restore_to": pc_core::quarantine_origin(&f.path),
+                "restore_to": pc_core::quarantine_origin_of(&f.path),
                 "size": f.size,
                 "mtime": f.mtime,
             })).collect::<Vec<_>>(),

@@ -91,6 +91,29 @@ fn beside(src: &Path) -> Result<PathBuf> {
     Ok(parent.join(pc_core::QUARANTINE_DIR).join(name))
 }
 
+/// Where a file goes inside a gathered quarantine, and the note that says so.
+///
+/// Under the same hidden name the beside-quarantine uses, for two reasons.
+/// The walk knows that name and steps over it, so a later scan cannot index
+/// quarantined files as photographs of the archive — with a plain folder name
+/// it did exactly that. And whatever reads a quarantine afterwards finds it
+/// by the same mark wherever it sits.
+///
+/// Beside the data goes a note of what each disk label stood for. The label
+/// alone — `disk3` — means nothing once the database is gone, and that is
+/// precisely when this has to be readable.
+fn gathered(root: &Path, label: &str, mount: &Path, rel: &Path) -> Result<PathBuf> {
+    let home = root.join(pc_core::QUARANTINE_DIR);
+    pc_core::quarantine_layout::note(&home, label, mount).with_context(|| {
+        pc_core::tf!(
+            "не записать раскладку карантина в {0}",
+            "cannot record the quarantine layout in {0}",
+            home.display()
+        )
+    })?;
+    Ok(home.join(label).join(rel))
+}
+
 /// Where a bundle goes when quarantined.
 ///
 /// Beside itself by default, so the move is a rename and the directory is one
@@ -117,7 +140,7 @@ pub fn quarantine_dest(b: &Bundle, override_root: Option<&Path>) -> Result<PathB
                     )
                 );
             }
-            Ok(root.join(&b.disk).join(rel))
+            gathered(root, &b.disk, &disk.mount, rel)
         }
     }
 }
@@ -154,7 +177,7 @@ pub fn quarantine_dest_for(
                     )
                 );
             }
-            Ok(root.join(&disk.label).join(rel))
+            gathered(root, &disk.label, &disk.mount, rel)
         }
     }
 }
@@ -591,6 +614,154 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
     }
     db.journal_mark_undone(journal_id)?;
     Ok(())
+}
+
+/// What an interrupted operation actually did, item by item.
+///
+/// The journal is written before the disk is touched and finished afterwards,
+/// so a killed process leaves a `pending` row: the list of what it meant to
+/// move, and no word on how far it got. That row is deliberately not offered
+/// as a whole reversible operation — it is not one — and until now that was
+/// the end of it. "Check the journal" is advice, not an operation, and the
+/// files stayed where the interruption left them.
+///
+/// This reads the manifest against the disk and says, for every file, which
+/// of four states it is in. Three of them are answers; one of them is a
+/// question only a person can settle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Standing {
+    /// At its source. Either it never moved, or it has already been brought
+    /// back — nothing to do either way.
+    Home,
+    /// In quarantine and nowhere else: this one moved, and can come back.
+    Moved,
+    /// At both paths. The tool will not choose between two files, and it will
+    /// not overwrite either.
+    Both,
+    /// At neither. Something outside this tool has been here.
+    Gone,
+}
+
+#[derive(Debug, Clone)]
+pub struct Item {
+    pub src: String,
+    pub dst: String,
+    pub standing: Standing,
+}
+
+/// Read a `pending` entry against the disk.
+pub fn reconcile(db: &Db, journal_id: i64) -> Result<Vec<Item>> {
+    let entry = db.journal_entry(journal_id)?.with_context(|| {
+        pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
+    })?;
+    if entry.status != JournalStatus::Pending {
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "запись {0} в состоянии «{1}»: сверять нечего",
+                "entry {0} is “{1}”: there is nothing to reconcile",
+                journal_id,
+                entry.status.as_str()
+            )
+        );
+    }
+    // A purge is not reversible and never was: the bytes it removed are gone,
+    // and an interrupted one leaves nothing to carry back. Saying what is
+    // missing is all this can honestly do, so it does not pretend otherwise.
+    if entry.op.contains("purge") {
+        bail!(
+            "{}",
+            pc_core::tr!(
+                "прерванное окончательное удаление не восстанавливается: проверьте свою резервную копию",
+                "an interrupted permanent deletion cannot be undone: check your own backup"
+            )
+        );
+    }
+    let pairs: Vec<(String, String)> = if entry.manifest.is_empty() {
+        // Written before the journal held a list. One pair is all it knows.
+        let dst = entry.dst.clone().context(pc_core::tr!(
+            "в записи нет пути назначения",
+            "the entry has no destination path"
+        ))?;
+        vec![(entry.src.clone(), dst)]
+    } else {
+        entry
+            .manifest
+            .iter()
+            .map(|m| (m.src.clone(), m.dst.clone()))
+            .collect()
+    };
+    Ok(pairs
+        .into_iter()
+        .map(|(src, dst)| {
+            let standing = match (Path::new(&src).exists(), Path::new(&dst).exists()) {
+                (true, true) => Standing::Both,
+                (true, false) => Standing::Home,
+                (false, true) => Standing::Moved,
+                (false, false) => Standing::Gone,
+            };
+            Item { src, dst, standing }
+        })
+        .collect())
+}
+
+/// Bring back what an interrupted operation moved, and close its entry.
+///
+/// Only the unambiguous ones. A file sitting at both paths is two files, and
+/// choosing between them is not this tool's decision; a file at neither is
+/// not this tool's doing. Either of those leaves the entry `pending`, which
+/// is what it is, with the reason written down.
+pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Vec<Item>> {
+    let items = reconcile(db, journal_id)?;
+    let unclear: Vec<&Item> = items
+        .iter()
+        .filter(|i| matches!(i.standing, Standing::Both | Standing::Gone))
+        .collect();
+    if !unclear.is_empty() {
+        let why = unclear
+            .iter()
+            .map(|i| match i.standing {
+                Standing::Both => pc_core::tf!(
+                    "{0} — файл есть и на исходном месте, и в карантине",
+                    "{0} — the file is at its source and in quarantine",
+                    i.src
+                ),
+                _ => pc_core::tf!(
+                    "{0} — файла нет ни там, ни там",
+                    "{0} — the file is at neither path",
+                    i.src
+                ),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        db.journal_finish(journal_id, JournalStatus::Pending, Some(&why))?;
+        bail!("{why}");
+    }
+    for item in items.iter().filter(|i| i.standing == Standing::Moved) {
+        rename_with_parents(Path::new(&item.dst), Path::new(&item.src))?;
+    }
+    let entry = db.journal_entry(journal_id)?.expect("read a moment ago");
+    if entry.op == "quarantine-file" {
+        if let Some(id) = db.file_id_at(&entry.src)? {
+            db.set_file_state(id, "present")?;
+        }
+    } else if entry.op == "quarantine" {
+        if let Some(id) = db.bundle_id_at(&entry.src)? {
+            db.set_bundle_state(id, BundleState::Present)?;
+        }
+    }
+    // Nothing of this operation is left in quarantine, which is what `undone`
+    // says. It never finished, and the note keeps that fact.
+    db.journal_finish(
+        journal_id,
+        JournalStatus::Done,
+        Some(pc_core::tr!(
+            "прерванная операция сверена по манифесту и отменена",
+            "an interrupted operation was reconciled against its manifest and undone"
+        )),
+    )?;
+    db.journal_mark_undone(journal_id)?;
+    Ok(items)
 }
 
 /// Permanently remove quarantined data older than `older_than_secs`.

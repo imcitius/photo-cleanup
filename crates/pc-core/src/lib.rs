@@ -447,6 +447,21 @@ mod prune_tests {
 /// Our own quarantine directory, so a rescan never re-reports quarantined data.
 pub const QUARANTINE_DIR: &str = ".photo-cleanup-quarantine";
 
+/// The file a gathered quarantine keeps beside its contents, saying where
+/// those contents came from.
+///
+/// A quarantine beside each file needs nothing written down: the way out is
+/// the folder above the hidden one, and the path itself carries it. A
+/// gathered one does not — it holds `<label>/<path from that disk's mount>`,
+/// and the label is a short name like `disk3` that means nothing without the
+/// mount point it stood for. Guessing was how a file came home to
+/// `collected/root/<its own old absolute path>`: bytes intact, address
+/// invented.
+///
+/// So the layout says what it is, next to the data, and a database is not
+/// needed to read it back.
+pub const QUARANTINE_LAYOUT: &str = "where-these-came-from.json";
+
 /// Where a path inside a quarantine folder came from.
 ///
 /// Quarantine is a hidden folder beside the file, and what went in kept the
@@ -459,6 +474,41 @@ pub const QUARANTINE_DIR: &str = ".photo-cleanup-quarantine";
 ///
 /// `None` when the path is not inside a quarantine folder at all: nothing
 /// should be moved on a guess.
+/// Where a quarantined file came from, reading a gathered quarantine's note
+/// when the path turns out to be in one.
+///
+/// A quarantine beside each file carries its own answer in the path. A
+/// gathered one carries a disk label instead, which stands for a mount point
+/// only its note remembers — so that is read, and when it says nothing the
+/// answer is nothing. A path invented from a label is a file brought home to
+/// an address that never existed.
+pub fn quarantine_origin_of(path: &str) -> Option<String> {
+    let inside = quarantine_inside(path)?;
+    let home = std::path::Path::new(&path[..inside.0]).join(QUARANTINE_DIR);
+    let disks = quarantine_layout::read(&home);
+    if disks.is_empty() {
+        return quarantine_origin(path);
+    }
+    let rest = trim_leading_separators(&path[inside.1..]);
+    quarantine_layout::origin(&disks, std::path::Path::new(rest)).map(|p| p.display().to_string())
+}
+
+/// The byte offsets around the quarantine component of a path: where the part
+/// above it ends, and where the part below it starts.
+fn quarantine_inside(path: &str) -> Option<(usize, usize)> {
+    let mut found = None;
+    let mut start = 0;
+    for (i, ch) in path.char_indices() {
+        if SEPARATORS.contains(&ch) {
+            if &path[start..i] == QUARANTINE_DIR {
+                found = Some((start, i + ch.len_utf8()));
+            }
+            start = i + ch.len_utf8();
+        }
+    }
+    found
+}
+
 pub fn quarantine_origin(path: &str) -> Option<String> {
     // The last quarantine component wins: quarantine inside quarantine is
     // still a path whose way out is the innermost folder. Working in byte
@@ -551,3 +601,61 @@ mod plural_tests {
 }
 
 pub mod work;
+
+/// What a gathered quarantine says about itself.
+///
+/// Read from `QUARANTINE_LAYOUT` beside the data. Missing or unreadable means
+/// "this is not a gathered quarantine, or nothing recorded it" — and then the
+/// way home is not guessed.
+pub mod quarantine_layout {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    /// Where each disk label the gathered quarantine uses was mounted.
+    pub type Disks = BTreeMap<String, String>;
+
+    fn file(root: &Path) -> PathBuf {
+        root.join(super::QUARANTINE_LAYOUT)
+    }
+
+    pub fn read(root: &Path) -> Disks {
+        std::fs::read_to_string(file(root))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    /// Record that this label stood for this mount point.
+    ///
+    /// Written before the first file of a disk lands and left alone
+    /// afterwards, so the note is there for anything that arrives later — and
+    /// so a reader finds it whatever order the moves happened in.
+    pub fn note(root: &Path, label: &str, mount: &Path) -> std::io::Result<()> {
+        let mut disks = read(root);
+        let mount = mount.display().to_string();
+        if disks.get(label).map(String::as_str) == Some(mount.as_str()) {
+            return Ok(());
+        }
+        disks.insert(label.to_string(), mount);
+        std::fs::create_dir_all(root)?;
+        let body = serde_json::to_string_pretty(&disks)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(file(root), body)
+    }
+
+    /// The path a file under a gathered quarantine came from.
+    ///
+    /// `rest` is what lies below the gathered root: `<label>/<path from that
+    /// disk's mount>`. Without a note for that label there is no answer, and
+    /// inventing one is worse than saying so.
+    pub fn origin(disks: &Disks, rest: &Path) -> Option<PathBuf> {
+        let mut parts = rest.components();
+        let label = parts.next()?.as_os_str().to_str()?;
+        let mount = disks.get(label)?;
+        let tail = parts.as_path();
+        if tail.as_os_str().is_empty() {
+            return None;
+        }
+        Some(Path::new(mount).join(tail))
+    }
+}

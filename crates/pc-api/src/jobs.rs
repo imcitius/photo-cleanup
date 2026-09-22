@@ -42,6 +42,7 @@ pub fn destructive(kind: &str) -> bool {
             | "journal-undo"
             | "quarantine-adopt"
             | "quarantine-purge"
+            | "journal-reconcile"
     )
 }
 /// A gap held open between releasing the writer and recording the terminal
