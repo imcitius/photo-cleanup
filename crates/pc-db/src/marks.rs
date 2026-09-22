@@ -148,10 +148,13 @@ impl Marks {
 
     /// True when this folder is marked in its own right, rather than covered
     /// by one further up.
+    /// However either of them is spelled: a folder named with forward slashes
+    /// and the same folder as the index writes it are one folder, and
+    /// comparing the two strings says otherwise on Windows.
     pub fn marked(&self, path: &str, scope: MarkScope) -> bool {
         self.marks
             .iter()
-            .any(|m| m.scope == scope && m.path == path)
+            .any(|m| m.scope == scope && pc_core::same_folder(&m.path, path))
     }
 }
 

@@ -1694,11 +1694,11 @@ struct Node {
 /// the tree shows a folder as covered while the rule says its files are not.
 /// A path under no configured root keeps its own name and is its own relative
 /// form, leading separator and all.
-fn split_root<'a>(roots: &'a [String], path: &'a str) -> (&'a str, &'a str) {
+fn split_root<'a>(roots: &'a [String], path: &str) -> (&'a str, String) {
     roots
         .iter()
-        .find_map(|r| pc_core::relative_to(path, r).map(|rest| (r.as_str(), rest)))
-        .unwrap_or(("", path))
+        .find_map(|r| pc_core::relative_key(path, r).map(|rest| (r.as_str(), rest)))
+        .unwrap_or(("", path.to_string()))
 }
 
 /// Where every file sits: its root, and its path below that root.
@@ -1707,14 +1707,14 @@ fn split_root<'a>(roots: &'a [String], path: &'a str) -> (&'a str, &'a str) {
 /// cheap and doing it sixty thousand times over is not, and the tree, the
 /// file listing and the per-mark counts all ask the same question about the
 /// same files.
-fn split_all<'a>(roots: &'a [String], files: &'a [pc_db::TreeFile]) -> Vec<(&'a str, &'a str)> {
+fn split_all<'a>(roots: &'a [String], files: &[pc_db::TreeFile]) -> Vec<(&'a str, String)> {
     files.iter().map(|f| split_root(roots, &f.path)).collect()
 }
 
-fn merged_tree(files: &[pc_db::TreeFile], split: &[(&str, &str)]) -> HashMap<String, Node> {
+fn merged_tree(files: &[pc_db::TreeFile], split: &[(&str, String)]) -> HashMap<String, Node> {
     let mut nodes: HashMap<String, Node> = HashMap::new();
     for (f, (root, rel)) in files.iter().zip(split) {
-        let (root, rel) = (*root, *rel);
+        let root = *root;
         let mut dir = pc_core::dir_name(rel);
         nodes.entry(dir.to_string()).or_default().here += 1;
         loop {

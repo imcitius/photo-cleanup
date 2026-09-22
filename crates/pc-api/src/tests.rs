@@ -1317,6 +1317,21 @@ async fn one_mark_settles_the_same_folder_on_every_disk_of_an_array() {
     assert_eq!(node["node"]["marked"], true, "{node}");
     assert_eq!(node["node"]["roots"].as_array().unwrap().len(), 2, "{node}");
 
+    // Asked for again by the spelling the tree itself hands back, which on a
+    // Windows server is not the spelling this test typed. A node that answers
+    // to one and not the other is a node the browser can draw and then fail
+    // to open.
+    let echoed = node["node"]["path"].as_str().unwrap().to_string();
+    let (_, same) = f
+        .req(
+            "GET",
+            &format!("/api/tree?path={}", urlencoding(&echoed)),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(same["node"]["roots"].as_array().unwrap().len(), 2, "{same}");
+    assert_eq!(same["node"]["marked"], true, "{same}");
+
     let (_, listing) = f
         .req(
             "GET",

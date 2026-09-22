@@ -231,6 +231,30 @@ pub fn under(path: &str, dir: &str) -> bool {
     relative_to(path, dir).is_some()
 }
 
+/// The path below `dir`, spelled the one way this tool keys things by.
+///
+/// The components of a relative path are plain names; the separator between
+/// them is an accident of the machine the archive was read on. And a relative
+/// path here is a *key* — a node of the tree, a rule written into the
+/// database — so `D\театр` on one machine and `D/театр` on another have to be
+/// one key, or the tree finds no node where it has just drawn one.
+///
+/// A path relative to nothing is itself, spelled as it was stored: there the
+/// answer is a real path and not a key.
+pub fn relative_key(path: &str, dir: &str) -> Option<String> {
+    let rest = relative_to(path, dir)?;
+    Some(if trim_trailing_separators(dir).is_empty() {
+        rest.to_string()
+    } else {
+        path_parts(rest).join("/")
+    })
+}
+
+/// True when two paths name the same folder, however each of them is spelled.
+pub fn same_folder(a: &str, b: &str) -> bool {
+    relative_to(a, b).is_some_and(str::is_empty)
+}
+
 /// A root and a path below it, joined the way this platform writes paths.
 ///
 /// Not `format!("{root}/{rel}")`: on Windows that produces `C:\\archive/D`,
@@ -244,11 +268,14 @@ pub fn join_path(root: &str, rel: &str) -> String {
     if root.is_empty() {
         return rel.to_string();
     }
-    let rel = trim_leading_separators(rel);
-    if rel.is_empty() {
+    // The tail is plain names, and it arrives keyed with forward slashes
+    // whatever this platform writes. Pasting it on unchanged would produce
+    // `C:\archive\D/театр`, which no file in the index is ever called.
+    let tail = path_parts(rel).join(std::path::MAIN_SEPARATOR_STR);
+    if tail.is_empty() {
         return root.to_string();
     }
-    format!("{root}{}{rel}", std::path::MAIN_SEPARATOR)
+    format!("{root}{}{tail}", std::path::MAIN_SEPARATOR)
 }
 
 /// A path with its leading separators removed, as after stripping a root off
@@ -383,6 +410,29 @@ mod path_tests {
             ("/foto/2019", r"a\b.jpg")
         );
         assert_eq!(path_parts(r"/foto/a\b"), ["foto", r"a\b"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_relative_key_is_spelled_one_way_whatever_the_path_was() {
+        // The failure this exists for: the tree keyed a node `D\театр`, the
+        // browser asked for `D/театр`, and the lookup — a string comparison —
+        // missed. The node came back marked, with no files, no disks and no
+        // children, all at once.
+        assert_eq!(
+            relative_key(r"C:\archive\D\театр\a.jpg", r"C:\archive"),
+            Some("D/театр/a.jpg".to_string())
+        );
+        // However the root itself was typed, and whatever case it was typed in.
+        assert_eq!(
+            relative_key(r"C:\archive\D\театр", "c:/ARCHIVE"),
+            Some("D/театр".to_string())
+        );
+        // And the way back is spelled the way the index writes paths, not the
+        // way the key is kept.
+        assert_eq!(join_path(r"C:\archive", "D/театр"), r"C:\archive\D\театр");
+        assert!(same_folder(r"C:\archive\D", "C:/archive/D/"));
+        assert!(!same_folder(r"C:\archive\D", r"C:\archive\D2"));
     }
 
     #[cfg(windows)]
