@@ -1,5 +1,10 @@
 import { t } from "./i18n";
 import { ReviewDecisions } from "./review-decisions";
+import {
+  savedPlanSource,
+  savePlanSource,
+  type PlanSource,
+} from "./plan-source";
 import { useEffect, useState } from "react";
 import { api, post, useResource } from "./api";
 import {
@@ -699,39 +704,55 @@ export function Policy({
   const [roles, setRoles] = useState(["copy"]),
     [resize, setResize] = useState(2),
     [allow, setAllow] = useState(false),
-    [reviewed, setReviewed] = useState(
-      sessionStorage.getItem("pc-reviewed-plan") === "true",
-    );
+    [source, setSource] = useState<PlanSource>(savedPlanSource);
+  const reviewed = source === "reviewed",
+    originals = source === "originals";
+  const chooseSource = (source: PlanSource) => {
+    setSource(source);
+    savePlanSource(source);
+  };
   return (
     <>
       <Notice>{ui.quarantineExplained}</Notice>
-      <div className="segmented plan-source-tabs">
-        <Button
-          kind={reviewed ? "selected" : ""}
-          aria-pressed={reviewed}
-          onClick={() => {
-            setReviewed(true);
-            sessionStorage.setItem("pc-reviewed-plan", "true");
-          }}
-        >
-          {t("rq_reviewed_plan")}
-        </Button>
-        <Button
-          kind={!reviewed ? "selected" : ""}
-          aria-pressed={!reviewed}
-          onClick={() => {
-            setReviewed(false);
-            sessionStorage.setItem("pc-reviewed-plan", "false");
-          }}
-        >
-          {t("rq_suggested_plan")}
-        </Button>
+      <div
+        className="segmented plan-source-tabs"
+        role="group"
+        aria-label={t("plan_source")}
+      >
+        {(
+          [
+            ["reviewed", t("rq_reviewed_plan")],
+            ["originals", t("plan_originals")],
+            ["automatic", t("rq_suggested_plan")],
+          ] as const
+        ).map(([value, label]) => (
+          <Button
+            key={value}
+            kind={source === value ? "selected" : ""}
+            aria-pressed={source === value}
+            onClick={() => chooseSource(value)}
+          >
+            {label}
+          </Button>
+        ))}
       </div>
       {reviewed ? (
         <>
           <Notice>{t("rq_reviewed_help")}</Notice>
           <ReviewDecisions revision={revision} />
         </>
+      ) : originals ? (
+        <Notice>
+          <p>{t("plan_originals_help")}</p>
+          <Button
+            icon="folder"
+            onClick={() => {
+              location.hash = "tree";
+            }}
+          >
+            {t("plan_edit_originals")}
+          </Button>
+        </Notice>
       ) : (
         <section className="panel">
           <h3>{t("kakie_versii_perenosit")}</h3>
@@ -799,10 +820,11 @@ export function Policy({
       <Review
         kind="plan-apply"
         params={{
-          roles: reviewed ? ["copy"] : roles,
+          roles: reviewed || originals ? ["copy"] : roles,
           reviewed_only: reviewed,
+          originals,
           resize_below: Math.round(resize * 1e6),
-          allow_lightroom: reviewed ? false : allow,
+          allow_lightroom: reviewed || originals ? false : allow,
         }}
         start={start}
         disabled={disabled}

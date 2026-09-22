@@ -178,7 +178,6 @@ function App() {
         <Tree
           revision={jobs.revision}
           disabled={!!jobs.active}
-          start={jobs.start}
           onChange={jobs.refresh}
         />
       );

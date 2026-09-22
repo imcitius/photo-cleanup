@@ -27,8 +27,7 @@ import {
 import { ImageViewer } from "./curation";
 import { bytes, number, t, ui } from "./i18n";
 import type { TreeFiles, TreeNode, TreeRoot, TreeView } from "./types";
-import { Review } from "./workflow";
-import type { Start } from "./workflow";
+import { openPlan } from "./plan-source";
 
 /** Where the last visit left off, so a reload does not start at the top. */
 const LAST = "pc-tree-path";
@@ -80,12 +79,10 @@ function rows(node: TreeNode | null, open: Set<string>, depth = 0) {
 export function Tree({
   revision,
   disabled,
-  start,
   onChange,
 }: {
   revision: number;
   disabled: boolean;
-  start: Start;
   onChange: () => void;
 }) {
   const [tree, setTree] = useState<TreeNode | null>(null),
@@ -525,24 +522,29 @@ export function Tree({
         </section>
       </div>
 
-      <section className="panel">
+      <section
+        className="panel tree-plan-step"
+        aria-label={t("tree_next_step")}
+      >
         <div className="section-heading">
           <div>
-            <h3>{ui.tree.quarantine}</h3>
-            <p className="muted">{ui.tree.quarantineHelp}</p>
+            <h3>{t("tree_next_step")}</h3>
+            <p className="muted">{t("tree_plan_help")}</p>
           </div>
+          <Button
+            kind="primary"
+            icon="arrow"
+            disabled={!view?.marks.length || busy}
+            onClick={() => openPlan("originals")}
+          >
+            {t("tree_open_plan")}
+          </Button>
         </div>
-        {view?.marks.length ? (
-          <Review
-            kind="plan-apply"
-            params={{ roles: ["copy"], originals: true }}
-            disabled={disabled}
-            start={start}
-            refresh={revision + nonce}
-          />
-        ) : (
-          <p className="muted">{ui.tree.quarantineNoMarks}</p>
-        )}
+        <p className="muted">
+          {view?.marks.length
+            ? t("tree_plan_scope", number(view.marks.length))
+            : t("tree_plan_empty")}
+        </p>
       </section>
 
       {viewing !== null && !!images.length && (

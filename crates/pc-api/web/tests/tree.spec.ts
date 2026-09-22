@@ -43,6 +43,7 @@ test("one mark on the merged tree clears the copies on every disk", async ({
     [
       [11, 5, 7, 17, 19, 3],
       [37, 2, 3, 43, 29, 53],
+      [71, 13, 23, 97, 41, 61],
     ].map(([a, b, c2, d, e, f]) => {
       const c = document.createElement("canvas");
       c.width = 480;
@@ -63,6 +64,12 @@ test("one mark on the merged tree clears the copies on every disk", async ({
     writeFileSync(copies[n], bytes);
   });
 
+  // An unmarked group belongs to automatic suggestions, but not this handoff.
+  const unrelated = join(disks[0], "Other");
+  mkdirSync(unrelated, { recursive: true });
+  for (const name of ["one.jpg", "two.jpg"])
+    writeFileSync(join(unrelated, name), Buffer.from(shots[2], "base64"));
+
   await request.put("/api/settings", { data: { roots: disks } });
   await request.post("/api/jobs", {
     data: { kind: "all", params: { roots: disks, min_size: 0 } },
@@ -78,6 +85,13 @@ test("one mark on the merged tree clears the copies on every disk", async ({
   // holding the answer it was given then.
   await page.reload();
   await expect(page.getByText("No folder is marked yet")).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Review originals’ copy plan",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  await expect(page.locator(".plan-explorer")).toHaveCount(0);
   // Two roots, one structure: the tree says so, and `D` is one node.
   await expect(page.getByText("The archive’s disks")).toBeVisible();
   await expect(page.locator('[data-path="D"]')).toHaveCount(1);
@@ -120,9 +134,57 @@ test("one mark on the merged tree clears the copies on every disk", async ({
     page.getByRole("region", { name: "Your saved decisions" }),
   ).toContainText(good);
   await page.goto("/#tree");
-
   await page.reload();
-
+  await expect(page.locator(".plan-explorer")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Move to quarantine", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText("Marked folders: 1.", { exact: false }),
+  ).toBeVisible();
+  for (const width of [320, 768, 1440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    const step = page.getByRole("region", { name: "Next: review the copies" });
+    expect(await step.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(
+      true,
+    );
+  }
+  await page.screenshot({
+    path: `test-results/tree-handoff-${info.project.name}.png`,
+    fullPage: true,
+  });
+  const preview = page.waitForRequest(
+    (r) => r.url().endsWith("/api/preview") && r.method() === "POST",
+  );
+  await page
+    .getByRole("button", { name: "Review originals’ copy plan", exact: true })
+    .click();
+  expect((await preview).postDataJSON().params).toMatchObject({
+    originals: true,
+    reviewed_only: false,
+    roles: ["copy"],
+    allow_lightroom: false,
+  });
+  await expect(page).toHaveURL(/#plan$/);
+  const originals = page.getByRole("button", {
+    name: "Originals folders",
+    exact: true,
+  });
+  await expect(originals).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".plan-row")).toHaveCount(2);
+  await page.reload();
+  await expect(originals).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".plan-row")).toHaveCount(2);
+  await page
+    .getByRole("button", { name: "Automatic suggestions", exact: true })
+    .click();
+  await expect(page.locator(".plan-row")).toHaveCount(3);
+  await originals.click();
+  await expect(page.locator(".plan-row")).toHaveCount(2);
+  await page.screenshot({
+    path: `test-results/originals-plan-${info.project.name}.png`,
+    fullPage: true,
+  });
   await page
     .getByRole("button", { name: "Move to quarantine", exact: true })
     .click();
@@ -136,6 +198,12 @@ test("one mark on the merged tree clears the copies on every disk", async ({
     expect(existsSync(join(disk, good, "IMG.JPG"))).toBe(true);
   }
 
+  expect(existsSync(join(unrelated, "one.jpg"))).toBe(true);
+  expect(existsSync(join(unrelated, "two.jpg"))).toBe(true);
+  await page
+    .getByRole("button", { name: "Choose originals folders", exact: true })
+    .click();
+  await expect(page).toHaveURL(/#tree$/);
   // One mark for the pair of them, and it survives the page: it is a rule
   // about the archive rather than a press that has been spent.
   await page.reload();

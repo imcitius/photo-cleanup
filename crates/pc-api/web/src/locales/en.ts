@@ -123,11 +123,6 @@ export const ui = {
     fromIndex:
       "The tree is built from the index: only what has been scanned is here. Nothing on disk is touched — a mark only changes which version of a shot the archive treats as the main one.",
     original: "original",
-    quarantine: "Move the originals’ duplicates out",
-    quarantineHelp:
-      "What goes to quarantine is the exact copies of what the marked folders hold, wherever in the archive they lie. Other versions of a shot stay: only a person can tell those apart, and the “Duplicates and versions” page is where that is done.",
-    quarantineNoMarks:
-      "Mark at least one folder as holding the originals first: until then there is nothing to move.",
   },
   loading: "Loading…",
   retry: "Try again",
@@ -299,6 +294,20 @@ export const ui = {
 } as const satisfies Shape<typeof ru>;
 
 export const messages = {
+  tree_next_step: "Next: review the copies",
+  tree_plan_help:
+    "Mark the folders holding your originals here. On Plan and move, check which copies can move, which files stay and why. Moving requires a separate confirmation there.",
+  tree_open_plan: "Review originals’ copy plan",
+  tree_plan_scope:
+    "Marked folders: {0}. The plan covers all of them across the archive, regardless of the folder currently open above.",
+  tree_plan_empty:
+    "First open a folder holding your originals and choose “The originals are here”.",
+  plan_source: "Plan source",
+  plan_originals: "Originals folders",
+  plan_originals_help:
+    "Exact copies of files in all marked originals folders, wherever those copies are stored. The originals stay. Search and folder selection narrow the view; confirmation applies the entire plan shown by its totals.",
+  plan_edit_originals: "Choose originals folders",
+
   rq_browse: "Browse photographs",
   rq_folder_tree: "Folders with groups",
   rq_expand_folder: "Expand or collapse {0}",
@@ -391,7 +400,8 @@ export const messages = {
   pe_folders: "Folders",
   pe_all_folders: "All folders",
   pe_up: "Up one level",
-  pe_folder_scope: "Source folders, including subfolders.",
+  pe_folder_scope:
+    "Only folders represented in this plan, including subfolders. Paths show the actual disk.",
   pe_results: "Results: {0}",
   pe_results_list: "Plan files and refusals",
   pe_no_results:

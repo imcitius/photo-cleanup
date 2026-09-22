@@ -2551,6 +2551,16 @@ kbd {
     position: static;
   }
 }
+.tree-plan-step .section-heading {
+  flex-wrap: wrap;
+}
+.tree-plan-step .section-heading > div {
+  flex: 1 1 320px;
+}
+.tree-plan-step .button {
+  white-space: normal;
+  text-align: left;
+}
 .mark-help {
   margin: 0 0 14px;
   font-size: 12px;

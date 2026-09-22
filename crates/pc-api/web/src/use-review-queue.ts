@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { post, useDebounce, useResource } from "./api";
 import type { Family } from "./types";
 import { t } from "./i18n";
+import { openPlan, savePlanSource } from "./plan-source";
 
 export type Decision = "plan" | "keep" | "defer";
 export interface ReviewGroup extends Family {
@@ -34,8 +35,7 @@ interface Undo {
 }
 
 export function openReviewedPlan() {
-  sessionStorage.setItem("pc-reviewed-plan", "true");
-  location.hash = "plan";
+  openPlan("reviewed");
 }
 export function useReviewQueue(
   revision: number,
@@ -147,7 +147,7 @@ export function useReviewQueue(
       setNote(t("rq_not_eligible"));
       return;
     }
-    if (state === "plan") sessionStorage.setItem("pc-reviewed-plan", "true");
+    if (state === "plan") savePlanSource("reviewed");
     return mutate(`/review/${current.id}`, {
       state,
       token: current.review_token,
