@@ -384,10 +384,14 @@ mod path_tests {
 
     #[test]
     fn a_root_and_a_folder_join_the_way_the_platform_writes_paths() {
+        // Every seam, not only the first. The tail arrives keyed with forward
+        // slashes whatever this platform writes, and pasting it on unchanged
+        // produced `C:\archive\D/театр` — a path no file is ever called. The
+        // root keeps whatever spelling it was given: it is a real path.
         let sep = std::path::MAIN_SEPARATOR;
         assert_eq!(
             join_path("/mnt/disk1", "D/театр"),
-            format!("/mnt/disk1{sep}D/театр")
+            format!("/mnt/disk1{sep}D{sep}театр")
         );
         assert_eq!(join_path("/mnt/disk1/", "/D"), format!("/mnt/disk1{sep}D"));
         assert_eq!(join_path("/mnt/disk1", ""), "/mnt/disk1");
