@@ -421,6 +421,20 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE original_folders ADD COLUMN scope TEXT NOT NULL DEFAULT 'absolute';
     "#,
+    // 019 — review choices survive rebuilding families; undo detects later edits.
+    r#"
+    CREATE TABLE review_history(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        before_json TEXT NOT NULL,
+        undone INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE review_choices(
+        file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        state TEXT NOT NULL CHECK(state IN ('plan','keep','defer')),
+        snapshot TEXT NOT NULL,
+        operation INTEGER NOT NULL REFERENCES review_history(id)
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

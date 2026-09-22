@@ -8,6 +8,7 @@ pub mod originals;
 pub mod perceptual;
 pub mod plan;
 pub mod quality;
+pub mod review;
 pub mod roles;
 pub mod series;
 pub mod unionfind;

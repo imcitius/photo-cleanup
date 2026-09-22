@@ -4,6 +4,7 @@ pub mod files;
 pub mod marks;
 pub mod model;
 pub mod organize;
+pub mod review;
 pub mod schema;
 
 pub use files::{
@@ -93,6 +94,8 @@ impl Db {
         // take a curator's decisions with it.
         self.conn.execute_batch(
             "BEGIN;
+             DELETE FROM review_choices;
+             DELETE FROM review_history;
              DELETE FROM manual_keepers;
              DELETE FROM manual_splits;
              DELETE FROM manual_best;

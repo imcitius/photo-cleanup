@@ -76,11 +76,27 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .getByRole("navigation")
     .getByRole("link", { name: "Duplicates and versions", exact: true })
     .click();
-  await expect(page.locator(".member")).toHaveCount(2);
+  await expect(page.locator(".queue-file")).toHaveCount(2);
   await page.screenshot({
     path: `test-results/families-${info.project.name}.png`,
     fullPage: true,
   });
+
+  await page.keyboard.press("d");
+  await expect(
+    page.getByRole("heading", { name: "No groups in this queue" }),
+  ).toBeVisible();
+  await page.reload();
+  await page
+    .getByRole("combobox", { name: "Queue", exact: true })
+    .selectOption("defer");
+  await expect(page.locator(".queue-file")).toHaveCount(2);
+  await page.getByRole("button", { name: /Add copies to plan A/ }).click();
+  await expect(
+    page.getByRole("heading", { name: "No groups in this queue" }),
+  ).toBeVisible();
+  expect(existsSync(join(archive, "Backup", "20190714_183200.jpg"))).toBe(true);
+
   await page
     .getByRole("navigation")
     .getByRole("link", { name: "Plan and move", exact: true })
@@ -188,9 +204,12 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .getByRole("navigation")
     .getByRole("link", { name: "Plan and move", exact: true })
     .click();
-  await expect(
-    page.getByRole("button", { name: "Companions · 1", exact: true }),
-  ).toBeVisible();
+  const companions = page.locator(".explorer-detail summary");
+  await expect(companions).toHaveText("Companions · 1");
+  await companions.click();
+  await expect(page.locator(".explorer-companion")).toContainText(
+    "20190714_183200.xmp",
+  );
   await page
     .getByRole("button", { name: "Move to quarantine", exact: true })
     .click();

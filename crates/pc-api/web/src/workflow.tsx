@@ -1,4 +1,5 @@
 import { t } from "./i18n";
+import { PlanExplorer } from "./plan-explorer";
 import { useEffect, useState } from "react";
 import { api, post, useDebounce, useResource } from "./api";
 import {
@@ -590,10 +591,12 @@ export function Review({
                       : ui.move}
               </Button>
             </section>
-            {plan.items.length > 0 && (
+            {kind !== "plan-apply" && plan.items.length > 0 && (
               <p className="muted">{ui.planColumnsHelp}</p>
             )}
-            {plan.items.length === 0 ? (
+            {kind === "plan-apply" ? (
+              <PlanExplorer key={plan.token} plan={plan} />
+            ) : plan.items.length === 0 ? (
               <Empty title={ui.noCandidates}>
                 {t("izmenite_parametry_ili_proverte_prichiny_otkazov_nizhe")}
               </Empty>
@@ -622,16 +625,22 @@ export function Review({
             ) : (
               <PlanRows items={plan.items} />
             )}
-            <div className="section-heading">
-              <h3>{ui.refusals}</h3>
-              <span className="muted">{number(plan.refusals.length)}</span>
-            </div>
-            {plan.refusals.length ? (
-              <Refusals items={plan.refusals} />
-            ) : (
-              <p className="muted">
-                {t("otkazov_net_proverki_povtoryatsya_pered_kazhdym_perenosom")}
-              </p>
+            {kind !== "plan-apply" && (
+              <>
+                <div className="section-heading">
+                  <h3>{ui.refusals}</h3>
+                  <span className="muted">{number(plan.refusals.length)}</span>
+                </div>
+                {plan.refusals.length ? (
+                  <Refusals items={plan.refusals} />
+                ) : (
+                  <p className="muted">
+                    {t(
+                      "otkazov_net_proverki_povtoryatsya_pered_kazhdym_perenosom",
+                    )}
+                  </p>
+                )}
+              </>
             )}
           </>
         )

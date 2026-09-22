@@ -1176,6 +1176,16 @@ async fn a_narrowed_plan_still_says_why_a_file_is_not_moving() {
             .collect::<Vec<_>>()
     };
     assert!(!why(&whole).is_empty(), "{whole}");
+    // Refused files remain inspectable, not just a wall of reasons.
+    for refusal in whole["refusals"].as_array().unwrap() {
+        let id = refusal["file_id"]
+            .as_i64()
+            .expect("refusal identifies its photo");
+        let db = f.state.db.lock().unwrap();
+        let file = db.file(id).unwrap().unwrap();
+        assert_eq!(refusal["path"], file.path);
+        assert_eq!(refusal["thumb"], json!(file.thumb_key));
+    }
 
     let scoped = f
         .preview("plan-apply", json!({"roles":["copy"],"family_id":group}))
@@ -1796,3 +1806,6 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+#[path = "review_tests.rs"]
+mod review_tests;

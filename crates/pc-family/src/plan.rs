@@ -105,7 +105,7 @@ pub struct Scope {
 
 /// What a file has to match to be called a copy of another. One model, the
 /// same one the roles were assigned with — see `pc_db::Identity`.
-fn identity(r: &PlanRow) -> Option<pc_db::Identity<'_>> {
+pub(crate) fn identity(r: &PlanRow) -> Option<pc_db::Identity<'_>> {
     pc_db::Identity::of(
         r.content_hash.as_ref(),
         r.pixel_hash.as_ref(),
@@ -119,6 +119,41 @@ pub fn compute(db: &Db, policy: &Policy) -> Result<Plan> {
 }
 
 pub fn compute_scoped(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
+    let mut plan = compute_before_review(db, policy, scope)?;
+    let choices = db.review_choices()?;
+    let mut kept = Vec::new();
+    plan.candidates.retain(|c| {
+        if let Some(choice) = choices.get(&c.file_id).filter(|v| v.state != "plan") {
+            kept.push(Refusal {
+                file_id: c.file_id,
+                family_id: c.family_id,
+                path: c.path.clone(),
+                group_keeper: c.group_keeper.clone(),
+                why: if choice.state == "keep" {
+                    "Kept by the reviewer"
+                } else {
+                    "Deferred by the reviewer"
+                }
+                .into(),
+            });
+            false
+        } else {
+            true
+        }
+    });
+    plan.refusals.extend(kept);
+    plan.refusals.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(plan)
+}
+
+// Review proposes choices with the same safety gates, before applying earlier
+// keep/defer marks. No caller outside this crate can bypass those marks.
+pub(crate) fn compute_before_review(db: &Db, policy: &Policy, scope: &Scope) -> Result<Plan> {
+    anyhow::ensure!(
+        !policy.remove_roles.contains(&Role::Original),
+        "The original role cannot be removed"
+    );
+
     let rows = db.plan_rows_scoped(
         scope.family,
         scope.folder.as_deref(),

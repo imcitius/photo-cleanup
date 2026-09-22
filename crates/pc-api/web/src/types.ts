@@ -190,7 +190,12 @@ export interface Preview {
   params: Record<string, unknown>;
   token: string;
   items: PlanItem[];
-  refusals: { path: string; why: string }[];
+  refusals: {
+    path: string;
+    why: string;
+    file_id?: number;
+    thumb?: string | null;
+  }[];
   total_files: number;
   total_bytes: number;
 }

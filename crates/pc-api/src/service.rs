@@ -630,7 +630,11 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     .and_then(Value::as_str)
                     .map(str::to_string),
             };
-            let mut plan = pc_family::plan::compute_scoped(db, &policy, &scope)?;
+            let mut plan = if flag(&r.params, "reviewed_only") {
+                pc_family::review::reviewed_plan(db, &policy, &scope)?
+            } else {
+                pc_family::plan::compute_scoped(db, &policy, &scope)?
+            };
             // One group at a time. Ten thousand groups is not a decision
             // anybody makes in one press, so the interface offers each group
             // its own, and the plan behind it is the same plan — narrowed,
@@ -1033,6 +1037,16 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             !blocked.contains(src)
         });
     }
+    // A refused file deserves the same inspection as a candidate. Metadata
+    // is read from the index; previewing never opens an arbitrary client path.
+    if r.kind == "plan-apply" {
+        for refusal in &mut refusals {
+            if let Some(id) = db.file_id_at(refusal["path"].as_str().unwrap_or(""))? {
+                refusal["file_id"] = json!(id);
+                refusal["thumb"] = json!(db.file(id)?.and_then(|f| f.thumb_key));
+            }
+        }
+    }
     // Stable order is essential: the family planner uses a HashMap.
     items.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
     refusals.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
@@ -1337,6 +1351,7 @@ pub async fn keep_only(
         }
         let tx = db.conn.unchecked_transaction()?;
         db.set_manual_keeper(id, keep)?;
+        db.conn.execute("DELETE FROM review_choices WHERE file_id IN (SELECT file_id FROM family_members WHERE family_id=?1)", [id])?;
         let mut marked = 0u64;
         for m in members.iter().filter(|m| **m != keep) {
             db.conn.execute(
@@ -1398,6 +1413,7 @@ pub async fn keep_folder_only(State(st): State<Arc<AppState>>, Json(v): Json<Val
                 continue;
             }
             groups += 1;
+            db.conn.execute("DELETE FROM review_choices WHERE file_id IN (SELECT file_id FROM family_members WHERE family_id=?1)", [family])?;
             for (fam, other, _, _) in &rows {
                 if fam == family && other != file {
                     db.conn.execute(
@@ -1499,6 +1515,10 @@ pub async fn reject(
         if known == 0 {
             bail!("{}", pc_core::tr!("Файл не найден", "File not found"));
         }
+        let tx = db.conn.unchecked_transaction()?;
+        // A later explicit file choice supersedes its queue decision.
+        db.conn
+            .execute("DELETE FROM review_choices WHERE file_id=?1", [id])?;
         if on {
             db.conn.execute(
                 "INSERT OR IGNORE INTO manual_rejects VALUES(?1,?2)",
@@ -1508,6 +1528,7 @@ pub async fn reject(
             db.conn
                 .execute("DELETE FROM manual_rejects WHERE file_id=?1", [id])?;
         }
+        tx.commit()?;
         Ok(json!({"ok":true,"rejected":on}))
     })
 }
@@ -1528,6 +1549,13 @@ pub async fn reject_rest(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -
                 AND s.protected = 0
                 AND (s.best_file IS NULL OR m.file_id <> s.best_file)",
             rusqlite::params![id, pc_core::time::now_unix()],
+        )?;
+        db.conn.execute(
+            "DELETE FROM review_choices WHERE file_id IN
+             (SELECT m.file_id FROM series_members m JOIN series s ON s.id=m.series_id
+              WHERE m.series_id=?1 AND s.protected=0
+              AND (s.best_file IS NULL OR m.file_id<>s.best_file))",
+            [id],
         )?;
         tx.commit()?;
         Ok(json!({"ok":true,"rejected":n}))

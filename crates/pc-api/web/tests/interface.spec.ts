@@ -230,6 +230,9 @@ test("50,000 families use a bounded DOM, filters and optimistic rollback", async
     r.fulfill({ status: 500, json: { error: "/mnt/disk3: unreachable" } }),
   );
   await page.goto("/#families");
+  await page
+    .getByRole("button", { name: "Detailed review", exact: true })
+    .click();
   await expect(page.getByText("50,000 groups")).toBeVisible();
   expect(await page.locator(".family-list-item").count()).toBeLessThan(20);
   await page.locator(".family-list").evaluate((el) => (el.scrollTop = 92000));

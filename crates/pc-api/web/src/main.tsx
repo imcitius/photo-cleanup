@@ -3,7 +3,8 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { post, useResource } from "./api";
 import { Button, ErrorBox, Icon, Loading, Modal, Notice } from "./components";
-import { Families, SeriesPage, Categories } from "./curation";
+import { SeriesPage, Categories } from "./curation";
+import { ReviewQueue as Families, ReviewShortcuts } from "./review-queue";
 import { Tree } from "./tree";
 import {
   Overview,
@@ -54,7 +55,19 @@ const initial = () => {
 function App() {
   const [page, setPage] = useState<Page>(initial),
     [help, setHelp] = useState(false),
+    [menuOpen, setMenuOpen] = useState(false),
     [theme, setTheme] = useState(localStorage.getItem("pc-theme") || "system");
+  useEffect(() => {
+    if (!menuOpen) return;
+    const closeMenu = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMenuOpen(false);
+        document.querySelector<HTMLButtonElement>(".mobile-menu")?.focus();
+      }
+    };
+    document.addEventListener("keydown", closeMenu);
+    return () => document.removeEventListener("keydown", closeMenu);
+  }, [menuOpen]);
   const jobs = useJobs();
   const [dismissed, setDismissed] = useState<number | null>(null);
   // Work that is over before it is read is not worth a panel: moving one
@@ -119,7 +132,11 @@ function App() {
     location.hash = p;
   };
   const toggleTheme = () => {
-    const next = theme === "dark" ? "light" : "dark";
+    const dark =
+      theme === "dark" ||
+      (theme === "system" &&
+        matchMedia("(prefers-color-scheme: dark)").matches);
+    const next = dark ? "light" : "dark";
     setTheme(next);
     localStorage.setItem("pc-theme", next);
     document.documentElement.dataset.theme = next;
@@ -233,8 +250,15 @@ function App() {
       >
         {t("k_soderzhimomu")}
       </a>
-      <aside className="sidebar">
-        <a className="brand" href="#overview">
+      <aside className={`sidebar ${menuOpen ? "menu-open" : ""}`}>
+        <a
+          className="brand"
+          href="#overview"
+          onClick={() => {
+            setMenuOpen(false);
+            if (menuOpen) document.getElementById("main")?.focus();
+          }}
+        >
           <span className="brand-mark">
             <Icon name="layers" size={23} />
           </span>
@@ -242,17 +266,29 @@ function App() {
             photo-cleanup<small>{t("berezhno_k_kazhdomu_snimku")}</small>
           </span>
         </a>
+        <Button
+          kind="icon-button mobile-menu"
+          icon={menuOpen ? "close" : "list"}
+          aria-label={t("osnovnaya_navigatsiya")}
+          aria-expanded={menuOpen}
+          aria-controls="archive-navigation"
+          onClick={() => setMenuOpen(!menuOpen)}
+        />
         <div className="workspace-label">
           <span className="workspace-dot" />
           {ui.local}
         </div>
-        <nav aria-label={t("osnovnaya_navigatsiya")}>
+        <nav id="archive-navigation" aria-label={t("osnovnaya_navigatsiya")}>
           {navigation.map((group) => (
             <div className="nav-group" key={group.section}>
               <span className="nav-label">{group.section}</span>
               {group.items.map(([key, icon]) => (
                 <a
                   href={`#${key}`}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    if (menuOpen) document.getElementById("main")?.focus();
+                  }}
                   key={key}
                   className={page === key ? "active" : ""}
                   aria-current={page === key ? "page" : undefined}
@@ -353,7 +389,11 @@ function App() {
           <div className="page-heading">
             <div>
               <div className="eyebrow">
-                {t("fotografii_poryadok_spokoystvie")}
+                {
+                  navigation.find((group) =>
+                    group.items.some(([key]) => key === page),
+                  )?.section
+                }
               </div>
               <h1>{ui.pages[page]}</h1>
               <p>{ui.subtitles[page]}</p>
@@ -402,6 +442,7 @@ function App() {
       </div>
       {help && (
         <Modal title={ui.keyboard} onClose={() => setHelp(false)}>
+          {page === "families" && <ReviewShortcuts />}
           <dl className="keyboard-help">
             <div>
               <dt>

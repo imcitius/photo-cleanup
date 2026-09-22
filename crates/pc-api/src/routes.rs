@@ -240,7 +240,7 @@ fn role_rank(r: Role) -> u8 {
     }
 }
 
-fn to_out(f: FamilyRow, db: &pc_db::Db) -> FamilyOut {
+pub(crate) fn to_out(f: FamilyRow, db: &pc_db::Db) -> FamilyOut {
     let total_size = f.total_size();
     let kept_pixels = f
         .members

@@ -128,6 +128,51 @@ export function Overview({
             button: t("otkryt_plan"),
             page: "plan" as Page,
           };
+  const archiveMetrics = (
+    <section className="archive-metrics" aria-label={t("arhiv_v_tsifrah")}>
+      <dl>
+        <div>
+          <dt>
+            <Icon name="image" size={16} />
+            {t("izobrazheniy_v_indekse")}
+          </dt>
+          <dd>{number(status?.images || 0)}</dd>
+        </div>
+        <div>
+          <dt>
+            <Icon name="layers" size={16} />
+            {t("semeystv_snimkov")}
+          </dt>
+          <dd>{number(status?.families || 0)}</dd>
+        </div>
+        <div>
+          <dt>
+            <Icon name="series" size={16} />
+            {t("s_neskolkimi_versiyami")}
+          </dt>
+          <dd>{number(status?.families_multi || 0)}</dd>
+        </div>
+        <div>
+          <dt>
+            <Icon name="archive" size={16} />
+            {t("uzhe_v_karantine")}
+          </dt>
+          <dd>
+            <a href="#quarantine" aria-label={t("otkryt_karantin")}>
+              {bytes(status?.quarantined_bytes || 0)}
+              <Icon name="arrow" size={18} />
+            </a>
+          </dd>
+        </div>
+      </dl>
+      {!!status?.skipped && (
+        <p className="muted">
+          {t("propuscheno_pri_indeksatsii")}
+          {number(status.skipped)}
+        </p>
+      )}
+    </section>
+  );
   return (
     <>
       {(interrupted.length > 0 || !!journal.data?.length) && (
@@ -163,96 +208,46 @@ export function Overview({
         <strong>{onArray ? ui.parity : ui.backup}</strong>
         <span>{onArray ? ui.parityDetail : ui.backupDetail}</span>
       </div>
-      <section className="next-step">
-        <div>
-          <div className="eyebrow">
-            <span className="status-dot" />
-            {active ? ui.nowRunning : ui.nextStep}
-          </div>
-          {/* While something is running, "what next" is the wrong question:
-              the answer is "wait, and here is what for". */}
-          {active ? (
-            <>
-              <h2>{jobName(active.kind)}</h2>
-              <p>
-                {active.progress.phase || stateName(active.state)}
-                {!!active.progress.steps &&
-                  ` · ${t("shag_iz", active.progress.step, active.progress.steps)}`}
-                {!!active.progress.total &&
-                  ` · ${number(active.progress.done || 0)} / ${number(active.progress.total)}`}
-              </p>
-              <p className="muted">{ui.liveResume}</p>
-            </>
-          ) : (
-            <>
-              <h2>{next.text}</h2>
-              <p>{next.desc}</p>
-              <Button
-                kind="primary"
-                icon="arrow"
-                onClick={() => navigate(next.page)}
-              >
-                {next.button}
-              </Button>
-            </>
-          )}
-        </div>
-        <div className="archive-illustration" aria-hidden="true">
-          <div className="illustration-card back">
-            <Icon name="image" size={34} />
-          </div>
-          <div className="illustration-card front">
-            <Icon name="layers" size={38} />
-            <div />
-            <div />
-            <span>
-              <Icon name="check" size={15} />
-            </span>
-          </div>
-          <div className="illustration-note">{t("arhiv_na_meste")}</div>
-        </div>
-      </section>
-      <section className="panel pipeline-panel">
-        <div className="section-heading">
-          <div>
-            <h3>{ui.pipeline}</h3>
-            <p className="muted">{ui.pipelineText}</p>
-          </div>
-          <span className="small-label">{t("text_7_stadiy")}</span>
-        </div>
-        <div className="pipeline">
-          {stages.map(([kind, label, page, exists], i) => {
-            const state = stageState(kind, exists);
-            return (
-              <button
-                key={kind}
-                onClick={() => navigate(page)}
-                className={
-                  state === t("gotovo") || state === t("est_dannye")
-                    ? "complete"
-                    : state === t("vypolnyaetsya")
-                      ? "current"
-                      : ""
-                }
-              >
-                <span className="stage-node">
-                  {state === t("gotovo") || state === t("est_dannye") ? (
-                    <Icon name="check" size={18} />
-                  ) : (
-                    i + 1
-                  )}
-                </span>
-                <strong>{label}</strong>
-                <small>{state}</small>
-              </button>
-            );
-          })}
-        </div>
-      </section>
+      {!first && archiveMetrics}
       <div className="overview-grid">
+        <section className="next-step">
+          <div className="next-step-content">
+            <div className="eyebrow">
+              <span className="status-dot" />
+              {active ? ui.nowRunning : ui.nextStep}
+            </div>
+            {/* While something is running, "what next" is the wrong question:
+              the answer is "wait, and here is what for". */}
+            {active ? (
+              <>
+                <h2>{jobName(active.kind)}</h2>
+                <p>
+                  {active.progress.phase || stateName(active.state)}
+                  {!!active.progress.steps &&
+                    ` · ${t("shag_iz", active.progress.step, active.progress.steps)}`}
+                  {!!active.progress.total &&
+                    ` · ${number(active.progress.done || 0)} / ${number(active.progress.total)}`}
+                </p>
+                <p className="muted">{ui.liveResume}</p>
+              </>
+            ) : (
+              <>
+                <h2>{next.text}</h2>
+                <p>{next.desc}</p>
+                <Button
+                  kind="primary"
+                  icon="arrow"
+                  onClick={() => navigate(next.page)}
+                >
+                  {next.button}
+                </Button>
+              </>
+            )}
+          </div>
+        </section>
         <section className="panel reclaim">
           <div className="section-heading">
-            <h3>{ui.recoverable}</h3>
+            <h2>{ui.recoverable}</h2>
             <span className="badge">{t("predvaritelnaya_otsenka")}</span>
           </div>
           <div className="big-number">
@@ -301,43 +296,48 @@ export function Overview({
             {ui.spaceNote} {t("zaschischyonnye_fayly_isklyuchayutsya_v_plane")}
           </p>
         </section>
-        <section className="panel archive-summary">
-          <div className="section-heading">
-            <h3>{t("arhiv_v_tsifrah")}</h3>
-            <Icon name="server" size={19} />
-          </div>
-          <dl>
-            <div>
-              <dt>{t("izobrazheniy_v_indekse")}</dt>
-              <dd>{number(status?.images || 0)}</dd>
-            </div>
-            <div>
-              <dt>{t("semeystv_snimkov")}</dt>
-              <dd>{number(status?.families || 0)}</dd>
-            </div>
-            <div>
-              <dt>{t("s_neskolkimi_versiyami")}</dt>
-              <dd>{number(status?.families_multi || 0)}</dd>
-            </div>
-            <div>
-              <dt>{t("uzhe_v_karantine")}</dt>
-              <dd>{bytes(status?.quarantined_bytes || 0)}</dd>
-            </div>
-          </dl>
-          <Button icon="archive" onClick={() => navigate("quarantine")}>
-            {t("otkryt_karantin")}
-          </Button>
-          {!!status?.skipped && (
-            <p className="muted">
-              {t("propuscheno_pri_indeksatsii")}
-              {number(status.skipped)}
-            </p>
-          )}
-        </section>
       </div>
+      {first && archiveMetrics}
+      <section className="panel pipeline-panel">
+        <div className="section-heading">
+          <div>
+            <h2>{ui.pipeline}</h2>
+            <p className="muted">{ui.pipelineText}</p>
+          </div>
+          <span className="small-label">{t("text_7_stadiy")}</span>
+        </div>
+        <div className="pipeline">
+          {stages.map(([kind, label, page, exists], i) => {
+            const state = stageState(kind, exists);
+            return (
+              <button
+                key={kind}
+                onClick={() => navigate(page)}
+                className={
+                  state === t("gotovo") || state === t("est_dannye")
+                    ? "complete"
+                    : state === t("vypolnyaetsya")
+                      ? "current"
+                      : ""
+                }
+              >
+                <span className="stage-node">
+                  {state === t("gotovo") || state === t("est_dannye") ? (
+                    <Icon name="check" size={18} />
+                  ) : (
+                    i + 1
+                  )}
+                </span>
+                <strong>{label}</strong>
+                <small>{state}</small>
+              </button>
+            );
+          })}
+        </div>
+      </section>
       <section className="panel">
         <div className="section-heading">
-          <h3>{t("poslednie_zadachi")}</h3>
+          <h2>{t("poslednie_zadachi")}</h2>
           <a href="#journal">{t("zhurnal_operatsiy")}</a>
         </div>
         {jobs.length ? (
@@ -697,73 +697,108 @@ export function Policy({
 }) {
   const [roles, setRoles] = useState(["copy"]),
     [resize, setResize] = useState(2),
-    [allow, setAllow] = useState(false);
+    [allow, setAllow] = useState(false),
+    [reviewed, setReviewed] = useState(
+      sessionStorage.getItem("pc-reviewed-plan") === "true",
+    );
   return (
     <>
       <Notice>{ui.quarantineExplained}</Notice>
-      <section className="panel">
-        <h3>{t("kakie_versii_perenosit")}</h3>
-        <p className="muted">
-          {t(
-            "original_vsegda_ostayotsya_v_arhive_po_umolchaniyu_vybirayutsya_t",
-          )}
-        </p>
-        <div className="role-options">
-          {[
-            ["copy", t("tochnaya_kopiya")],
-            ["resize", t("umenshennaya_versiya")],
-            ["export", t("eksport")],
-            ["converted", t("konvertatsiya")],
-            ["camera-jpg", t("jpeg_kamery")],
-            ["unknown", t("ne_opredeleno_2")],
-          ].map(([role, label]) => (
-            <label key={role} className={roles.includes(role) ? "checked" : ""}>
+      <div className="segmented plan-source-tabs">
+        <Button
+          kind={reviewed ? "selected" : ""}
+          aria-pressed={reviewed}
+          onClick={() => {
+            setReviewed(true);
+            sessionStorage.setItem("pc-reviewed-plan", "true");
+          }}
+        >
+          {t("rq_reviewed_plan")}
+        </Button>
+        <Button
+          kind={!reviewed ? "selected" : ""}
+          aria-pressed={!reviewed}
+          onClick={() => {
+            setReviewed(false);
+            sessionStorage.setItem("pc-reviewed-plan", "false");
+          }}
+        >
+          {t("rq_suggested_plan")}
+        </Button>
+      </div>
+      {reviewed ? (
+        <Notice>{t("rq_reviewed_help")}</Notice>
+      ) : (
+        <section className="panel">
+          <h3>{t("kakie_versii_perenosit")}</h3>
+          <p className="muted">
+            {t(
+              "original_vsegda_ostayotsya_v_arhive_po_umolchaniyu_vybirayutsya_t",
+            )}
+          </p>
+          <div className="role-options">
+            {[
+              ["copy", t("tochnaya_kopiya")],
+              ["resize", t("umenshennaya_versiya")],
+              ["export", t("eksport")],
+              ["converted", t("konvertatsiya")],
+              ["camera-jpg", t("jpeg_kamery")],
+              ["unknown", t("ne_opredeleno_2")],
+            ].map(([role, label]) => (
+              <label
+                key={role}
+                className={roles.includes(role) ? "checked" : ""}
+              >
+                <input
+                  type="checkbox"
+                  checked={roles.includes(role)}
+                  onChange={(e) =>
+                    setRoles(
+                      e.target.checked
+                        ? [...roles, role]
+                        : roles.filter((r) => r !== role),
+                    )
+                  }
+                />
+                <span>
+                  <strong>
+                    {role === "unknown" ? "?" : role.toUpperCase()}
+                  </strong>
+                  <small>{label}</small>
+                </span>
+              </label>
+            ))}
+          </div>
+          {roles.includes("resize") && (
+            <label className="field">
+              {t("resize_menshe_megapikseley")}
               <input
-                type="checkbox"
-                checked={roles.includes(role)}
-                onChange={(e) =>
-                  setRoles(
-                    e.target.checked
-                      ? [...roles, role]
-                      : roles.filter((r) => r !== role),
-                  )
-                }
+                type="number"
+                min="0"
+                step="0.1"
+                value={resize}
+                onChange={(e) => setResize(+e.target.value)}
               />
-              <span>
-                <strong>{role === "unknown" ? "?" : role.toUpperCase()}</strong>
-                <small>{label}</small>
-              </span>
             </label>
-          ))}
-        </div>
-        {roles.includes("resize") && (
-          <label className="field">
-            {t("resize_menshe_megapikseley")}
+          )}
+          <label className="check">
             <input
-              type="number"
-              min="0"
-              step="0.1"
-              value={resize}
-              onChange={(e) => setResize(+e.target.value)}
+              type="checkbox"
+              checked={!allow}
+              onChange={(e) => setAllow(!e.target.checked)}
             />
+            {t("zaschischat_fayly_iz_katalogov_lightroom")}
           </label>
-        )}
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={!allow}
-            onChange={(e) => setAllow(!e.target.checked)}
-          />
-          {t("zaschischat_fayly_iz_katalogov_lightroom")}
-        </label>
-        {allow && <Notice tone="warning">{ui.lrWarning}</Notice>}
-      </section>
+          {allow && <Notice tone="warning">{ui.lrWarning}</Notice>}
+        </section>
+      )}
       <Review
         kind="plan-apply"
         params={{
-          roles,
+          roles: reviewed ? ["copy"] : roles,
+          reviewed_only: reviewed,
           resize_below: Math.round(resize * 1e6),
-          allow_lightroom: allow,
+          allow_lightroom: reviewed ? false : allow,
         }}
         start={start}
         disabled={disabled}

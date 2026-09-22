@@ -193,7 +193,7 @@ export const ui = {
   sdelatVsyo: "Do everything",
   sdelatVsyoOpisanie:
     "Inventory, index, duplicates, bursts and kinds as one job, with no waiting between stages. Nothing is moved or deleted: this only reads, and you still approve the move plan separately.",
-  recoverable: "Can be undone",
+  recoverable: "Potential space savings",
   spaceNote: "Space comes back after deleting from quarantine.",
   copy: "Exact copies",
   resize: "Smaller versions",
@@ -299,6 +299,97 @@ export const ui = {
 } as const satisfies Shape<typeof ru>;
 
 export const messages = {
+  rq_title: "One photograph. What stays?",
+  rq_intro:
+    "Compare versions and build a plan. Files stay where they are for now.",
+  rq_add: "Add copies to plan",
+  rq_keep: "Keep all files",
+  rq_defer: "Defer",
+  rq_undo: "Undo decision",
+  rq_undone: "Decision undone. The group is back in the queue.",
+  rq_saved: "Decision saved. The next available group is open.",
+  rq_not_eligible:
+    "Quick approval is unavailable: there are other versions or restrictions. Keep all, defer, or open detailed review.",
+  rq_exact: "Exact copies",
+  rq_versions: "Other versions",
+  rq_all: "All groups",
+  rq_pending: "Undecided",
+  rq_planned: "In plan",
+  rq_kept: "Kept",
+  rq_deferred: "Deferred",
+  rq_all_states: "All states",
+  rq_queue: "Queue",
+  rq_position: "Group position",
+  rq_search: "Search groups by name or path",
+  rq_open_plan: "Open my plan",
+  rq_batch: "Batch exact copies",
+  rq_batch_scope:
+    "All untouched exact-copy groups across the archive. Queue filters do not narrow this batch.",
+  rq_batch_help:
+    "Existing and deferred decisions are excluded. Only groups passing the core checks are added. No files move.",
+  rq_batch_confirm: "Add batch to plan",
+  rq_progress: "Undecided: {0} · deferred: {1}",
+  rq_detailed: "Detailed review",
+  rq_back: "Back to queue",
+  rq_empty: "No groups in this queue",
+  rq_empty_hint:
+    "Change the filters, return to deferred groups, or build groups after indexing.",
+  rq_evidence: "Group evidence",
+  rq_verified: "Match verified",
+  rq_needs_review: "Needs your review",
+  rq_exact_help:
+    "The core verified exact copies of the kept file and their eligibility. Files will be read and checked again before moving.",
+  rq_after: "The next group opens after the decision is saved.",
+  rq_no_move:
+    "Decide first. Moving to quarantine is a separate step after reviewing the plan.",
+  rq_zoom: "Toggle comparison zoom ×2",
+  rq_shortcuts_hint:
+    "Shortcuts pause in input fields and dialogs. Holding a key never makes repeated decisions.",
+  rq_candidate: "Quarantine candidate",
+  rq_compare_version: "Version to compare",
+  rq_metadata: "File metadata and paths",
+  rq_manual_choices:
+    "This group already contains manually rejected files. Inspect them in detailed review.",
+  rq_reviewed_plan: "My decisions",
+  rq_suggested_plan: "Automatic suggestions",
+  rq_reviewed_help:
+    "Only exact copies from groups you approved appear here. Kept and deferred files are also excluded from automatic suggestions.",
+
+  pe_folder_prev: "Previous folders",
+  pe_folder_next: "Next folders",
+  pe_companion_reason: "Moves with the photo {0}.",
+  pe_image_error: "Could not load this photo",
+  pe_title: "Explore the plan",
+  pe_search: "Find a photo or folder",
+  pe_search_hint: "Name, path fragment or several words · typos accepted",
+  pe_outcome: "File outcomes",
+  pe_all: "All results",
+  pe_move: "To quarantine",
+  pe_stay: "Stays",
+  pe_refusal: "Refused · stays",
+  pe_scope:
+    "Search covers this entire plan. Filters only change the view: confirmation runs the whole plan.",
+  pe_folders: "Folders",
+  pe_all_folders: "All folders",
+  pe_up: "Up one level",
+  pe_folder_scope: "Source folders, including subfolders.",
+  pe_results: "Results: {0}",
+  pe_results_list: "Plan files and refusals",
+  pe_no_results:
+    "No matches in this plan. This is not the full archive. Check the filters or open the archive tree.",
+  pe_prev: "Previous page",
+  pe_next: "Next page",
+  pe_detail: "What happens to this file",
+  pe_open: "Open photo: {0}",
+  pe_full: "Open full size",
+  pe_source: "Current location",
+  pe_destination: "After moving",
+  pe_size: "Size",
+  pe_reason: "Why",
+  pe_kept_reason:
+    "This file stays in the archive as the kept version for copies in this plan.",
+  pe_select: "Select a file to see its outcome.",
+
   otmecheno_grupp:
     "Marked. Groups holding a file here: {0}; the kept file changed in {1}.",
   otmetka_snyata: "The mark is off.",
@@ -371,7 +462,6 @@ export const messages = {
   dostupen_po_seti: "Reachable on the network",
   na_etom_kompyutere: "On this computer",
   pereklyuchit_temu: "Switch theme",
-  fotografii_poryadok_spokoystvie: "PHOTOGRAPHS. ORDER. PEACE OF MIND.",
   zadacha: "Job #",
   propuscheno_faylov: "files skipped — {0}",
   i_eschyo: "…and {0} more",
@@ -414,7 +504,6 @@ export const messages = {
   zapisey_dlya_proverki: "· entries to check: ",
   otkryt_lightroom: "Lightroom is open: ",
   ego_prevyu_zaschischeny: ". Its previews are protected.",
-  arhiv_na_meste: "ARCHIVE / IN PLACE",
   text_7_stadiy: "7 stages",
   predvaritelnaya_otsenka: "Rough estimate",
   prevyu_i_tochnye_kopii: "previews and exact copies",

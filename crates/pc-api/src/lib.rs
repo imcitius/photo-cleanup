@@ -6,6 +6,7 @@
 //! thumbnails measured in kilobytes, and full frames only when asked.
 
 mod jobs;
+mod review;
 mod routes;
 mod service;
 mod state;
@@ -59,6 +60,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/files/{id}/category", post(service::category))
         .route("/api/files/{id}/date", post(service::date))
         .route("/api/status", get(routes::status))
+        .route("/api/review", get(review::queue))
+        .route("/api/review/{id}", post(review::decide))
+        .route("/api/review/batch-preview", post(review::batch_preview))
+        .route("/api/review/batch", post(review::batch))
+        .route("/api/review/undo", post(review::undo))
         .route("/api/families", get(routes::families))
         .route("/api/families/{id}", get(routes::family))
         .route("/api/families/{id}/keeper", post(routes::set_keeper))
