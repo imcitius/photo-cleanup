@@ -876,6 +876,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pc-desktop"
+version = "0.4.4"
+dependencies = [
+ "pc-core",
+ "pc-db",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "pc-family"
 version = "0.4.4"
 dependencies = [

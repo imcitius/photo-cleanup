@@ -1,0 +1,23 @@
+[package]
+name = "pc-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Only the platform-neutral half lives here for now: where the data is and how
+# that choice is remembered. It builds and is tested on every OS, Linux
+# included. The Tauri shell arrives later behind
+# `cfg(any(windows, target_os = "macos"))` (see DESKTOP.md), so that the
+# required checks keep covering this crate without pulling webkit2gtk into
+# the Linux build.
+
+[dependencies]
+pc-core.workspace = true
+pc-db.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

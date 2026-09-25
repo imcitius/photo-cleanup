@@ -2,8 +2,9 @@
 
 Рабочий документ разработки. Сверено с кодом 0.4.4 (коммит `da2cd09`)
 26.09.2026; первая редакция — 21.09.2026 на базе 0.2.15. Спецификация, а
-не описание готового: `pc-desktop` и Tauri в workspace пока нет. В
-публичную часть репозитория не предназначен.
+не описание готового: из `pc-desktop` пока есть только платформенно-нейтральная
+библиотека выбора каталога данных (el-2be, см. «Контракт для оболочки»);
+Tauri в workspace нет. В публичную часть репозитория не предназначен.
 
 ## Зачем
 
@@ -251,6 +252,59 @@ CORS preflight, но rebinding его обходит.
 
 Пути с пробелами и кириллицей — обязательный тестовый случай resolver'а и
 переноса (el-2be, el-646).
+
+Уточнения, принятые при реализации (el-2be):
+
+- Правило «пустая база не создаётся» действует и для `system`: bootstrap
+  есть, а `LOCAL/data/photo-cleanup.db` нет → тот же экран «Данные
+  недоступны», а не новая база. Bootstrap существует только после
+  успешного открытия базы, значит, данные там были.
+- `--data-dir` может создать базу: это явное указание на этот запуск.
+  Относительный путь отвергается — и там, и в bootstrap, и при выборе папки:
+  текущий каталог приложения, запущенного из Finder/Explorer, случаен.
+- Битый bootstrap при запуске не перезаписывается, но явный выбор папки
+  пользователем с экрана ошибки его заменяет — это и есть выход. Bootstrap
+  более новой версии (`version` > 1) не перезаписывается ничем.
+- Каталог проверяется на запись пробным файлом, а не по битам прав (ACL,
+  read-only тома); существующая база открывается без флага CREATE и
+  проверяется, что SQLite не открыл её молча только на чтение.
+
+### Контракт для оболочки
+
+Крейт `pc-desktop`, `src/lib.rs` и модули `bootstrap`, `resolve`, `error`.
+Тесты — `crates/pc-desktop/tests/data_dir.rs`, на временных каталогах;
+readonly-случаи — только unix (`chmod 555`; под root пропускаются явно).
+
+```rust
+let dirs = SystemDirs::new(app.path().app_local_data_dir()?, exe_dir);
+let r = pc_desktop::resolve(&dirs, cli_data_dir)?;   // только чтение
+// r.legacy_dir == Some(..) → спросить: choose_data_dir(.., UseExisting) или продолжить с r
+let p = pc_desktop::prepare(&dirs, &r)?;             // открыть/создать базу, затем bootstrap
+// pc_api::start(p.layout.db, p.layout.thumbs, ..)
+pc_desktop::confirm_started(&dirs, &p)?;             // снять `previous`
+```
+
+- `SystemDirs { app_local_data, exe_dir, portable_supported }` —
+  `SystemDirs::new` ставит `portable_supported = cfg!(windows)`.
+- `DataLayout { dir, db, thumbs }` — `photo-cleanup.db` и `thumbs/`.
+- `StartupError` сериализуется с тегом `kind`
+  (`data_unavailable` с `source`, `dir`, `why.what` ∈ `missing`,
+  `not_a_directory`, `no_database`, `not_a_database`, `not_writable`, и
+  `previous`; `bootstrap_unreadable`, `bootstrap_unsupported`,
+  `bootstrap_write`, `database_exists`, `relative_path`,
+  `portable_active`, `no_previous`, `create_failed`) — по нему экран
+  ошибки выбирает действия; `Display` двуязычный через `pc_core::tf!`.
+- Действия экрана ошибки: «Повторить» — снова `resolve`; «Выбрать другую
+  папку» — `choose_data_dir(dir, UseExisting | CreateNew)` →
+  `prepare`; «Вернуться к прежней» — `revert_to_previous` → `prepare`.
+  В portable-режиме выбор и возврат отвергаются (`portable_active`).
+
+Контракт для переноса (el-646): перенос копирует базу и миниатюры сам,
+а завершает его запись `Bootstrap::new(Choice::custom(new), Some(old))`
+через `write_bootstrap` (атомарно) и перезапуск. Дальше обычный путь:
+новый каталог поднялся → `confirm_started` снимает `previous`; не поднялся
+→ `data_unavailable` с `previous` и `revert_to_previous`. Своего API
+настроек у переноса нет, «текущий выбор» — только bootstrap.
 
 ### Смена каталога данных
 
