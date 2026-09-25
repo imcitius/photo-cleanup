@@ -9,5 +9,13 @@ export default defineConfig({
       },
     },
   },
-  server: { proxy: { "/api": "http://127.0.0.1:8080" } },
+  server: {
+    proxy: {
+      // changeOrigin rewrites the Host header to match the target so a
+      // loopback-bound pc-api's DNS-rebinding guard (crates/pc-api/src/
+      // security.rs) doesn't see `Host: localhost:5173` and reject every
+      // /api call with 421 during `npm run dev`.
+      "/api": { target: "http://127.0.0.1:8080", changeOrigin: true },
+    },
+  },
 });

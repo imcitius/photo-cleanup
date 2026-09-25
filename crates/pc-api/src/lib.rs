@@ -8,6 +8,7 @@
 mod jobs;
 mod review;
 mod routes;
+mod security;
 mod service;
 mod state;
 
@@ -122,6 +123,18 @@ pub async fn serve(
         .await
         .with_context(|| pc_core::tf!("не занять адрес {0}", "cannot bind {0}", bind))?;
     let local = listener.local_addr()?;
+    let app = router(state);
+    // A loopback bind is what the CLI defaults to and what a future desktop
+    // window will use; only there does a same-machine attacker's page stand
+    // a chance at DNS rebinding. A NAS bind on a LAN address is reachable
+    // from other machines on purpose, so it is left exactly as it was.
+    let app = if local.ip().is_loopback() {
+        app.layer(axum::middleware::from_fn(move |req, next| {
+            security::require_loopback_host(local, req, next)
+        }))
+    } else {
+        app
+    };
     if open {
         open_in_browser(&format!("http://{local}"));
     }
@@ -130,7 +143,7 @@ pub async fn serve(
         pc_core::tf!("Интерфейс: http://{0}", "Interface: http://{0}", local)
     );
     println!("{}", pc_core::tr!("Остановить: Ctrl+C", "Stop with Ctrl+C"));
-    axum::serve(listener, router(state))
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown())
         .await?;
     Ok(())
