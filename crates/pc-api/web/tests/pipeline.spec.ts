@@ -1,15 +1,16 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, main, idle } from "./isolated";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 test("real archive goes through scan, index, review, quarantine, undo and organization in the browser", async ({
   page,
   request,
-}, info) => {
+}) => {
   test.setTimeout(90000);
   const settings = await (await request.get("/api/settings")).json();
   const base = dirname(settings.db_path);
-  const archive = join(base, `archive-${info.project.name}`),
-    out = join(base, `output-${info.project.name}`);
+  // The server is this test's own (see isolated.ts), so its directory is too.
+  const archive = join(base, "archive"),
+    out = join(base, "output");
   mkdirSync(archive);
   mkdirSync(out);
   mkdirSync(join(archive, "Backup"));
@@ -47,7 +48,18 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
   await page
     .getByRole("textbox", { name: "Archive root", exact: true })
     .fill(archive);
-  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await main(page).getByRole("button", { name: "Add", exact: true }).click();
+  // Done means the server finished *and* the page has seen it: until the next
+  // jobs poll the page keeps its actions disabled and the topbar still shows
+  // a button named after the job.
+  const finished = async () => {
+    await expect
+      .poll(
+        async () => (await (await request.get("/api/jobs")).json())[0]?.state,
+      )
+      .toBe("done");
+    await idle(page);
+  };
   const run = async (label: string) => {
     await Promise.all([
       page.waitForResponse(
@@ -56,14 +68,9 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
           r.request().method() === "POST" &&
           r.status() === 202,
       ),
-      page.getByRole("button", { name: label, exact: true }).click(),
+      main(page).getByRole("button", { name: label, exact: true }).click(),
     ]);
-    await expect
-      .poll(async () => {
-        const jobs = await (await request.get("/api/jobs")).json();
-        return jobs[0]?.state;
-      })
-      .toBe("done");
+    await finished();
     await page.reload();
   };
   await run("Start the inventory");
@@ -78,14 +85,16 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .click();
   await expect(page.locator(".queue-file")).toHaveCount(2);
   await page.screenshot({
-    path: `test-results/families-${info.project.name}.png`,
+    path: test.info().outputPath("families.png"),
     fullPage: true,
   });
 
   await page
     .getByRole("combobox", { name: "Queue", exact: true })
     .selectOption("pending");
-  await page.getByRole("button", { name: /Defer D/ }).click();
+  await main(page)
+    .getByRole("button", { name: /Defer D/ })
+    .click();
   await expect(
     page.getByRole("heading", { name: "No groups in this queue" }),
   ).toBeVisible();
@@ -94,7 +103,9 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .getByRole("combobox", { name: "Queue", exact: true })
     .selectOption("defer");
   await expect(page.locator(".queue-file")).toHaveCount(2);
-  await page.getByRole("button", { name: /Add copies to plan A/ }).click();
+  await main(page)
+    .getByRole("button", { name: /Add copies to plan A/ })
+    .click();
   await expect(
     page.getByRole("heading", { name: "No groups in this queue" }),
   ).toBeVisible();
@@ -106,7 +117,7 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .click();
   await expect(page.locator(".plan-row")).toHaveCount(1);
   expect(existsSync(join(archive, "Backup", "20190714_183200.jpg"))).toBe(true);
-  await page
+  await main(page)
     .getByRole("button", { name: "Move to quarantine", exact: true })
     .click();
   await page
@@ -116,17 +127,12 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
   await expect
     .poll(() => existsSync(join(archive, "Backup", "20190714_183200.jpg")))
     .toBe(false);
-  await expect
-    .poll(async () => {
-      const jobs = await (await request.get("/api/jobs")).json();
-      return jobs[0]?.state;
-    })
-    .toBe("done");
+  await finished();
   await page
     .getByRole("navigation")
     .getByRole("link", { name: "Quarantine", exact: true })
     .click();
-  await page
+  await main(page)
     .getByRole("button", { name: "Restore", exact: true })
     .first()
     .click();
@@ -143,12 +149,7 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .poll(() => existsSync(join(archive, "Backup", "20190714_183200.jpg")))
     .toBe(true);
   await page.reload();
-  await expect
-    .poll(async () => {
-      const jobs = await (await request.get("/api/jobs")).json();
-      return jobs[0]?.state;
-    })
-    .toBe("done");
+  await finished();
   await page
     .getByRole("navigation")
     .getByRole("link", { name: "Sort by date", exact: true })
@@ -164,24 +165,21 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     })
     .check();
   await expect(
-    page.getByRole("button", { name: "Sort by date", exact: true }),
+    main(page).getByRole("button", { name: "Sort by date", exact: true }),
   ).toBeEnabled();
-  await page.getByRole("button", { name: "Sort by date", exact: true }).click();
+  await main(page)
+    .getByRole("button", { name: "Sort by date", exact: true })
+    .click();
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "Run the plan", exact: true })
     .click();
-  await expect
-    .poll(async () => {
-      const jobs = await (await request.get("/api/jobs")).json();
-      return jobs[0]?.state;
-    })
-    .toBe("done");
+  await finished();
   await page
     .getByRole("navigation")
     .getByRole("link", { name: "Journal and runs", exact: true })
     .click();
-  await page
+  await main(page)
     .getByRole("button", { name: "Undo the run", exact: true })
     .first()
     .click();
@@ -197,9 +195,7 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
   await expect
     .poll(() => existsSync(join(archive, "20190714_183200.jpg")))
     .toBe(true);
-  await expect
-    .poll(async () => (await (await request.get("/api/jobs")).json())[0]?.state)
-    .toBe("done");
+  await finished();
   expect(existsSync(join(archive, "20190714_183200.xmp"))).toBe(true);
   expect(existsSync(join(archive, "Backup", "20190714_183200.xmp"))).toBe(true);
   await page.reload();
@@ -213,31 +209,29 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
   await expect(page.locator(".explorer-companion")).toContainText(
     "20190714_183200.xmp",
   );
-  await page
+  await main(page)
     .getByRole("button", { name: "Move to quarantine", exact: true })
     .click();
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "Run the plan", exact: true })
     .click();
-  await expect
-    .poll(async () => (await (await request.get("/api/jobs")).json())[0]?.state)
-    .toBe("done");
+  await finished();
   await page
     .getByRole("navigation")
     .getByRole("link", { name: "Previews and caches", exact: true })
     .click();
-  await page.getByRole("button", { name: "Plan preview", exact: true }).click();
-  await page
+  await main(page)
+    .getByRole("button", { name: "Plan preview", exact: true })
+    .click();
+  await main(page)
     .getByRole("button", { name: "Move to quarantine", exact: true })
     .click();
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "Run the plan", exact: true })
     .click();
-  await expect
-    .poll(async () => (await (await request.get("/api/jobs")).json())[0]?.state)
-    .toBe("done");
+  await finished();
   await expect
     .poll(
       async () =>
@@ -261,10 +255,10 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
   await page
     .getByRole("spinbutton", { name: "Held for at least, days" })
     .fill("0");
-  await page
+  await main(page)
     .getByRole("button", { name: "Check before deleting", exact: true })
     .click();
-  await page
+  await main(page)
     .getByRole("button", { name: "Delete for good", exact: true })
     .click();
   const purge = page.getByRole("dialog");
@@ -273,9 +267,7 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
   await purge
     .getByRole("button", { name: "Delete for good", exact: true })
     .click();
-  await expect
-    .poll(async () => (await (await request.get("/api/jobs")).json())[0]?.state)
-    .toBe("done");
+  await finished();
   for (const dst of destinations) {
     expect(existsSync(dst)).toBe(false);
     if (dst.endsWith(".jpg"))

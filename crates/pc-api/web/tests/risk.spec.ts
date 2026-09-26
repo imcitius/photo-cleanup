@@ -1,6 +1,6 @@
 // The promises that cost a photograph when they fail, checked in a browser
 // against a real server and real files on disk.
-import { test, expect } from "@playwright/test";
+import { test, expect, main } from "./isolated";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { APIRequestContext, Page } from "@playwright/test";
@@ -31,11 +31,9 @@ async function archiveOf(request: APIRequestContext, name: string) {
   return archive;
 }
 
-// One server serves every test here, so each starts from an empty index:
-// otherwise a plan sees the archives of the tests before it.
-test.beforeEach(async ({ request }) => {
-  await request.post("/api/reset", { data: { confirmation: "RESET" } });
-});
+// Every test here moves, restores or deletes, and `/api/reset` keeps the
+// journal: a reset between tests would still leave the previous test's
+// quarantine restorable and purgeable. Each test gets its own server instead.
 
 async function job(
   request: APIRequestContext,
@@ -109,18 +107,23 @@ test("quarantine left by an older database comes home to where it came from", as
 
   await page.goto("/#quarantine");
   await page.reload();
-  await expect(
-    page.getByRole("heading", { name: "Quarantine with no journal" }),
-  ).toBeVisible();
-  await page
+  // The orphan panel, not the journal-backed quarantine list below it: each
+  // of those rows has a "Restore" button of its own.
+  const orphans = main(page)
+    .locator("section")
+    .filter({
+      has: page.getByRole("heading", { name: "Quarantine with no journal" }),
+    });
+  await expect(orphans).toBeVisible();
+  await orphans
     .getByRole("button", { name: "Put everything back", exact: true })
     .click();
 
   const home = join(archive, "Old Previews.lrdata", "sub", "cache");
-  await expect(page.locator(".plan-row")).toHaveCount(1);
-  await expect(page.locator(".plan-row")).toContainText("cache");
+  await expect(orphans.locator(".plan-row")).toHaveCount(1);
+  await expect(orphans.locator(".plan-row")).toContainText("cache");
   // Out of quarantine, not into it: the button says Restore.
-  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await orphans.getByRole("button", { name: "Restore", exact: true }).click();
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "Run the plan", exact: true })
@@ -183,10 +186,10 @@ test("deleting for good takes the bytes, and only after the word", async ({
   await page
     .getByRole("spinbutton", { name: "Held for at least, days" })
     .fill("0");
-  await page
+  await main(page)
     .getByRole("button", { name: "Check before deleting", exact: true })
     .click();
-  await page
+  await main(page)
     .getByRole("button", { name: "Delete for good", exact: true })
     .click();
   const dialog = page.getByRole("dialog");
