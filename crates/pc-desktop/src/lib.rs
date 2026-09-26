@@ -16,6 +16,11 @@
 //! 3. [`confirm_started`] after the server is up: a choice waiting for its
 //!    first successful launch stops being provisional.
 //!
+//! The window's own rules — which pages it may show, the address it opens,
+//! the report it shows when start-up fails — are in the same neutral half
+//! ([`is_server_page`], [`StartupReport`]); the Tauri shell in `main.rs` only
+//! applies them, on Windows and macOS.
+//!
 //! A failure at any step is a [`StartupError`] the shell shows as a screen.
 //! None of them falls back to an empty database somewhere else: a user whose
 //! external drive is unplugged must see "your data is not there", not a
@@ -24,12 +29,17 @@
 mod bootstrap;
 mod error;
 mod resolve;
+mod window;
 
 pub use bootstrap::{read_bootstrap, write_bootstrap, Bootstrap, Choice, StoredMode};
 pub use error::{StartupError, Unavailable};
 pub use resolve::{
     choose_data_dir, confirm_started, prepare, resolve, revert_to_previous, Creation, NewDir,
     Prepared, Resolved, Source,
+};
+pub use window::{
+    is_bundled_page, is_server_page, parse_args, server_url, StartupReport, ERROR_PAGE,
+    SERVER_BIND, WINDOW_LABEL, WINDOW_MIN_SIZE, WINDOW_SIZE, WINDOW_TITLE,
 };
 
 use serde::Serialize;

@@ -5,12 +5,30 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# Only the platform-neutral half lives here for now: where the data is and how
-# that choice is remembered. It builds and is tested on every OS, Linux
-# included. The Tauri shell arrives later behind
-# `cfg(any(windows, target_os = "macos"))` (see DESKTOP.md), so that the
-# required checks keep covering this crate without pulling webkit2gtk into
-# the Linux build.
+# Two halves in one crate (DESKTOP.md, «Сборка и изоляция в workspace»).
+#
+# The library is platform-neutral: where the data is, how that choice is
+# remembered, which addresses the window may show. It builds and is tested on
+# every OS, Linux included.
+#
+# The window itself — Tauri and its webview — exists only for Windows and
+# macOS, behind `cfg(any(windows, target_os = "macos"))` on the dependencies,
+# the build script and the shell module. On Linux the binary is a stub that
+# says so, and nothing of Tauri (webkit2gtk, gtk) enters the dependency graph:
+# the required checks keep covering this crate without a desktop toolkit on
+# the CI runner or in the scratch Docker image.
+#
+# `default-members` or a `desktop` feature would not do the same: the first
+# does not apply to `--workspace`, the second either leaves the shell out of
+# the required checks or pulls webkit2gtk into `--all-features`.
+
+[lib]
+name = "pc_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "photo-cleanup-desktop"
+path = "src/main.rs"
 
 [dependencies]
 pc-core.workspace = true
@@ -18,6 +36,26 @@ pc-db.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+pc-api.workspace = true
+anyhow.workspace = true
+# `custom-protocol` is what `tauri build` would switch on: assets come from
+# the binary, never from a development server. There is no development server
+# here at all — the interface is served by pc-api — so it is always on, and a
+# plain `cargo build` produces the same app as a packaged one.
+# Default features minus the Linux-only `x11`/`dbus`; `dynamic-acl` stays for
+# the runtime capability of the data-folder commands (el-646).
+tauri = { version = "2.11", default-features = false, features = [
+    "wry",
+    "compression",
+    "common-controls-v6",
+    "dynamic-acl",
+    "custom-protocol",
+] }
+
+[target.'cfg(any(windows, target_os = "macos"))'.build-dependencies]
+tauri-build = "2"
 
 [dev-dependencies]
 tempfile.workspace = true

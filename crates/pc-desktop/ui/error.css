@@ -1,0 +1,26 @@
+/* Colours from the application icon; system fonts only — nothing is fetched. */
+:root { color-scheme: light dark; }
+body {
+  margin: 0;
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: #f4f7f5;
+  color: #16241d;
+}
+main { max-width: 44rem; margin: 12vh auto 2rem; padding: 0 2rem; }
+h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+.message { font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; }
+.other { color: #4d5f55; overflow-wrap: anywhere; }
+.hint { margin-top: 1.5rem; }
+details { margin-top: 1.5rem; }
+pre {
+  background: #e6ede9;
+  padding: 0.75rem;
+  border-radius: 6px;
+  overflow: auto;
+  font-size: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  body { background: #16241d; color: #eaf5ee; }
+  .other { color: #98cfa9; }
+  pre { background: #22362c; }
+}
