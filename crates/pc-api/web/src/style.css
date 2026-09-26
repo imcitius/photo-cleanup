@@ -3673,3 +3673,20 @@ select {
 .plan-decision-details {
   margin: 20px 0;
 }
+.data-folder-preview {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 16px;
+  margin: 0 0 16px;
+}
+.data-folder-preview dt {
+  color: var(--muted);
+}
+.data-folder-preview dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.data-folder-reasons {
+  margin: 0;
+  padding-left: 18px;
+}

@@ -2,6 +2,7 @@ import { t } from "./i18n";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { dateSourceName, ui, bytes, number, when } from "./i18n";
 import { useResource } from "./api";
+import { isDesktop, pickFolder } from "./desktop";
 import type { FileDetails as FileDetailsRow } from "./types";
 export function Icon({
   name = "grid",
@@ -432,15 +433,49 @@ export function Modal({
     </dialog>
   );
 }
-export function FolderPicker({
-  onChoose,
-  onClose,
-  initial = "/mnt",
-}: {
+type FolderPickerProps = {
   onChoose: (s: string) => void;
   onClose: () => void;
   initial?: string;
-}) {
+};
+/** In the desktop window, the system's own folder dialog; in a browser or on
+ *  a NAS, a browser of the folders the server can see. */
+export function FolderPicker(p: FolderPickerProps) {
+  const [native, setNative] = useState(isDesktop);
+  return native ? (
+    <NativeFolderPicker {...p} onFailed={() => setNative(false)} />
+  ) : (
+    <ServerFolderPicker {...p} />
+  );
+}
+function NativeFolderPicker({
+  onChoose,
+  onClose,
+  onFailed,
+  initial,
+}: FolderPickerProps & { onFailed: () => void }) {
+  // One dialog per opening, including under StrictMode's double effect.
+  const asked = useRef(false);
+  useEffect(() => {
+    if (asked.current) return;
+    asked.current = true;
+    pickFolder(initial, ui.desktop.pickTitle).then(
+      (path) => {
+        // Cancel chooses nothing and changes nothing.
+        if (path) onChoose(path);
+        onClose();
+      },
+      // The dialog could not be shown: the server browser still works.
+      () => onFailed(),
+    );
+  }, []);
+  return null;
+}
+function ServerFolderPicker({
+  onChoose,
+  onClose,
+  initial = "/mnt",
+}: FolderPickerProps) {
   const [path, setPath] = useState(initial),
     [input, setInput] = useState(initial);
   const r = useResource<{

@@ -36,6 +36,9 @@ pc-db.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Already in the lockfile through walkdir. Keep open file identities for
+# relocation reservations, so cleanup cannot unlink a replaced sidecar.
+same-file = "1"
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 pc-api.workspace = true
@@ -53,6 +56,11 @@ tauri = { version = "2.11", default-features = false, features = [
     "dynamic-acl",
     "custom-protocol",
 ] }
+# The native folder dialog, called from our own `pick_folder` command only.
+# Not `tauri-plugin-dialog`: its init script replaces `window.confirm` with an
+# asynchronous IPC call, so `if (confirm(...))` in the shared interface would
+# always be true in the window — and the dialog is all we need of it.
+rfd = { version = "0.16", default-features = false, features = ["common-controls-v6"] }
 
 [target.'cfg(any(windows, target_os = "macos"))'.build-dependencies]
 tauri-build = "2"

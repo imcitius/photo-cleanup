@@ -28,11 +28,22 @@
 
 mod bootstrap;
 mod error;
+mod native;
+mod relocate;
 mod resolve;
 mod window;
 
 pub use bootstrap::{read_bootstrap, write_bootstrap, Bootstrap, Choice, StoredMode};
 pub use error::{StartupError, Unavailable};
+pub use native::{
+    desktop_info, interface_origin, permission, ChangeAction, DesktopInfo, ERROR_PAGE_COMMANDS,
+    INTERFACE_COMMANDS,
+};
+pub use relocate::{
+    copy_data, measure, preview_move, preview_move_with, restart_or_restore, switch_to_existing,
+    verify, Blocker, Copied, DataSize, MovePreview, RelocateError, PARTIAL_DB, PARTIAL_THUMBS,
+    SPACE_MARGIN,
+};
 pub use resolve::{
     choose_data_dir, confirm_started, prepare, resolve, revert_to_previous, Creation, NewDir,
     Prepared, Resolved, Source,

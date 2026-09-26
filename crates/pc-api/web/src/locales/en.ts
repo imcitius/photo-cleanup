@@ -291,6 +291,46 @@ export const ui = {
   jobNote: "You can close the tab — the job carries on on the server.",
   stopNote:
     "Stopping happens at a file boundary. Moves already made stay in the journal.",
+  desktop: {
+    pickTitle: "Choose a folder",
+    chooseTitle: "New data folder for the app",
+    title: "App data folder",
+    modes: {
+      system: "The app's system folder in your user profile.",
+      custom: "A folder you chose.",
+      portable:
+        "Portable mode: the data is next to the program (photo-cleanup.portable).",
+      override: "The folder was given at start-up with --data-dir.",
+    },
+    folder: "Folder",
+    database: "Database",
+    thumbs: "Preview cache",
+    size: "Database {0}, previews {1} ({2} files).",
+    sizeUnknown: "The size could not be measured.",
+    free: "Free on the disk: {0}.",
+    reveal: "Open folder",
+    change: "Change folder…",
+    fixed:
+      "The folder cannot be changed from the window: portable mode or a start-up option sets it.",
+    legacy:
+      "A database from an earlier version is next to the program: {0}. It is not picked up by itself.",
+    useSystem: "Use the system folder…",
+    legacyAction: "Switch to it…",
+    photosUntouched:
+      "Only the app's database and preview cache live here. Photographs and the quarantine are not moved or changed.",
+    previewTitle: "Change the data folder",
+    from: "Now",
+    to: "New folder",
+    toCopy: "To copy",
+    space: "Space",
+    spaceValue: "{0} needed, {1} free",
+    howItGoes:
+      "Work stops, the database and previews are copied and verified, then the app restarts with the new folder. The old folder stays where it is and nothing is deleted from it — remove it yourself once you are sure everything is in place. If the new folder cannot start, the error screen offers the previous one.",
+    working: "Copying and verifying… Do not close the window.",
+    failed: "The change failed. The original data has been kept: {0}",
+    copy: "Copy and restart",
+    useExisting: "Switch to the database in this folder without copying",
+  },
 } as const satisfies Shape<typeof ru>;
 
 export const messages = {

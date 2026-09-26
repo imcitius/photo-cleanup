@@ -84,6 +84,69 @@ pub fn dev_of_nearest_existing(path: &Path) -> io::Result<u64> {
     }
 }
 
+/// Bytes an unprivileged process may still write on the filesystem of `path`,
+/// or of its nearest existing ancestor.
+///
+/// Asked before copying the app's own data to a new folder: a copy that runs
+/// out of room halfway is refused before it starts rather than cleaned up
+/// after. It is the space available to this user (`f_bavail`, the caller's
+/// quota on Windows), not the total free space — root's reserve is not ours.
+pub fn available_space(path: &Path) -> io::Result<u64> {
+    let mut cur = path;
+    while fs::metadata(cur).is_err() {
+        cur = cur.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                crate::tf!(
+                    "не найти существующий предок для {0}",
+                    "cannot find an existing ancestor of {0}",
+                    path.display()
+                ),
+            )
+        })?;
+    }
+    available_on(cur)
+}
+
+#[cfg(unix)]
+fn available_on(path: &Path) -> io::Result<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c = CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    // SAFETY: `c` is a valid NUL-terminated string for the duration of the
+    // call, and `st` is a plain-data struct the call fills in.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c.as_ptr(), &mut st) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    #[allow(clippy::unnecessary_cast)] // the field widths differ by platform
+    Ok((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
+}
+
+#[cfg(windows)]
+fn available_on(path: &Path) -> io::Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut available = 0u64;
+    // SAFETY: `wide` is NUL-terminated and outlives the call; the two null
+    // pointers are the optional totals we do not ask for.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(available)
+}
+
 fn label_for(mount: &Path) -> String {
     match mount.file_name().and_then(|s| s.to_str()) {
         Some(name) if !name.is_empty() => name.to_string(),
@@ -147,5 +210,71 @@ mod tests {
             disk.relative(Path::new("/mnt/disk3/data/foto/X")),
             Path::new("data/foto/X")
         );
+    }
+}
+
+#[cfg(test)]
+mod space_tests {
+    use super::available_space;
+
+    #[test]
+    fn free_space_is_asked_of_the_nearest_existing_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let here = available_space(tmp.path()).unwrap();
+        assert!(here > 0);
+        // A folder that does not exist yet is on its parent's filesystem.
+        let later = available_space(&tmp.path().join("Новая папка/данные")).unwrap();
+        assert!(later > 0);
+    }
+}
+
+/// Publish a file or directory on the same filesystem without replacing any
+/// existing name, including a dangling symlink. A check followed by `rename`
+/// is not enough: another process can create the destination in between.
+pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let from = CString::new(from.as_os_str().as_bytes())?;
+        let to = CString::new(to.as_os_str().as_bytes())?;
+        // SAFETY: both C strings remain valid throughout the syscall.
+        #[cfg(target_os = "macos")]
+        let rc = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+        #[cfg(target_os = "linux")]
+        let rc = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "exclusive rename is unavailable",
+        ));
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+        let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: paths are NUL terminated; zero flags forbid replacement.
+        let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) };
+        if ok != 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 }

@@ -7,6 +7,8 @@ import {
 } from "./plan-source";
 import { useEffect, useState } from "react";
 import { api, post, useResource } from "./api";
+import { DataFolder } from "./data-folder";
+import { isDesktop } from "./desktop";
 import {
   Button,
   Empty,
@@ -1414,17 +1416,26 @@ export function SettingsPage({
         }
       }}
     >
+      {/* The desktop window manages its own data folder; a server's are
+          fixed by how it was started. */}
+      {isDesktop && <DataFolder disabled={disabled} />}
       <section className="panel">
         <h3>{t("puti_na_servere")}</h3>
-        <label className="field">
-          {t("baza_dannyh")}
-          <input readOnly value={settings.db_path} />
-        </label>
-        <label className="field">
-          {t("kesh_prevyu")}
-          <input readOnly value={settings.thumbs_path} />
-        </label>
-        <p className="muted">{t("baza_i_kesh_zadany_pri_zapuske_servera")}</p>
+        {!isDesktop && (
+          <>
+            <label className="field">
+              {t("baza_dannyh")}
+              <input readOnly value={settings.db_path} />
+            </label>
+            <label className="field">
+              {t("kesh_prevyu")}
+              <input readOnly value={settings.thumbs_path} />
+            </label>
+            <p className="muted">
+              {t("baza_i_kesh_zadany_pri_zapuske_servera")}
+            </p>
+          </>
+        )}
         <label className="field">
           {t("papka_karantina")}
           <input
