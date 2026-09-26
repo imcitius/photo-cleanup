@@ -40,9 +40,9 @@ pub use native::{
     INTERFACE_COMMANDS,
 };
 pub use relocate::{
-    copy_data, measure, preview_move, preview_move_with, restart_or_restore, switch_to_existing,
-    verify, Blocker, Copied, DataSize, MovePreview, RelocateError, PARTIAL_DB, PARTIAL_THUMBS,
-    SPACE_MARGIN,
+    copy_data, measure, move_data, preview_move, preview_move_with, restart_or_restore,
+    switch_to_existing, verify, Blocker, Copied, DataSize, MovePreview, RelocateError, PARTIAL_DB,
+    PARTIAL_THUMBS, SPACE_MARGIN,
 };
 pub use resolve::{
     choose_data_dir, confirm_started, prepare, resolve, revert_to_previous, Creation, NewDir,

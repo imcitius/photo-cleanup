@@ -25,7 +25,7 @@
 
 use pc_api::{Server, ServerConfig, Shutdown, ShutdownError};
 use pc_desktop::{
-    confirm_started, copy_data, interface_origin, is_bundled_page, is_server_page, parse_args,
+    confirm_started, interface_origin, is_bundled_page, is_server_page, move_data, parse_args,
     permission, prepare, preview_move, resolve, revert_to_previous, server_url, switch_to_existing,
     ChangeAction, DataLayout, DesktopInfo, MovePreview, Source, StartupError, StartupReport,
     SystemDirs, ERROR_PAGE, ERROR_PAGE_COMMANDS, INTERFACE_COMMANDS, SERVER_BIND, WINDOW_LABEL,
@@ -464,8 +464,9 @@ async fn change_data_dir(
 
     let (d, l, t) = (dirs.clone(), layout.clone(), target.clone());
     let done = tauri::async_runtime::spawn_blocking(move || match action {
-        ChangeAction::Copy => copy_data(&l, source, &t, pc_core::disk::available_space)
-            .and_then(|copied| copied.commit(&d, source)),
+        // `Ok` only when the bootstrap names the copy and its staging is
+        // gone; a leftover comes back as an error, so no silent restart.
+        ChangeAction::Copy => move_data(&d, &l, source, &t, pc_core::disk::available_space),
         ChangeAction::UseExisting => switch_to_existing(&d, source, &t),
     })
     .await;
