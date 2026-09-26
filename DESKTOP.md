@@ -778,7 +778,7 @@ Desktop build успешен; web не менялся.
 Оба OS-lock после clean/crash exit доступны без удаления служебных файлов.
 Точные пути/environment, hash бинаря и логи — в worker report el-4qiw.
 
-CUA вернул `timeoutReached` при доступе к окну нового bundle по пути и ID.
+В авторской сессии CUA вернул `timeoutReached` при доступе к окну нового bundle по пути и ID.
 Поэтому **новые** native Cmd+Q/app-menu Quit/Dock Quit (Cancel и Confirm),
 Dock reopen, idle Apple Event reply, SIGTERM при настоящем открытом sheet
 и native data-dir/quit race на исправленной версии не проверены. Unit tests
@@ -786,3 +786,48 @@ Dock reopen, idle Apple Event reply, SIGTERM при настоящем откр�
 Windows compilation/tray/portable/ACL, Linux/Docker и OS logout/shutdown
 также не проверены этой сессией. Требуются свежий независимый review,
 safety-аудит el-2ba2 и решение Director; merge не выполнен.
+
+#### Независимая проверка исправлений 8e8218c
+
+Новая неавторская provider-сессия проверила точный source SHA
+`8e8218cb3ea9873a2bfe48c644a2312d4247b8eb` на macOS 27.0 (26A428), arm64.
+Полный отчёт — **el-5j54**: пути, окружение, hash бинаря, PID, команды,
+результаты и ограничения. Required fmt/clippy/workspace прошли независимо:
+411 passed, 0 failed, 1 ignored subprocess fixture; CLI/desktop build успешен.
+Исходники реализации не менялись, это дополнение документирует проверку.
+
+Через проверенный временный `Photo Cleanup Independent.app` с wrapper,
+всегда задающим `PC_DESKTOP_TEST_APP_DATA`, выполнены настоящие Cmd+Q и
+клик Quit в меню приложения. Оба пути показали одинаковый sheet:
+Continue сохранил PID, сервер, running job с растущим прогрессом и замки;
+Stop and quit дал cancelled и освобождение замков без удаления lock-файлов.
+SIGTERM/SIGTERM/SIGINT при открытом sheet и SIGINT после Continue завершили
+задачи кооперативно. Idle Apple Event quit вернул успешный ответ 0;
+сохранение геометрии при этом подтверждает наследованный путь Exit.
+Реальный logout/shutdown пользователя не выполнялся.
+
+Close сохранил работу; повторный запуск с другим `--data-dir` активировал
+прежний процесс, не создав новую БД. CUA-наблюдение может само активировать
+окно: длительное скрытое состояние этим не измерялось. После SIGKILL
+задача стала interrupted при следующем старте, новые задачи не запускались.
+Два pending fixture до/после rename сохранили файлы и записи журнала.
+Это проверка отсутствия replay, не fault injection внутрь rename.
+
+Native folder picker / Copy and restart проверен вместе с quit во время
+копирования: запрос послан после появления `thumbs.partial`, до публикации
+конечной БД. Одиночный Apple Event дождался переноса (9,41 с) и вернул 0;
+новый процесс открыл проверенную копию, исходник сохранился, bootstrap
+сбросил previous. В трёх временных БД integrity_check=ok, те же пять jobs
+и две pending-записи, без автоматического повторения операций.
+
+В первом, более длинном переносе harness истёк по таймауту; приложение
+дождалось конца копирования. Повторный Apple Event при уже ожидающем quit
+получил -128. Это наблюдение сохранено в отчёте отдельно от успешной проверки
+одиночного запроса; успех всех сочетаний системных quit не утверждается.
+Все smoke-процессы остановлены, пользовательские архивы не использовались.
+
+**Приёмка остаётся неполной:** точные Dock Quit (Continue/Stop) и Dock icon
+reopen недоступны через CUA (`timeoutReached` по ID и системному пути Dock).
+Cmd+Q, меню и Apple Event не заменяют эти клики. Windows compilation/tray/
+portable/ACL и Linux/Docker не проверены. Нужны закрытие Dock-критерия,
+отдельный safety-аудит el-2ba2 и решение Director; merge не выполнялся.
