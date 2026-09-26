@@ -459,6 +459,24 @@ fn a_batch_file_archive_beside_the_program_is_offered_not_taken() {
 }
 
 #[test]
+fn the_write_probe_never_replaces_a_file_already_in_the_folder() {
+    let env = Env::new();
+    let dir = env.root.join("override");
+    fs::create_dir_all(&dir).unwrap();
+    let legacy = dir.join(".photo-cleanup-write-probe");
+    let payload = b"not ours \x00\xff payload".to_vec();
+    fs::write(&legacy, &payload).unwrap();
+    let r = resolve(&env.dirs, Some(&dir)).unwrap();
+    prepare(&env.dirs, &r).unwrap();
+    assert_eq!(fs::read(&legacy).unwrap(), payload);
+    let probes: Vec<_> = listing(&dir)
+        .into_iter()
+        .filter(|n| n.starts_with(".photo-cleanup-write-probe"))
+        .collect();
+    assert_eq!(probes, [".photo-cleanup-write-probe"]);
+}
+
+#[test]
 fn a_data_dir_override_is_used_once_and_not_remembered() {
     let env = Env::new();
     let dir = env.root.join("override");

@@ -40,6 +40,12 @@ serde_json.workspace = true
 # relocation reservations, so cleanup cannot unlink a replaced sidecar.
 same-file = "1"
 
+[target.'cfg(unix)'.dependencies]
+# The write probe: `O_TMPFILE` on Linux, the kernel access check with the
+# macOS extended rights elsewhere (`faccessat`), so no named entry is ever
+# created in the user's folder and removed by path (el-693s).
+libc.workspace = true
+
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 pc-api.workspace = true
 anyhow.workspace = true
@@ -67,3 +73,4 @@ tauri-build = "2"
 
 [dev-dependencies]
 tempfile.workspace = true
+

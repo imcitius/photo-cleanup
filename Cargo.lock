@@ -2665,6 +2665,7 @@ name = "pc-desktop"
 version = "0.4.4"
 dependencies = [
  "anyhow",
+ "libc",
  "pc-api",
  "pc-core",
  "pc-db",
