@@ -787,12 +787,13 @@ Windows compilation/tray/portable/ACL, Linux/Docker и OS logout/shutdown
 также не проверены этой сессией. Требуются свежий независимый review,
 safety-аудит el-2ba2 и решение Director; merge не выполнен.
 
-#### Независимая проверка исправлений 8e8218c
+#### Дополнительная авторская проверка исправлений 8e8218c
 
-Новая неавторская provider-сессия проверила точный source SHA
+Новая provider-сессия автора el-1677 проверила точный source SHA
 `8e8218cb3ea9873a2bfe48c644a2312d4247b8eb` на macOS 27.0 (26A428), arm64.
 Полный отчёт — **el-5j54**: пути, окружение, hash бинаря, PID, команды,
-результаты и ограничения. Required fmt/clippy/workspace прошли независимо:
+результаты и ограничения. Это AUTHOR evidence, не независимая приёмка.
+По отчёту автора required fmt/clippy/workspace прошли:
 411 passed, 0 failed, 1 ignored subprocess fixture; CLI/desktop build успешен.
 Исходники реализации не менялись, это дополнение документирует проверку.
 
@@ -831,3 +832,30 @@ reopen недоступны через CUA (`timeoutReached` по ID и сист
 Cmd+Q, меню и Apple Event не заменяют эти клики. Windows compilation/tray/
 portable/ACL и Linux/Docker не проверены. Нужны закрытие Dock-критерия,
 отдельный safety-аудит el-2ba2 и решение Director; merge не выполнялся.
+
+
+#### Независимый review el-67ku на source 8e8218c
+
+Отдельный reviewer el-67ku подтвердил local и явный remote HEAD `38db47e`
+(код `8e8218c`, затем только документация). Отчёт **el-682h** содержит
+точные пути/env/hash/PID/логи и критерии по отдельности. На macOS 27.0 arm64
+fmt/clippy/workspace 411 passed, 0 failed, 1 ignored subprocess fixture и
+CLI/desktop build прошли. Независимо проверены Cmd+Q и actual app-menu Quit
+с Continue/Stop, сохранением прогресса/замков и cancelled после Stop;
+real-sheet TERM/TERM/INT, SIGINT после Continue, single instance/writer refusal,
+SIGKILL/restart interrupted без replay двух pending fixtures, idle AE reply 0
+и сохранение геометрии через Exit. Только временные данные; процессы остановлены.
+
+Два AE во время настоящего copy дали одному sender -128, другому 0 после
+25,675 с. Обе БД integrity_check=ok и 5000 cache entries сохранены; replacement
+единственный, bootstrap previous=null после readiness. Минимальный AppKit
+control с NSTerminateLater без Tauri также отвергает один overlapping request
+с -128. Порядок успешного sender отличается; самостоятельный дефект el-zsj
+и реальный logout failure не установлены. Успех каждого concurrent quit
+не гарантируется. Это не тест OS logout и не fault injection внутри rename.
+
+Dock Quit Continue/Stop и Dock reopen по-прежнему не проверены: независимый
+CUA вернул timeoutReached по ID и системному пути Dock. Windows compilation/
+tray/portable ACL, Linux/Docker не проверены. Ветка отстаёт от main: интеграция
+с новым main ещё не проверена. До merge нужны точный Dock evidence,
+независимый safety-аудит el-2ba2, Director acceptance и sync/required checks.
