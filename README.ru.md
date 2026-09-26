@@ -191,7 +191,7 @@ photo-cleanup --db /mnt/cache/appdata/photo-cleanup/pc.db \
 
 Интерфейс встроен в бинарь, работает без интернета и поддерживает светлую
 и тёмную темы. Сборка фронтенда, тесты и контракт задач описаны в
-[docs/WEB-DEVELOPMENT.md](docs/WEB-DEVELOPMENT.md).
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 Командами то же самое:
 
