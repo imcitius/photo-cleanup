@@ -7,10 +7,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::{RunEvent, WindowEvent};
 
+mod quit;
+
 #[derive(Default)]
 pub(super) struct Lifecycle {
-    pub(super) exiting: AtomicBool,
+    pub(super) quit: quit::Requests,
     allowed: AtomicBool,
+    #[cfg(target_os = "macos")]
+    native_reply_pending: AtomicBool,
     listener_stop: Arc<AtomicBool>,
     listener: Mutex<Option<std::thread::JoinHandle<()>>>,
     geometry_path: Mutex<Option<PathBuf>>,
@@ -49,8 +53,7 @@ pub(super) fn initialize(app: &AppHandle) -> anyhow::Result<bool> {
     let instance = match claim {
         Ok(Claim::Owner(instance)) => instance,
         Ok(Claim::Activated) => {
-            allow_exit(app);
-            app.exit(0);
+            finish_exit(app, 0);
             return Ok(false);
         }
         Err(e) => {
@@ -59,8 +62,7 @@ pub(super) fn initialize(app: &AppHandle) -> anyhow::Result<bool> {
                 .set_description(format!("Cannot start Photo Cleanup: {e:#}"))
                 .set_level(rfd::MessageLevel::Error)
                 .show();
-            allow_exit(app);
-            app.exit(1);
+            finish_exit(app, 1);
             return Ok(false);
         }
     };
@@ -68,7 +70,10 @@ pub(super) fn initialize(app: &AppHandle) -> anyhow::Result<bool> {
     let handle = app.clone();
     *lock(&state.lifecycle.listener) = Some(std::thread::spawn(move || {
         while !stop.load(Ordering::Acquire) {
-            if instance.activated() {
+            if instance.activated(|| {
+                let state = handle.state::<Desktop>();
+                !state.lifecycle.quit.pending() && !state.lifecycle.allowed.load(Ordering::Acquire)
+            }) {
                 let app = handle.clone();
                 let _ = handle.run_on_main_thread(move || show(&app));
             }
@@ -97,12 +102,20 @@ pub(super) fn ready(app: &AppHandle) -> tauri::Result<()> {
                 signal(SignalKind::terminate()),
                 signal(SignalKind::interrupt()),
             ) {
-                tokio::select! { _ = term.recv() => {}, _ = interrupt.recv() => {} }
-                request_exit(&handle, true);
+                loop {
+                    let signal = tokio::select! {
+                        signal = term.recv() => signal,
+                        signal = interrupt.recv() => signal,
+                    };
+                    if signal.is_none() {
+                        break;
+                    }
+                    request_exit(&handle, true);
+                }
             }
         }
         #[cfg(windows)]
-        if tokio::signal::ctrl_c().await.is_ok() {
+        while tokio::signal::ctrl_c().await.is_ok() {
             request_exit(&handle, true);
         }
     });
@@ -117,11 +130,23 @@ pub(super) fn show(app: &AppHandle) {
     }
 }
 
-pub(super) fn allow_exit(app: &AppHandle) {
-    app.state::<Desktop>()
-        .lifecycle
-        .allowed
-        .store(true, Ordering::Release);
+/// Call only after the server is drained (or before it was started).
+/// Route restarts through the same reply in case a native quit arrived
+/// while the data-folder transfer held the serialization gate.
+pub(super) fn finish_exit(app: &AppHandle, code: i32) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        handle
+            .state::<Desktop>()
+            .lifecycle
+            .allowed
+            .store(true, Ordering::Release);
+        #[cfg(target_os = "macos")]
+        if macos::reply(&handle, true) {
+            return;
+        }
+        handle.exit(code);
+    });
 }
 
 pub(super) fn event(app: &AppHandle, event: RunEvent) {
@@ -180,9 +205,9 @@ pub(super) fn window_event(window: &tauri::Window, event: &WindowEvent) {
 
 fn request_exit(app: &AppHandle, confirmed: bool) {
     let state = app.state::<Desktop>();
-    if state.lifecycle.exiting.swap(true, Ordering::AcqRel) {
+    let Some(mut request) = state.lifecycle.quit.request(confirmed) else {
         return;
-    }
+    };
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<Desktop>();
@@ -197,8 +222,9 @@ fn request_exit(app: &AppHandle, confirmed: bool) {
                     #[cfg(debug_assertions)]
                     eprintln!("desktop quit: busy job {}, confirmed={confirmed}", job.id);
                     *lock(&state.server) = Some(*server);
-                    if !confirmed && !confirm(&app, &job).await {
-                        state.lifecycle.exiting.store(false, Ordering::Release);
+                    if !quit::decide(&mut request, confirm(&app, &job)).await
+                        && cancel_exit(&app).await
+                    {
                         return;
                     }
                     show(&app);
@@ -221,9 +247,24 @@ fn request_exit(app: &AppHandle, confirmed: bool) {
         if let Err(e) = result {
             eprintln!("photo-cleanup-desktop: shutdown: {e}");
         }
-        allow_exit(&app);
-        app.exit(0);
+        finish_exit(&app, 0);
     });
+}
+
+async fn cancel_exit(app: &AppHandle) -> bool {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        // Serialize the native reply with should_terminate. A new native
+        // request must not accidentally receive the previous dialog's NO.
+        let cancelled = handle.state::<Desktop>().lifecycle.quit.cancel();
+        if cancelled {
+            #[cfg(target_os = "macos")]
+            macos::reply(&handle, false);
+        }
+        let _ = tx.send(cancelled);
+    });
+    rx.await.unwrap_or(true)
 }
 
 async fn confirm(app: &AppHandle, job: &pc_api::ActiveJob) -> bool {
@@ -438,9 +479,37 @@ mod macos {
             {
                 return 1; // NSTerminateNow
             }
+            app.state::<Desktop>()
+                .lifecycle
+                .native_reply_pending
+                .store(true, Ordering::Release);
             request_exit(app, false);
+            return 2; // NSTerminateLater: reply after confirmation and drain.
         }
-        0 // NSTerminateCancel: the coordinated exit calls AppHandle::exit later.
+        0 // No app state: fail closed.
+    }
+
+    pub(super) fn reply(app: &AppHandle, terminate: bool) -> bool {
+        assert!(objc2::MainThreadMarker::new().is_some());
+        if !app
+            .state::<Desktop>()
+            .lifecycle
+            .native_reply_pending
+            .swap(false, Ordering::AcqRel)
+        {
+            return false;
+        }
+        #[cfg(debug_assertions)]
+        eprintln!("desktop native termination reply: {terminate}");
+        // SAFETY: NSApplication is live and this runs on its main thread.
+        // A positive reply invokes the inherited applicationWillTerminate
+        // callback, including RunEvent::Exit and instance-lock release.
+        unsafe {
+            let ns: Retained<AnyObject> =
+                msg_send![AnyClass::get(c"NSApplication").unwrap(), sharedApplication];
+            let _: () = msg_send![&*ns, replyToApplicationShouldTerminate: terminate];
+        }
+        true
     }
 
     pub(super) fn install(app: &AppHandle) {

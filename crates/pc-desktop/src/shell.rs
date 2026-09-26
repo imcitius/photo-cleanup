@@ -388,12 +388,12 @@ async fn change_data_dir(
         )
         .into());
     };
-    if state
-        .lifecycle
-        .exiting
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        return Err("the application is preparing to quit".into());
+    if state.lifecycle.quit.pending() {
+        return Err(pc_core::tr!(
+            "приложение готовится к выходу",
+            "the application is preparing to quit"
+        )
+        .into());
     }
     let (dirs, source, layout) = state.current()?;
     let target = PathBuf::from(target);
@@ -459,8 +459,7 @@ async fn change_data_dir(
             // next launch confirms it, or offers the old one back.
             match pc_desktop::restart_or_restore(&dirs, spawn_replacement) {
                 Ok(()) => {
-                    lifecycle::allow_exit(&app);
-                    app.exit(0);
+                    lifecycle::finish_exit(&app, 0);
                     Ok(())
                 }
                 Err(e) => {
@@ -638,7 +637,6 @@ async fn revert_data_dir(app: AppHandle, state: State<'_, Desktop>) -> Result<()
 #[tauri::command]
 fn restart_app(app: AppHandle) -> Result<(), String> {
     spawn_replacement()?;
-    lifecycle::allow_exit(&app);
-    app.exit(0);
+    lifecycle::finish_exit(&app, 0);
     Ok(())
 }

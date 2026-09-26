@@ -22,13 +22,30 @@ fn instance_process() {
                 let _ = tx.send(());
             });
             while rx.try_recv().is_err() {
-                if owner.activated() {
+                if owner.activated(|| !dir.join("draining").exists()) {
                     std::fs::write(dir.join("shown"), "yes").unwrap();
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
     }
+}
+
+#[test]
+fn a_launch_during_shutdown_waits_and_becomes_the_next_owner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut first = child(tmp.path(), false);
+    owner_ready(&mut first);
+    std::fs::write(tmp.path().join("draining"), "yes").unwrap();
+    let mut next = child(tmp.path(), false);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(next.try_wait().unwrap().is_none());
+    assert!(!tmp.path().join("shown").exists());
+    first.stdin.as_mut().unwrap().write_all(b"quit\n").unwrap();
+    wait(&mut first);
+    owner_ready(&mut next);
+    next.stdin.as_mut().unwrap().write_all(b"quit\n").unwrap();
+    wait(&mut next);
 }
 
 fn child(dir: &std::path::Path, replacement: bool) -> Child {

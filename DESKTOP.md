@@ -534,6 +534,10 @@ final sidecars **не удаляются переносом**: они резер
   Старый процесс держит его до остановки сервера, записи геометрии и выхода.
   Ошибка spawn по-прежнему возвращает прежний bootstrap и сервер;
   недоступный владелец не обходится удалением lock-файла.
+  Обычный повторный запуск во время quit тоже ждёт владельца: пока открыт
+  диалог или идёт остановка, listener отвечает отказом активации. После
+  отмены quit следующий запрос активирует прежнее окно; после выхода
+  новый процесс захватывает освободившийся lock и запускает сервер.
 - **Закрытие окна** скрывает существующий webview, сохраняя сервер, задачи,
   страницу и её прогресс. Windows: трей «Открыть», «Остановить работу»,
   «Выйти»; остановка вызывает общую кооперативную отмену, сервер остаётся.
@@ -554,12 +558,21 @@ final sidecars **не удаляются переносом**: они резер
   не принимается за состояние покоя.
 - **macOS native Quit**: у Tao 0.35 `terminate:` из стандартного меню/Dock
   обходит `ExitRequested`. Подкласс текущего AppKit delegate без новых ivars
-  добавляет `applicationShouldTerminate:`: отклоняет немедленный выход и
-  запускает тот же согласованный путь. Остальные callbacks Tao, включая
-  reopen, наследуются. `objc2` уже был в lockfile через Tauri, версии не
-  менялись; зависимость включена только на macOS.
+  добавляет `applicationShouldTerminate:`: возвращает `NSTerminateLater`
+  и запускает тот же согласованный путь. Затем на главном потоке вызывает
+  `replyToApplicationShouldTerminate:`: NO при «Продолжить», YES только
+  после остановки сервера. Перезапуск после смены папки учитывает ожидающий
+  native reply тем же путём. Это [контракт AppKit](https://developer.apple.com/documentation/appkit/nsapplication/reply(toapplicationshouldterminate:));
+  прежний безусловный `NSTerminateCancel` ошибочно сообщал отмену даже при
+  idle quit. Остальные callbacks Tao, включая reopen и willTerminate/Exit,
+  наследуются. `objc2` уже был в lockfile через Tauri, версии не менялись;
+  зависимость включена только на macOS.
 - **SIGTERM/SIGINT на macOS** кооперативно отменяют и дожидаются задачи
   без диалога. Windows Ctrl+C обрабатывается аналогично, если консоль есть.
+  Обработчик слушает сигналы в цикле. Сигнал при открытом подтверждении
+  переводит текущую попытку в подтверждённую остановку; поздний ответ
+  диалога игнорируется. Сигнал и отмена диалога сериализованы: уже принятый
+  сигнал не теряется, а сигнал после «Продолжить» начинает новую попытку.
   Завершение сеанса ОС — best effort; SIGKILL, force quit и выключение
   питания могут оставить `pending`. При старте jobs получают `interrupted`,
   журнал и файлы не проигрываются и не reconcile автоматически.
@@ -707,6 +720,11 @@ symlink-сценарии под Windows пропускаются из-за не�
 
 ### Приёмка жизненного цикла el-zsj (26.09.2026)
 
+Следующий блок — исторический worker smoke `0c6510c`, не приёмка последующих
+исправлений. Независимый review el-4qtu выявил потерю SIGTERM при открытом
+диалоге и ошибочный ответ отмены AppKit. Статус исправлений описан ниже;
+задача остаётся без окончательной приёмки до нативной проверки и аудита.
+
 На macOS arm64 прошли fmt, clippy all-targets с `-D warnings`, workspace
 `--locked`: 407 passed, 0 failed; один ignored — служебный subprocess
 fixture, который вызывают два прошедших теста. Сборка CLI/desktop успешна.
@@ -741,3 +759,30 @@ Rust-набором, это не fault injection внутри системног
 без jobs/выбора корней/операций с архивом; она не засчитана как temp smoke.
 Повторные проверки шли через временный `.app` с launch-wrapper, который
 всегда задаёт debug-only `PC_DESKTOP_TEST_APP_DATA`, включая UI relaunch.
+
+#### Исправления по независимому review el-4qtu
+
+Исправлены обработка повторных сигналов/эскалация открытого подтверждения,
+отложенный ответ AppKit, активация во время выхода и перевод ошибки quit
+при смене папки. Код shutdown, rename/journal и recovery jobs не менялся.
+Добавлены три async-регрессии решения о выходе (сигнал во время диалога,
+после отмены и в гонке с отменой) и subprocess-регрессия запуска при drain.
+На macOS arm64 required fmt/clippy/workspace проходят: 411 passed,
+0 failed, 1 ignored subprocess fixture (вызывается тремя прошедшими тестами).
+Desktop build успешен; web не менялся.
+
+Новый временный bundle `Photo Cleanup Quit Test.app` с wrapper, всегда
+задающим `PC_DESKTOP_TEST_APP_DATA`, подтвердил активные SIGTERM/SIGINT
+→ cancelled, SIGKILL/restart → interrupted, отказ второму writer, второй
+запуск без новой БД и сохранность двух pending fixtures до/после rename.
+Оба OS-lock после clean/crash exit доступны без удаления служебных файлов.
+Точные пути/environment, hash бинаря и логи — в worker report el-4qiw.
+
+CUA вернул `timeoutReached` при доступе к окну нового bundle по пути и ID.
+Поэтому **новые** native Cmd+Q/app-menu Quit/Dock Quit (Cancel и Confirm),
+Dock reopen, idle Apple Event reply, SIGTERM при настоящем открытом sheet
+и native data-dir/quit race на исправленной версии не проверены. Unit tests
+не заменяют эти клики; прежний Cmd+Q smoke относится к предыдущему коду.
+Windows compilation/tray/portable/ACL, Linux/Docker и OS logout/shutdown
+также не проверены этой сессией. Требуются свежий независимый review,
+safety-аудит el-2ba2 и решение Director; merge не выполнен.

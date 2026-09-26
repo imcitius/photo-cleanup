@@ -51,7 +51,9 @@ impl Instance {
 
     /// Called from the shell's listener thread. Only an activation is
     /// accepted: no paths, arguments, scripts or archive operations.
-    pub fn activated(&self) -> bool {
+    /// A quitting owner refuses activation but retains its OS lock until
+    /// shutdown finishes. The new launch then retries and becomes owner.
+    pub fn activated(&self, accepting: impl FnOnce() -> bool) -> bool {
         let Ok((mut stream, _)) = self.listener.accept() else {
             return false;
         };
@@ -59,8 +61,9 @@ impl Instance {
         let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
         let mut request = [0; 4];
         if stream.read_exact(&mut request).is_ok() && &request == b"show" {
-            let _ = stream.write_all(b"ok");
-            true
+            let accepting = accepting();
+            let _ = stream.write_all(if accepting { b"ok" } else { b"no" });
+            accepting
         } else {
             false
         }
