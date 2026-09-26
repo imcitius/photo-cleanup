@@ -2,6 +2,7 @@ use anyhow::Result;
 use pc_core::ThumbStore;
 use pc_db::Db;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
 /// Requests share a read connection; background work opens its own connection.
@@ -11,6 +12,10 @@ pub struct AppState {
     pub jobs: crate::jobs::Jobs,
     pub mutation: Mutex<()>,
     pub network: bool,
+    /// Set once a controlled shutdown has begun. Every writer checks it under
+    /// the mutation gate, so after the shutdown has passed that gate once, no
+    /// new job and no hand-made change can start: it gets a 503 instead.
+    pub closing: AtomicBool,
     pub thumbs: ThumbStore,
     pub db_path: PathBuf,
     /// Where moved files are parked. `None` means the default: the root of
@@ -57,6 +62,7 @@ impl AppState {
             jobs: Default::default(),
             mutation: Mutex::new(()),
             network: false,
+            closing: AtomicBool::new(false),
             db: Mutex::new(db),
             thumbs: ThumbStore::new(thumbs),
             db_path,

@@ -19,6 +19,16 @@ use std::{
 #[derive(Default)]
 pub struct Jobs {
     pub active: Mutex<Option<(i64, Control)>>,
+    /// The thread carrying out the latest job. `active` is cleared when the
+    /// job lets go of the writer, a moment *before* its terminal state is
+    /// written; this handle ends only after that write, so a shutdown that
+    /// awaits it knows the `jobs` row already says how the job ended.
+    pub worker: Mutex<Option<Worker>>,
+}
+pub struct Worker {
+    pub id: i64,
+    pub kind: String,
+    pub handle: tokio::task::JoinHandle<()>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Request {
@@ -61,6 +71,20 @@ fn pause_between_letting_go_and_saying_so() {
             std::thread::sleep(Duration::from_millis(ms));
         }
     }
+}
+
+/// A server that is shutting down takes no new work. 503 rather than 409:
+/// nothing is wrong with the request, the server is going away.
+pub fn closed(st: &AppState) -> Option<Response> {
+    st.closing.load(Ordering::SeqCst).then(|| {
+        service::error(
+            503,
+            pc_core::tr!(
+                "Сервер останавливается и новых изменений не принимает",
+                "The server is stopping and takes no new changes"
+            ),
+        )
+    })
 }
 
 pub fn idle(st: &AppState) -> Result<()> {
@@ -187,6 +211,9 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
     // Reserve under the same lock as every manual mutation. No second writer
     // can pass the gate while a worker is being installed.
     let _gate = st.mutation.lock().unwrap();
+    if let Some(refusal) = closed(&st) {
+        return refusal;
+    }
     if let Err(e) = idle(&st) {
         return service::error(409, &e.to_string());
     }
@@ -238,11 +265,15 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
     };
     let control = Control::default();
     *st.jobs.active.lock().unwrap() = Some((id, control.clone()));
-    drop(_gate);
-    let monitor = st.clone();
+    // Weak, so a stopped server is not kept alive — its database connection
+    // open — by a progress ticker that has not yet noticed the job is over.
+    let monitor = Arc::downgrade(&st);
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
+            let Some(monitor) = monitor.upgrade() else {
+                break;
+            };
             let snapshot = {
                 let active = monitor.jobs.active.lock().unwrap();
                 active
@@ -252,6 +283,7 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
             };
             let Some(snapshot) = snapshot else { break };
             let path = monitor.db_path.clone();
+            drop(monitor);
             let _ = tokio::task::spawn_blocking(move || {
                 if let Ok(db) = Db::open(&path) {
                     let _ = db.conn.busy_timeout(Duration::from_millis(100));
@@ -264,7 +296,10 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
             .await;
         }
     });
-    tokio::task::spawn_blocking(move || {
+    let kind = req.kind.clone();
+    let worker = st.clone();
+    let handle = tokio::task::spawn_blocking(move || {
+        let st = worker;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             execute(&st, id, &req, &control)
         }));
@@ -305,6 +340,10 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
             );
         }
     });
+    // Recorded before the gate opens, so a shutdown that has passed the gate
+    // finds every job that was ever started here.
+    *st.jobs.worker.lock().unwrap() = Some(Worker { id, kind, handle });
+    drop(_gate);
     (axum::http::StatusCode::ACCEPTED, Json(json!({"job_id":id}))).into_response()
 }
 fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<()> {

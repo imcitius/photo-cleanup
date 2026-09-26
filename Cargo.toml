@@ -38,7 +38,7 @@ kamadak-exif = "0.6"
 quick-xml = "0.38"
 memmap2 = "0.9"
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "time", "sync"] }
 mime_guess = "2"
 libc = "0.2"
 windows-sys = "0.59"

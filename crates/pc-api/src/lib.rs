@@ -9,12 +9,14 @@ mod jobs;
 mod review;
 mod routes;
 mod security;
+mod server;
 mod service;
 mod state;
 
+pub use server::{start, ActiveJob, Server, ServerConfig, Shutdown, ShutdownError};
 pub use state::AppState;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::routing::{get, post};
 use axum::Router;
 use std::net::SocketAddr;
@@ -102,6 +104,12 @@ fn open_in_browser(url: &str) {
     let _ = std::process::Command::new(cmd).args(args).arg(url).spawn();
 }
 
+/// Run the server from the command line until Ctrl+C.
+///
+/// A thin wrapper over [`start`]: the desktop shell and the command line go
+/// through the same start-up and the same shutdown. Ctrl+C asks a running job
+/// to stop at the next file boundary and waits for it; a second Ctrl+C quits
+/// at once and leaves the job to be marked interrupted on the next start.
 pub async fn serve(
     db_path: &Path,
     thumbs: &Path,
@@ -109,32 +117,14 @@ pub async fn serve(
     bind: SocketAddr,
     open: bool,
 ) -> Result<()> {
-    let mut state = AppState::new(db_path, thumbs, quarantine)?;
-    {
-        // Before the first request, so an error during start-up is already in
-        // the language the operator chose.
-        let db = state.db.lock().unwrap();
-        let settings = crate::service::settings_value(&state, &db)?;
-        crate::service::apply_language(&settings);
-    }
-    state.network = !bind.ip().is_loopback();
-    let state = Arc::new(state);
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .with_context(|| pc_core::tf!("не занять адрес {0}", "cannot bind {0}", bind))?;
-    let local = listener.local_addr()?;
-    let app = router(state);
-    // A loopback bind is what the CLI defaults to and what a future desktop
-    // window will use; only there does a same-machine attacker's page stand
-    // a chance at DNS rebinding. A NAS bind on a LAN address is reachable
-    // from other machines on purpose, so it is left exactly as it was.
-    let app = if local.ip().is_loopback() {
-        app.layer(axum::middleware::from_fn(move |req, next| {
-            security::require_loopback_host(local, req, next)
-        }))
-    } else {
-        app
-    };
+    let server = start(ServerConfig {
+        db_path: db_path.to_path_buf(),
+        thumbs: thumbs.to_path_buf(),
+        quarantine,
+        bind,
+    })
+    .await?;
+    let local = server.local_addr();
     if open {
         open_in_browser(&format!("http://{local}"));
     }
@@ -143,15 +133,28 @@ pub async fn serve(
         pc_core::tf!("Интерфейс: http://{0}", "Interface: http://{0}", local)
     );
     println!("{}", pc_core::tr!("Остановить: Ctrl+C", "Stop with Ctrl+C"));
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown())
-        .await?;
-    Ok(())
-}
-
-async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
+    if let Some(job) = server.active_job() {
+        println!(
+            "\n{}",
+            pc_core::tf!(
+                "Задача №{0} ({1}) остановится на границе файла. Выйти сразу: Ctrl+C ещё раз.",
+                "Job #{0} ({1}) will stop at the next file boundary. Ctrl+C again to quit at once.",
+                job.id,
+                job.kind
+            )
+        );
+        tokio::spawn(async {
+            let _ = tokio::signal::ctrl_c().await;
+            std::process::exit(130);
+        });
+    }
+    server
+        .shutdown(Shutdown::CancelJob)
+        .await
+        .map_err(anyhow::Error::from)?;
     println!("\n{}", pc_core::tr!("Остановлено.", "Stopped."));
+    Ok(())
 }
 
 #[cfg(test)]

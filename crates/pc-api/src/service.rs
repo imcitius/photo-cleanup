@@ -1449,6 +1449,9 @@ pub async fn keep_all_versions(State(st): State<Arc<AppState>>, Path(id): Path<i
 /// always taken the operating system's lock; the hand-made changes did not,
 /// which left the promise of one writer true only of the slow half.
 fn as_writer(st: &AppState, what: &str) -> Result<pc_core::lock::WriterLock, Box<Response>> {
+    if let Some(refusal) = jobs::closed(st) {
+        return Err(Box::new(refusal));
+    }
     if let Err(e) = jobs::idle(st) {
         return Err(Box::new(error(409, &e.to_string())));
     }
