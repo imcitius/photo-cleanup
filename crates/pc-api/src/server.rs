@@ -167,6 +167,18 @@ impl Server {
         active_job(&self.state)
     }
 
+    /// Request the same cooperative cancellation as the HTTP cancel button.
+    /// Keep serving; this never aborts a worker or splits rename from journal.
+    pub fn cancel_active_job(&self) -> bool {
+        let active = self.state.jobs.active.lock().unwrap();
+        if let Some((_, control)) = &*active {
+            control.cancel.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Stop the server.
     ///
     /// In this order, and the order is the point:

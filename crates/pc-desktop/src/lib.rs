@@ -28,6 +28,8 @@
 
 mod bootstrap;
 mod error;
+pub mod geometry;
+pub mod instance;
 mod native;
 mod relocate;
 mod resolve;

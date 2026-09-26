@@ -2665,6 +2665,7 @@ name = "pc-desktop"
 version = "0.4.4"
 dependencies = [
  "anyhow",
+ "objc2",
  "pc-api",
  "pc-core",
  "pc-db",
@@ -2676,6 +2677,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

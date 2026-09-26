@@ -23,6 +23,8 @@
 //! on any other local server reaches them. The bundled error page gets only
 //! "back to the previous folder" and "try again".
 
+mod lifecycle;
+
 use pc_api::{Server, ServerConfig, Shutdown, ShutdownError};
 use pc_desktop::{
     confirm_started, copy_data, interface_origin, is_bundled_page, is_server_page, parse_args,
@@ -36,9 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::CapabilityBuilder;
 use tauri::webview::NewWindowResponse;
-use tauri::{
-    AppHandle, Manager, RunEvent, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Manager, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 /// What this launch runs on. Managed from the start, filled in as start-up
 /// gets that far.
@@ -55,6 +55,7 @@ struct Desktop {
     /// One data-folder change at a time; a second click is refused, not
     /// queued behind a server that is already stopping.
     changing: tauri::async_runtime::Mutex<()>,
+    lifecycle: lifecycle::Lifecycle,
 }
 
 impl Desktop {
@@ -65,6 +66,7 @@ impl Desktop {
             server: Mutex::new(None),
             addr: Arc::new(Mutex::new(None)),
             changing: tauri::async_runtime::Mutex::new(()),
+            lifecycle: lifecycle::Lifecycle::default(),
         }
     }
 
@@ -97,6 +99,9 @@ pub fn run() {
         ])
         .setup(move |app| {
             let handle = app.handle();
+            if !lifecycle::initialize(handle)? {
+                return Ok(());
+            }
             let started = match &args {
                 Ok(data_dir) => launch(handle, data_dir.as_deref()),
                 Err(e) => {
@@ -118,8 +123,10 @@ pub fn run() {
                     open_error(handle, &report)?;
                 }
             }
+            lifecycle::ready(handle)?;
             Ok(())
         })
+        .on_window_event(lifecycle::window_event)
         .build(tauri::generate_context!());
     let app = match app {
         Ok(app) => app,
@@ -131,45 +138,16 @@ pub fn run() {
         }
     };
     app.run(|handle, event| {
-        if let RunEvent::Exit = event {
-            stop(handle);
-        }
+        lifecycle::event(handle, event);
     });
 }
 
 /// Steps 1–3: data directory, server, confirmation.
 fn launch(app: &AppHandle, data_dir: Option<&Path>) -> Result<Server, StartupReport> {
-    let local = app.path().app_local_data_dir().map_err(|e| {
-        let e = e.to_string();
-        StartupReport::other("app_data_dir", move || {
-            pc_core::tf!(
-                "не найти папку приложения в профиле пользователя: {0}",
-                "cannot find the app folder in the user profile: {0}",
-                e
-            )
-        })
-    })?;
-    // Native smoke runs must never use the operator's real bootstrap. This
-    // override exists only in debug builds and is inherited by a restart.
-    #[cfg(debug_assertions)]
-    let local = match std::env::var_os("PC_DESKTOP_TEST_APP_DATA") {
-        Some(path) => {
-            let path = PathBuf::from(path);
-            if !path.is_absolute() {
-                return Err(StartupReport::other("test_data_dir", || {
-                    "PC_DESKTOP_TEST_APP_DATA must be absolute".into()
-                }));
-            }
-            path
-        }
-        None => local,
-    };
-    let exe_dir: Option<PathBuf> = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf));
-    let dirs = SystemDirs::new(local, exe_dir);
     let state = app.state::<Desktop>();
-    *lock(&state.dirs) = Some(dirs.clone());
+    let dirs = lock(&state.dirs)
+        .clone()
+        .expect("instance initialized before launch");
     let resolved = resolve(&dirs, data_dir).map_err(|e| StartupReport::from_startup(&e))?;
     // A database left beside the executable by the batch-file distribution
     // (`resolved.legacy_dir`) is not picked up here. First launch uses the
@@ -303,8 +281,7 @@ fn open_error(app: &AppHandle, report: &StartupReport) -> tauri::Result<()> {
 ///
 /// A running job is asked to stop at the next file boundary and waited for,
 /// with no time limit, so a move and its journal row are never separated.
-/// Asking the operator first, and keeping jobs running with the window
-/// closed, is the lifecycle task (el-zsj).
+/// This is also a last-resort drain on event-loop exit.
 fn stop(app: &AppHandle) {
     let Some(state) = app.try_state::<Desktop>() else {
         return;
@@ -411,6 +388,13 @@ async fn change_data_dir(
         )
         .into());
     };
+    if state
+        .lifecycle
+        .exiting
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err("the application is preparing to quit".into());
+    }
     let (dirs, source, layout) = state.current()?;
     let target = PathBuf::from(target);
 
@@ -475,6 +459,7 @@ async fn change_data_dir(
             // next launch confirms it, or offers the old one back.
             match pc_desktop::restart_or_restore(&dirs, spawn_replacement) {
                 Ok(()) => {
+                    lifecycle::allow_exit(&app);
                     app.exit(0);
                     Ok(())
                 }
@@ -510,6 +495,8 @@ fn spawn_executable(
 ) -> Result<(), String> {
     std::process::Command::new(exe)
         .args(args)
+        // The child waits for our instance lock, without activating us.
+        .env("PC_DESKTOP_REPLACEMENT", "1")
         .spawn()
         .map(drop)
         .map_err(|e| format!("cannot restart {}: {e}", exe.display()))
@@ -651,6 +638,7 @@ async fn revert_data_dir(app: AppHandle, state: State<'_, Desktop>) -> Result<()
 #[tauri::command]
 fn restart_app(app: AppHandle) -> Result<(), String> {
     spawn_replacement()?;
+    lifecycle::allow_exit(&app);
     app.exit(0);
     Ok(())
 }

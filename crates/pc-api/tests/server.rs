@@ -244,3 +244,98 @@ async fn a_started_server_enforces_the_loopback_host_guard() {
 
     server.shutdown(Shutdown::IfIdle).await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_work_keeps_the_server_available_and_allows_an_explicit_new_job() {
+    let tmp = tempfile::tempdir().unwrap();
+    let archive = archive(tmp.path());
+    let server = start(config(tmp.path())).await.unwrap();
+    let addr = server.local_addr();
+    let id = start_index(addr, &archive).await;
+    assert!(server.cancel_active_job());
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while matches!(
+        job_state(&config(tmp.path()).db_path, id).as_str(),
+        "queued" | "running"
+    ) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cancellation did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(job_state(&config(tmp.path()).db_path, id), "cancelled");
+    assert_eq!(http(addr, "GET", "/api/status", "").await.0, 200);
+    let next = start_index(addr, &archive).await;
+    assert_ne!(next, id);
+    server.shutdown(Shutdown::CancelJob).await.unwrap();
+    let again = start(config(tmp.path())).await.unwrap();
+    assert_eq!(again.active_job(), None);
+    assert_eq!(job_state(&config(tmp.path()).db_path, id), "cancelled");
+    assert_eq!(job_state(&config(tmp.path()).db_path, next), "cancelled");
+    again.shutdown(Shutdown::IfIdle).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_marks_abandoned_work_interrupted_without_replaying_pending_moves() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path());
+    let src = tmp.path().join("source.jpg");
+    let dst = tmp.path().join("quarantined.jpg");
+    std::fs::write(&src, b"a file whose pending rename never happened").unwrap();
+    let moved_src = tmp.path().join("already-moved.jpg");
+    let moved_dst = tmp.path().join("already-quarantined.jpg");
+    std::fs::write(&moved_dst, b"a file whose rename already happened").unwrap();
+    {
+        let db = pc_db::Db::open(&cfg.db_path).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO runs(id, started_at, roots, tool_version) VALUES(1, 1, '[]', 'test')",
+                [],
+            )
+            .unwrap();
+        for (id, state) in [(1, "running"), (2, "queued")] {
+            db.conn.execute("INSERT INTO jobs(id, kind, params, state, started_at) VALUES(?1, 'apply', '{}', ?2, 1)", rusqlite::params![id, state]).unwrap();
+        }
+        for (s, d) in [(&src, &dst), (&moved_src, &moved_dst)] {
+            db.conn.execute("INSERT INTO journal(run_id, op, src, dst, size, file_count, status, applied_at) VALUES(1, 'quarantine-file', ?1, ?2, 42, 1, 'pending', 1)", rusqlite::params![s.to_str(), d.to_str()]).unwrap();
+        }
+    }
+    // The service file intentionally survives a previous owner. Do not
+    // unlink it: that would let two processes lock different file objects.
+    let writer = pc_core::lock::take_writer(&cfg.db_path, "previous owner").unwrap();
+    drop(writer);
+    for _ in 0..2 {
+        let server = start(cfg.clone()).await.unwrap();
+        assert_eq!(server.active_job(), None);
+        for id in [1, 2] {
+            assert_eq!(job_state(&cfg.db_path, id), "interrupted");
+        }
+        assert_eq!(
+            std::fs::read(&src).unwrap(),
+            b"a file whose pending rename never happened"
+        );
+        assert!(!dst.exists());
+        assert!(!moved_src.exists());
+        assert_eq!(
+            std::fs::read(&moved_dst).unwrap(),
+            b"a file whose rename already happened"
+        );
+        let db = pc_db::Db::open(&cfg.db_path).unwrap();
+        let pending: i64 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM journal WHERE status='pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pending, 2,
+            "restart must not reconcile or replay disk operations"
+        );
+        server.shutdown(Shutdown::IfIdle).await.unwrap();
+        assert!(pc_core::lock::lock_path(&cfg.db_path).exists());
+        assert!(pc_core::lock::take_writer(&cfg.db_path, "next owner").is_ok());
+    }
+}

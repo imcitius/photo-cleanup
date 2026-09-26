@@ -31,6 +31,7 @@ name = "photo-cleanup-desktop"
 path = "src/main.rs"
 
 [dependencies]
+anyhow.workspace = true
 pc-core.workspace = true
 pc-db.workspace = true
 rusqlite.workspace = true
@@ -42,7 +43,7 @@ same-file = "1"
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 pc-api.workspace = true
-anyhow.workspace = true
+tokio.workspace = true
 # `custom-protocol` is what `tauri build` would switch on: assets come from
 # the binary, never from a development server. There is no development server
 # here at all — the interface is served by pc-api — so it is always on, and a
@@ -55,12 +56,18 @@ tauri = { version = "2.11", default-features = false, features = [
     "common-controls-v6",
     "dynamic-acl",
     "custom-protocol",
+    "tray-icon",
 ] }
 # The native folder dialog, called from our own `pick_folder` command only.
 # Not `tauri-plugin-dialog`: its init script replaces `window.confirm` with an
 # asynchronous IPC call, so `if (confirm(...))` in the shared interface would
 # always be true in the window — and the dialog is all we need of it.
 rfd = { version = "0.16", default-features = false, features = ["common-controls-v6"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Already used by Tauri. Intercept native Dock/menu termination before
+# AppKit bypasses Tauri's preventable ExitRequested event.
+objc2 = "0.6"
 
 [target.'cfg(any(windows, target_os = "macos"))'.build-dependencies]
 tauri-build = "2"
