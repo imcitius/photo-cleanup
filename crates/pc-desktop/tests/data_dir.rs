@@ -320,11 +320,11 @@ fn an_unreadable_bootstrap_is_an_error_and_is_left_as_it_was() {
 fn a_bootstrap_from_a_newer_version_is_neither_used_nor_overwritten() {
     let env = Env::new();
     fs::create_dir_all(&env.dirs.app_local_data).unwrap();
-    let newer = br#"{"version":2,"mode":"cloud","where":"x"}"#;
+    let newer = br#"{"version":3,"mode":"cloud","where":"x"}"#;
     fs::write(env.dirs.bootstrap_path(), newer).unwrap();
     let err = env.launch().unwrap_err();
     assert!(
-        matches!(err, StartupError::BootstrapUnsupported { version: 2, .. }),
+        matches!(err, StartupError::BootstrapUnsupported { version: 3, .. }),
         "{err:?}"
     );
     let dir = env.root.join("pc");

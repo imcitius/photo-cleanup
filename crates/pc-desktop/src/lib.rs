@@ -26,14 +26,17 @@
 //! external drive is unplugged must see "your data is not there", not a
 //! fresh, empty archive that looks as if everything was lost.
 
+mod binding;
 mod bootstrap;
 mod error;
+mod namespace;
 mod native;
 mod relocate;
 mod resolve;
 mod window;
 
-pub use bootstrap::{read_bootstrap, write_bootstrap, Bootstrap, Choice, StoredMode};
+pub use binding::DataGuard;
+pub use bootstrap::{read_bootstrap, write_bootstrap, Binding, Bootstrap, Choice, StoredMode};
 pub use error::{StartupError, Unavailable};
 pub use native::{
     desktop_info, interface_origin, permission, ChangeAction, DesktopInfo, ERROR_PAGE_COMMANDS,

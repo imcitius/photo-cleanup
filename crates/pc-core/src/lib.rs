@@ -4,6 +4,7 @@ pub mod bytes;
 pub mod disk;
 pub mod lang;
 pub mod lock;
+pub mod storage;
 pub mod thumbstore;
 pub mod time;
 pub mod volume;

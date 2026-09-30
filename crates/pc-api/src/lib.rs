@@ -122,6 +122,7 @@ pub async fn serve(
         thumbs: thumbs.to_path_buf(),
         quarantine,
         bind,
+        binding: None,
     })
     .await?;
     let local = server.local_addr();

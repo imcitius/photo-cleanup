@@ -142,11 +142,18 @@ function ChangeDialog({
   // verified copy after a failed restart. These prevent copying over it,
   // not the explicit switch. Still require existing_database below: sidecars
   // alone (or a symlink in place of the database) are not a usable target.
+  // A volume that cannot keep the copy's temporary folders private
+  // (no_private_folders), or a path others could redirect
+  // (unprotected_folder), forbids copying there, not switching: the switch
+  // creates no temporary folders and publishes no copy, and the backend
+  // checks the database again.
   const onlyOccupied = p.blockers.every(
     (b) =>
       b.kind === "database_exists" ||
       b.kind === "thumbs_exist" ||
-      b.kind === "sidecar_exists",
+      b.kind === "sidecar_exists" ||
+      b.kind === "no_private_folders" ||
+      b.kind === "unprotected_folder",
   );
   const run = async (action: "copy" | "use_existing") => {
     setBusy(true);

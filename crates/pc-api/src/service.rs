@@ -491,6 +491,10 @@ pub async fn reset(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Res
     }
     respond((|| {
         let db = st.db.lock().unwrap();
+        // A bound cache replaced at its path refuses the whole reset before
+        // the index is touched, not halfway: the index and the cache stay
+        // as they were, and the replacement keeps every file.
+        st.thumbs.confirm()?;
         db.reset_index()?;
         let thumbs = st.thumbs.clear()?;
         Ok(json!({"ok": true, "thumbs_removed": thumbs}))
@@ -1455,7 +1459,7 @@ fn as_writer(st: &AppState, what: &str) -> Result<pc_core::lock::WriterLock, Box
     if let Err(e) = jobs::idle(st) {
         return Err(Box::new(error(409, &e.to_string())));
     }
-    pc_core::lock::take_writer(&st.db_path, what).map_err(|e| {
+    st.take_writer(what).map_err(|e| {
         let code = if e.is::<pc_core::lock::Busy>() {
             409
         } else {

@@ -29,6 +29,10 @@ pub struct ServerConfig {
     pub quarantine: Option<PathBuf>,
     /// Port 0 lets the system choose; [`Server::local_addr`] tells which.
     pub bind: SocketAddr,
+    /// A bound data folder's proof ([`pc_core::storage`]); `None` for an
+    /// ordinary folder. Asked before the first write of start-up and before
+    /// every later database open, writer lock and thumbnail change.
+    pub binding: Option<pc_core::storage::Binding>,
 }
 
 /// A running server. Dropping it without [`Server::shutdown`] leaves the
@@ -113,8 +117,9 @@ pub async fn start(config: ServerConfig) -> Result<Server> {
         thumbs,
         quarantine,
         bind,
+        binding,
     } = config;
-    let mut state = AppState::new(&db_path, &thumbs, quarantine)?;
+    let mut state = AppState::open(&db_path, &thumbs, quarantine, binding)?;
     {
         // Before the first request, so an error during start-up is already in
         // the language the operator chose.
@@ -318,6 +323,7 @@ mod tests {
             thumbs: tmp.path().join("thumbs"),
             quarantine: None,
             bind: "127.0.0.1:0".parse().unwrap(),
+            binding: None,
         })
         .await
         .unwrap();

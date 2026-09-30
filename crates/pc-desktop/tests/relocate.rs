@@ -2,6 +2,18 @@
 //! overwritten, and a failed move leaves the old folder chosen.
 //!
 //! Everything runs on temporary directories.
+//!
+//! Copying needs a system whose namespaces the program can prove protected
+//! (macOS, Linux); elsewhere it is refused before anything is written, which
+//! `relocate_unsupported.rs` checks. Only the tests that copy are limited to
+//! those systems, each by its own `cfg`. Switching to an
+//! existing database, the checks on what is switched to, the preview's
+//! refusals and the verification itself are supported everywhere and run
+//! everywhere.
+#![cfg_attr(
+    not(any(target_os = "macos", target_os = "linux")),
+    allow(dead_code, unused_imports)
+)]
 
 use pc_desktop::{
     confirm_started, copy_data, measure, prepare, preview_move_with, read_bootstrap, resolve,
@@ -120,6 +132,7 @@ fn listing(dir: &Path) -> Vec<String> {
     v
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_move_copies_the_data_with_its_wal_and_the_next_launch_uses_it() {
     let env = Env::new();
@@ -134,7 +147,7 @@ fn a_move_copies_the_data_with_its_wal_and_the_next_launch_uses_it() {
     let target = env.root.join("Большой диск/Photo Cleanup data");
     let before = measure(&old).unwrap();
 
-    let copied = copy_data(&old, Source::System, &target, plenty).unwrap();
+    let copied = copy_data(&env.dirs, &old, Source::System, &target, plenty).unwrap();
     assert_eq!(copied.thumbs_files, 2);
     assert_eq!(copied.thumbs_bytes, 5_123 + 17_001);
     assert_eq!(marker_rows(&copied.layout.db), 250);
@@ -161,7 +174,7 @@ fn a_move_copies_the_data_with_its_wal_and_the_next_launch_uses_it() {
         );
     }
 
-    copied.commit(&env.dirs, Source::System).unwrap();
+    copied.commit().unwrap();
     let b = read_bootstrap(&env.dirs.bootstrap_path()).unwrap().unwrap();
     assert_eq!(b.current.mode, StoredMode::Custom);
     assert_eq!(b.current.data_dir.as_deref(), Some(target.as_path()));
@@ -177,13 +190,14 @@ fn a_move_copies_the_data_with_its_wal_and_the_next_launch_uses_it() {
     assert_eq!(marker_rows(&old.db), 250);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn the_preview_changes_nothing_and_names_the_sizes() {
     let env = Env::new();
     let old = env.started();
     let boot = env.bootstrap();
     let target = env.root.join("новая папка");
-    let p = preview_move_with(&old, Source::System, &target, plenty);
+    let p = preview_move_with(&env.dirs, &old, Source::System, &target, plenty);
     assert!(p.blockers.is_empty(), "{:?}", p.blockers);
     assert!(p.size.db_bytes > 0);
     assert_eq!(p.size.thumbs_files, 2);
@@ -193,6 +207,7 @@ fn the_preview_changes_nothing_and_names_the_sizes() {
     assert_eq!(env.bootstrap(), boot);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_folder_with_a_database_is_never_copied_over() {
     let env = Env::new();
@@ -212,10 +227,10 @@ fn a_folder_with_a_database_is_never_copied_over() {
     let bytes = fs::read(&theirs).unwrap();
     let boot = env.bootstrap();
 
-    let p = preview_move_with(&old, Source::System, &target, plenty);
+    let p = preview_move_with(&env.dirs, &old, Source::System, &target, plenty);
     assert!(p.existing_database);
     assert!(p.blockers.contains(&Blocker::DatabaseExists));
-    let err = copy_data(&old, Source::System, &target, plenty).unwrap_err();
+    let err = copy_data(&env.dirs, &old, Source::System, &target, plenty).unwrap_err();
     assert!(matches!(err, RelocateError::Blocked { .. }), "{err:?}");
     assert_eq!(fs::read(&theirs).unwrap(), bytes);
     assert_eq!(listing(&target), vec![DB_FILE.to_string()]);
@@ -242,6 +257,7 @@ fn a_file_that_is_not_our_database_is_not_switched_to() {
     assert_eq!(env.bootstrap(), boot);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn not_enough_space_stops_the_move_before_anything_is_written() {
     let env = Env::new();
@@ -249,7 +265,7 @@ fn not_enough_space_stops_the_move_before_anything_is_written() {
     let target = env.root.join("small disk");
     let boot = env.bootstrap();
     let tiny = |_: &Path| Ok(1024u64);
-    let p = preview_move_with(&old, Source::System, &target, tiny);
+    let p = preview_move_with(&env.dirs, &old, Source::System, &target, tiny);
     assert!(p.blockers.iter().any(|b| matches!(
         b,
         Blocker::NotEnoughSpace {
@@ -257,7 +273,7 @@ fn not_enough_space_stops_the_move_before_anything_is_written() {
             ..
         }
     )));
-    let err = copy_data(&old, Source::System, &target, tiny).unwrap_err();
+    let err = copy_data(&env.dirs, &old, Source::System, &target, tiny).unwrap_err();
     assert!(matches!(err, RelocateError::Blocked { .. }), "{err:?}");
     assert!(!target.exists());
     assert_eq!(env.bootstrap(), boot);
@@ -265,7 +281,7 @@ fn not_enough_space_stops_the_move_before_anything_is_written() {
 }
 
 // Symbolic links need no privilege on unix only.
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_failed_copy_removes_only_its_own_partials_and_keeps_the_source_chosen() {
     let env = Env::new();
@@ -277,7 +293,7 @@ fn a_failed_copy_removes_only_its_own_partials_and_keeps_the_source_chosen() {
     fs::write(target.join("someone-elses.txt"), b"keep").unwrap();
     let boot = env.bootstrap();
 
-    let err = copy_data(&old, Source::System, &target, plenty).unwrap_err();
+    let err = copy_data(&env.dirs, &old, Source::System, &target, plenty).unwrap_err();
     assert!(matches!(err, RelocateError::Copy { .. }), "{err:?}");
     assert_eq!(listing(&target), vec!["someone-elses.txt".to_string()]);
     assert_eq!(env.bootstrap(), boot);
@@ -287,6 +303,7 @@ fn a_failed_copy_removes_only_its_own_partials_and_keeps_the_source_chosen() {
     assert_eq!(marker_rows(&now.db), 250);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_partial_left_by_someone_else_blocks_the_move_and_is_not_removed() {
     let env = Env::new();
@@ -294,7 +311,7 @@ fn a_partial_left_by_someone_else_blocks_the_move_and_is_not_removed() {
     let target = env.root.join("dest");
     fs::create_dir_all(target.join(PARTIAL_THUMBS)).unwrap();
     fs::write(target.join(PARTIAL_DB), b"whose?").unwrap();
-    let err = copy_data(&old, Source::System, &target, plenty).unwrap_err();
+    let err = copy_data(&env.dirs, &old, Source::System, &target, plenty).unwrap_err();
     let RelocateError::Blocked { blockers } = err else {
         panic!("{err:?}")
     };
@@ -309,13 +326,14 @@ fn a_partial_left_by_someone_else_blocks_the_move_and_is_not_removed() {
     assert!(target.join(PARTIAL_THUMBS).is_dir());
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn another_writer_on_the_source_stops_the_move() {
     let env = Env::new();
     let old = env.started();
     let _cli = pc_core::lock::take_writer(&old.db, "index").unwrap();
     let target = env.root.join("dest");
-    let err = copy_data(&old, Source::System, &target, plenty).unwrap_err();
+    let err = copy_data(&env.dirs, &old, Source::System, &target, plenty).unwrap_err();
     assert!(matches!(err, RelocateError::Locked { .. }), "{err:?}");
     assert!(!target.exists());
 }
@@ -324,11 +342,17 @@ fn another_writer_on_the_source_stops_the_move() {
 fn the_current_folder_and_its_cache_are_not_targets() {
     let env = Env::new();
     let old = env.started();
-    let same = preview_move_with(&old, Source::System, &old.dir, plenty);
+    let same = preview_move_with(&env.dirs, &old, Source::System, &old.dir, plenty);
     assert!(same.blockers.contains(&Blocker::SameFolder));
-    let inside = preview_move_with(&old, Source::System, &old.thumbs.join("x/y"), plenty);
+    let inside = preview_move_with(
+        &env.dirs,
+        &old,
+        Source::System,
+        &old.thumbs.join("x/y"),
+        plenty,
+    );
     assert!(inside.blockers.contains(&Blocker::InsideCurrent));
-    let relative = preview_move_with(&old, Source::System, Path::new("data"), plenty);
+    let relative = preview_move_with(&env.dirs, &old, Source::System, Path::new("data"), plenty);
     assert!(relative.blockers.contains(&Blocker::RelativePath));
 }
 
@@ -338,21 +362,22 @@ fn portable_and_command_line_folders_are_not_moved() {
     let old = env.started();
     let target = env.root.join("dest");
     for source in [Source::Portable, Source::Override] {
-        let p = preview_move_with(&old, source, &target, plenty);
+        let p = preview_move_with(&env.dirs, &old, source, &target, plenty);
         assert!(p.blockers.contains(&Blocker::ModeFixed { source }));
-        assert!(copy_data(&old, source, &target, plenty).is_err());
+        assert!(copy_data(&env.dirs, &old, source, &target, plenty).is_err());
         assert!(switch_to_existing(&env.dirs, source, &target).is_err());
     }
     assert!(!target.exists());
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_moved_folder_that_fails_to_start_offers_the_old_one_back() {
     let env = Env::new();
     let old = env.started();
     let target = env.root.join("external/Photo Cleanup");
-    let copied = copy_data(&old, Source::System, &target, plenty).unwrap();
-    copied.commit(&env.dirs, Source::System).unwrap();
+    let copied = copy_data(&env.dirs, &old, Source::System, &target, plenty).unwrap();
+    copied.commit().unwrap();
     // The restart finds the drive gone.
     fs::rename(&target, env.root.join("unplugged")).unwrap();
     let err = env.launch().unwrap_err();
@@ -384,24 +409,49 @@ fn a_copy_that_differs_from_the_source_is_rejected() {
     );
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn both_writer_locks_cover_the_gap_between_verification_and_bootstrap_commit() {
     let env = Env::new();
     let old = env.started();
     let target = env.root.join("dest");
-    let copied = copy_data(&old, Source::System, &target, plenty).unwrap();
+    let copied = copy_data(&env.dirs, &old, Source::System, &target, plenty).unwrap();
     assert!(pc_core::lock::take_writer(&old.db, "late source writer").is_err());
     assert!(pc_core::lock::take_writer(&copied.layout.db, "late target writer").is_err());
-    copied.commit(&env.dirs, Source::System).unwrap();
+    copied.commit().unwrap();
     assert!(pc_core::lock::take_writer(&old.db, "after commit").is_ok());
 }
 
+/// The same refusal without a copy, so it holds on every system that can
+/// switch: an existing archive in another folder, with a writer at work on
+/// it, is not switched to, and the choice stays; once the writer is done,
+/// the switch goes through.
+#[test]
+fn switching_to_an_existing_database_with_an_active_writer_keeps_the_old_choice() {
+    let env = Env::new();
+    env.started();
+    let other = Env::new();
+    let existing = other.started().dir;
+    let boot = env.bootstrap();
+    let writer = pc_core::lock::take_writer(&existing.join(DB_FILE), "another program").unwrap();
+    for _ in 0..2 {
+        let err = switch_to_existing(&env.dirs, Source::System, &existing).unwrap_err();
+        assert!(matches!(err, RelocateError::Locked { .. }), "{err:?}");
+        assert!(err.to_string().contains("another program"), "{err}");
+        assert_eq!(env.bootstrap(), boot);
+    }
+    drop(writer);
+    switch_to_existing(&env.dirs, Source::System, &existing).unwrap();
+    assert_eq!(env.launch().unwrap().dir, existing);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn switching_to_a_database_with_an_active_writer_keeps_the_old_choice() {
     let env = Env::new();
     let old = env.started();
     let target = env.root.join("dest");
-    let copied = copy_data(&old, Source::System, &target, plenty).unwrap();
+    let copied = copy_data(&env.dirs, &old, Source::System, &target, plenty).unwrap();
     let boot = env.bootstrap();
     assert!(matches!(
         switch_to_existing(&env.dirs, Source::System, &target),
@@ -412,6 +462,7 @@ fn switching_to_a_database_with_an_active_writer_keeps_the_old_choice() {
     switch_to_existing(&env.dirs, Source::System, &target).unwrap();
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_partial_created_after_preview_belongs_to_someone_else() {
     let env = Env::new();
@@ -427,11 +478,12 @@ fn a_partial_created_after_preview_belongs_to_someone_else() {
         }
         Ok(PLENTY)
     };
-    assert!(copy_data(&old, Source::System, &target, probe).is_err());
+    assert!(copy_data(&env.dirs, &old, Source::System, &target, probe).is_err());
     assert_eq!(fs::read(target.join(PARTIAL_DB)).unwrap(), b"not ours");
     assert_eq!(marker_rows(&old.db), 250);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn publishing_never_replaces_a_name_that_appeared_during_copy() {
     let env = Env::new();
@@ -457,15 +509,16 @@ fn publishing_never_replaces_a_name_that_appeared_during_copy() {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_restart_spawn_failure_restores_the_bootstrap_and_preserves_both_copies() {
     let env = Env::new();
     let old = env.started();
     let boot = env.bootstrap();
     let target = env.root.join("dest");
-    copy_data(&old, Source::System, &target, plenty)
+    copy_data(&env.dirs, &old, Source::System, &target, plenty)
         .unwrap()
-        .commit(&env.dirs, Source::System)
+        .commit()
         .unwrap();
     let error = pc_desktop::restart_or_restore(&env.dirs, || Err("injected spawn failure".into()))
         .unwrap_err();
@@ -476,6 +529,7 @@ fn a_restart_spawn_failure_restores_the_bootstrap_and_preserves_both_copies() {
     assert_eq!(marker_rows(&target.join(DB_FILE)), 250);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_foreign_target_wal_survives_copy_and_restart() {
     let env = Env::new();
@@ -498,12 +552,12 @@ fn a_foreign_target_wal_survives_copy_and_restart() {
     let foreign = fs::read(&wal).unwrap();
     assert!(!foreign.is_empty(), "exercise a real uncheckpointed WAL");
     let boot = env.bootstrap();
-    let result = copy_data(&old, Source::System, &target, plenty);
+    let result = copy_data(&env.dirs, &old, Source::System, &target, plenty);
     // Exercise the full old failure path, rather than only asserting that
     // preview should reject it: SQLite removed this foreign WAL on restart.
     let permitted = result.is_ok();
     if let Ok(copied) = result {
-        copied.commit(&env.dirs, Source::System).unwrap();
+        copied.commit().unwrap();
         drop(pc_db::Db::open(&target.join(DB_FILE)).unwrap());
         assert_eq!(setting(&target.join(DB_FILE)), "исходная");
     }
@@ -516,6 +570,7 @@ fn a_foreign_target_wal_survives_copy_and_restart() {
     assert_eq!(marker_rows(&old.db), 250);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_snapshot_error_preserves_a_foreign_partial_wal() {
     let env = Env::new();
@@ -528,7 +583,7 @@ fn a_snapshot_error_preserves_a_foreign_partial_wal() {
     fs::create_dir(&target).unwrap();
     let wal = target.join(format!("{PARTIAL_DB}-wal"));
     fs::write(&wal, b"not owned by this relocation").unwrap();
-    assert!(copy_data(&old, Source::System, &target, plenty).is_err());
+    assert!(copy_data(&env.dirs, &old, Source::System, &target, plenty).is_err());
     assert_eq!(env.bootstrap(), boot);
     assert_eq!(fs::read(&old.db).unwrap(), b"broken sqlite input");
     assert_eq!(
@@ -538,6 +593,7 @@ fn a_snapshot_error_preserves_a_foreign_partial_wal() {
     );
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn every_foreign_sqlite_sidecar_blocks_copy_without_being_changed() {
     let env = Env::new();
@@ -549,13 +605,13 @@ fn every_foreign_sqlite_sidecar_blocks_copy_without_being_changed() {
             fs::create_dir(&target).unwrap();
             let foreign = target.join(format!("{name}{suffix}"));
             fs::write(&foreign, b"foreign recovery data").unwrap();
-            let preview = preview_move_with(&old, Source::System, &target, plenty);
+            let preview = preview_move_with(&env.dirs, &old, Source::System, &target, plenty);
             assert!(!preview.blockers.is_empty(), "{}", foreign.display());
             assert!(
                 !preview.existing_database,
                 "sidecars are not a DB to switch to"
             );
-            assert!(copy_data(&old, Source::System, &target, plenty).is_err());
+            assert!(copy_data(&env.dirs, &old, Source::System, &target, plenty).is_err());
             assert_eq!(fs::read(foreign).unwrap(), b"foreign recovery data");
             assert_eq!(listing(&target), vec![format!("{name}{suffix}")]);
             assert_eq!(env.bootstrap(), boot);
@@ -564,6 +620,7 @@ fn every_foreign_sqlite_sidecar_blocks_copy_without_being_changed() {
     assert_eq!(marker_rows(&old.db), 250);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn sidecars_appearing_after_either_preview_are_preserved() {
     let env = Env::new();
@@ -585,7 +642,7 @@ fn sidecars_appearing_after_either_preview_are_preserved() {
                     }
                     Ok(PLENTY)
                 };
-                assert!(copy_data(&old, Source::System, &target, probe).is_err());
+                assert!(copy_data(&env.dirs, &old, Source::System, &target, probe).is_err());
                 assert_eq!(fs::read(foreign).unwrap(), b"late foreign data");
                 assert!(!target.join(DB_FILE).exists());
                 assert!(!target.join(PARTIAL_DB).exists());
@@ -601,7 +658,7 @@ fn sidecars_appearing_after_either_preview_are_preserved() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn symlinks_and_dangling_names_block_copy_even_after_preview() {
     use std::os::unix::fs::symlink;
@@ -628,7 +685,8 @@ fn symlinks_and_dangling_names_block_copy_even_after_preview() {
                 let link = target.join(name);
                 if !after_preview {
                     symlink(&referent, &link).unwrap();
-                    let preview = preview_move_with(&old, Source::System, &target, plenty);
+                    let preview =
+                        preview_move_with(&env.dirs, &old, Source::System, &target, plenty);
                     assert!(!preview.blockers.is_empty());
                     assert!(!preview.existing_database);
                 }
@@ -640,7 +698,7 @@ fn symlinks_and_dangling_names_block_copy_even_after_preview() {
                     }
                     Ok(PLENTY)
                 };
-                assert!(copy_data(&old, Source::System, &target, probe).is_err());
+                assert!(copy_data(&env.dirs, &old, Source::System, &target, probe).is_err());
                 assert_eq!(fs::read_link(link).unwrap(), referent);
                 if dangling {
                     assert!(!referent.exists());
@@ -653,6 +711,7 @@ fn symlinks_and_dangling_names_block_copy_even_after_preview() {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_snapshot_failure_removes_its_private_namespace_and_reservations() {
     let env = Env::new();
@@ -665,7 +724,7 @@ fn a_snapshot_failure_removes_its_private_namespace_and_reservations() {
     fs::create_dir(&target).unwrap();
     fs::write(target.join("foreign"), b"keep").unwrap();
     assert!(matches!(
-        copy_data(&old, Source::System, &target, plenty),
+        copy_data(&env.dirs, &old, Source::System, &target, plenty),
         Err(RelocateError::Copy { .. })
     ));
     assert_eq!(
@@ -677,6 +736,7 @@ fn a_snapshot_failure_removes_its_private_namespace_and_reservations() {
     assert_eq!(fs::read(old.db).unwrap(), b"broken sqlite input");
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn replaced_or_modified_final_sidecars_block_bootstrap_commit() {
     let env = Env::new();
@@ -685,13 +745,13 @@ fn replaced_or_modified_final_sidecars_block_bootstrap_commit() {
     for replace in [false, true] {
         for suffix in ["-wal", "-shm", "-journal"] {
             let target = env.root.join(format!("{replace}{suffix}"));
-            let copied = copy_data(&old, Source::System, &target, plenty).unwrap();
+            let copied = copy_data(&env.dirs, &old, Source::System, &target, plenty).unwrap();
             let foreign = target.join(format!("{DB_FILE}{suffix}"));
             if replace {
                 fs::remove_file(&foreign).unwrap();
             }
             fs::write(&foreign, b"late foreign data").unwrap();
-            assert!(copied.commit(&env.dirs, Source::System).is_err());
+            assert!(copied.commit().is_err());
             assert_eq!(fs::read(foreign).unwrap(), b"late foreign data");
             assert_eq!(env.bootstrap(), boot);
             assert_eq!(marker_rows(&old.db), 250);
@@ -699,14 +759,15 @@ fn replaced_or_modified_final_sidecars_block_bootstrap_commit() {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn owned_empty_sidecars_survive_commit_and_sqlite_can_restart_twice() {
     let env = Env::new();
     let old = env.started();
     let target = env.root.join("dest");
-    copy_data(&old, Source::System, &target, plenty)
+    copy_data(&env.dirs, &old, Source::System, &target, plenty)
         .unwrap()
-        .commit(&env.dirs, Source::System)
+        .commit()
         .unwrap();
     for suffix in ["-wal", "-shm", "-journal"] {
         assert_eq!(

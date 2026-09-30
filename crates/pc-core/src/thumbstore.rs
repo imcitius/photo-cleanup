@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct ThumbStore {
     root: PathBuf,
+    /// A bound data folder's proof ([`crate::storage`]), asked before every
+    /// write and removal. `None` for an ordinary folder.
+    binding: Option<crate::storage::Binding>,
 }
 
 pub fn hex32(bytes: &[u8]) -> String {
@@ -43,7 +46,37 @@ fn write_then_rename(path: &Path, jpeg: &[u8]) -> Result<()> {
 
 impl ThumbStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            binding: None,
+        }
+    }
+
+    /// A cache in a bound data folder: nothing is written into or removed
+    /// from `root` unless the binding confirms, right before, that it is
+    /// still the proven folder. A replaced folder is left exactly as it is.
+    pub fn bound(root: impl Into<PathBuf>, binding: crate::storage::Binding) -> Self {
+        Self {
+            root: root.into(),
+            binding: Some(binding),
+        }
+    }
+
+    /// For a bound cache: it is still the proven folder, so a change made
+    /// now would land in it ([`crate::storage`]). Always `Ok` otherwise.
+    /// Every write and removal asks this itself; callers that change other
+    /// things along with the cache ask first, so a refusal changes nothing.
+    pub fn confirm(&self) -> Result<()> {
+        self.check()
+    }
+
+    fn check(&self) -> Result<()> {
+        match &self.binding {
+            None => Ok(()),
+            Some(b) => b
+                .check_thumbnails()
+                .map_err(|why| crate::storage::NotBound(why).into()),
+        }
     }
 
     /// `ab/cd/<key>.jpg` — two levels of fan-out keeps directories small
@@ -71,6 +104,7 @@ impl ThumbStore {
         if path.exists() {
             return Ok(key);
         }
+        self.check()?;
         let parent = path.parent().context(crate::tr!(
             "нет родительского каталога",
             "no parent directory"
@@ -85,6 +119,7 @@ impl ThumbStore {
     /// identified by their own content — a rendered view of a file, which is
     /// keyed by the file it was rendered from.
     pub fn put_at(&self, key: &str, jpeg: &[u8]) -> Result<()> {
+        self.check()?;
         let path = self.path_for(key);
         let parent = path.parent().context(crate::tr!(
             "нет родительского каталога",
@@ -111,7 +146,12 @@ impl ThumbStore {
     /// once the rows that referenced them are gone — and a cache left behind
     /// after a reset is several gigabytes that no page will ever ask for.
     /// Returns how many files went.
+    ///
+    /// In a bound data folder the folder is confirmed first: a replacement
+    /// put at its path — somebody else's pictures, say — is refused, not
+    /// emptied.
     pub fn clear(&self) -> Result<u64> {
+        self.check()?;
         let mut removed = 0;
         let entries = match fs::read_dir(&self.root) {
             Ok(e) => e,

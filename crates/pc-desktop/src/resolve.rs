@@ -25,9 +25,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::bootstrap::{read_bootstrap, write_bootstrap, Bootstrap, Choice, StoredMode};
+use crate::binding::DataGuard;
+use crate::bootstrap::{read_bootstrap, write_bootstrap, Binding, Bootstrap, Choice, StoredMode};
 use crate::error::{StartupError, Unavailable};
 use crate::{DataLayout, SystemDirs, DATA_SUBDIR, DB_FILE};
+use std::sync::Arc;
 
 /// Where this launch's data directory came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -77,6 +79,9 @@ pub struct Resolved {
     /// whether to use it ([`choose_data_dir`] with [`NewDir::UseExisting`])
     /// or start fresh; it is never picked up silently.
     pub legacy_dir: Option<PathBuf>,
+    /// The objects a moved folder must be ([`crate::binding`]); `None` for
+    /// an unbound choice.
+    pub binding: Option<Binding>,
 }
 
 /// A data directory whose database opened. Hand `layout` to `pc-api`.
@@ -86,6 +91,39 @@ pub struct Prepared {
     pub layout: DataLayout,
     /// The database did not exist before this launch.
     pub created: bool,
+    /// A bound folder, proven before its database was opened and held for
+    /// as long as this value (the shell keeps it for the whole run).
+    #[serde(skip)]
+    pub guard: Option<Arc<DataGuard>>,
+    #[serde(skip)]
+    pub previous: Option<Choice>,
+}
+
+impl Prepared {
+    /// What the server must ask before each write for a bound folder
+    /// ([`pc_core::storage`]); `None` for an ordinary one.
+    pub fn storage_binding(&self) -> Option<pc_core::storage::Binding> {
+        self.guard.clone().map(|g| g as pc_core::storage::Binding)
+    }
+
+    /// For a bound folder: the path still leads to the proven objects. The
+    /// server itself asks the same before every write
+    /// ([`Prepared::storage_binding`]); the shell asks this to tell a
+    /// refused start-up ("not the bound copy", with the way back) from
+    /// any other server failure.
+    pub fn verify_binding(&self) -> Result<(), StartupError> {
+        match &self.guard {
+            None => Ok(()),
+            Some(guard) => guard
+                .verify()
+                .map_err(|reason| StartupError::DataUnavailable {
+                    source: self.source,
+                    dir: self.layout.dir.clone(),
+                    why: Unavailable::NotTheBoundCopy(reason),
+                    previous: self.previous.clone(),
+                }),
+        }
+    }
 }
 
 /// Decide the data directory for this launch. Reads, never writes.
@@ -102,6 +140,9 @@ pub fn resolve(dirs: &SystemDirs, override_dir: Option<&Path>) -> Result<Resolve
         Some(b) => {
             let (source, dir) = locate(dirs, &b.current);
             check_existing(source, &dir, &b.previous)?;
+            if let Some(binding) = &b.current.binding {
+                bound(source, &dir, binding, &b.previous)?;
+            }
             Ok(Resolved {
                 source,
                 layout: DataLayout::in_dir(&dir),
@@ -109,6 +150,7 @@ pub fn resolve(dirs: &SystemDirs, override_dir: Option<&Path>) -> Result<Resolve
                 persist: None,
                 previous: b.previous,
                 legacy_dir: None,
+                binding: b.current.binding.as_deref().cloned(),
             })
         }
         None => {
@@ -144,6 +186,12 @@ pub fn prepare(dirs: &SystemDirs, r: &Resolved) -> Result<Prepared, StartupError
         why,
         previous: r.previous.clone(),
     };
+    // A bound folder is proven before anything else touches it: before the
+    // write probe, SQLite, its `-wal`/`-shm` and migrations.
+    let guard = match &r.binding {
+        None => None,
+        Some(binding) => Some(Arc::new(bound(r.source, dir, binding, &r.previous)?)),
+    };
     match (r.creation, exists) {
         (Creation::MustBeNew, true) => {
             return Err(StartupError::DatabaseExists { dir: dir.clone() })
@@ -158,8 +206,15 @@ pub fn prepare(dirs: &SystemDirs, r: &Resolved) -> Result<Prepared, StartupError
             .map_err(|e| unavailable(Unavailable::NotWritable(e.to_string())))?;
     }
     probe_writable(dir).map_err(|e| unavailable(Unavailable::NotWritable(e.to_string())))?;
-    if exists {
+    if let Some(guard) = &guard {
+        // Through the guard, so a file put at the name after the proof is
+        // refused before SQLite writes to it ([`pc_db::Db::open_bound`]).
+        open_bound(db, guard.as_ref()).map_err(unavailable)?;
+    } else if exists {
         open_existing(db).map_err(unavailable)?;
+    } else if r.binding.is_some() {
+        // Never create a database in place of a bound one.
+        return Err(unavailable(Unavailable::NoDatabase));
     } else {
         pc_db::Db::open(db).map_err(|e| StartupError::CreateFailed {
             dir: dir.clone(),
@@ -175,6 +230,8 @@ pub fn prepare(dirs: &SystemDirs, r: &Resolved) -> Result<Prepared, StartupError
         source: r.source,
         layout: r.layout.clone(),
         created: !exists,
+        guard,
+        previous: r.previous.clone(),
     })
 }
 
@@ -245,6 +302,7 @@ pub fn choose_data_dir(
         persist: Some(Bootstrap::new(choice, previous)),
         previous: None,
         legacy_dir: None,
+        binding: None,
     })
 }
 
@@ -259,13 +317,32 @@ pub fn revert_to_previous(dirs: &SystemDirs) -> Result<Resolved, StartupError> {
         .ok_or(StartupError::NoPrevious)?;
     let (source, dir) = locate(dirs, &previous);
     check_existing(source, &dir, &None)?;
+    if let Some(binding) = &previous.binding {
+        bound(source, &dir, binding, &None)?;
+    }
     Ok(Resolved {
         source,
         layout: DataLayout::in_dir(&dir),
         creation: Creation::MustExist,
+        binding: previous.binding.as_deref().cloned(),
         persist: Some(Bootstrap::new(previous, None)),
         previous: None,
         legacy_dir: None,
+    })
+}
+
+/// A bound folder must hold the proven objects ([`DataGuard::open`]).
+fn bound(
+    source: Source,
+    dir: &Path,
+    binding: &Binding,
+    previous: &Option<Choice>,
+) -> Result<DataGuard, StartupError> {
+    DataGuard::open(dir, binding).map_err(|reason| StartupError::DataUnavailable {
+        source,
+        dir: dir.to_path_buf(),
+        why: Unavailable::NotTheBoundCopy(reason),
+        previous: previous.clone(),
     })
 }
 
@@ -277,6 +354,7 @@ fn fresh(source: Source, dir: &Path, persist: Option<Bootstrap>) -> Resolved {
         persist,
         previous: None,
         legacy_dir: None,
+        binding: None,
     }
 }
 
@@ -485,6 +563,19 @@ fn probe_writable_with(
         io::ErrorKind::AlreadyExists,
         "no free name for the write probe",
     ))
+}
+
+/// [`open_existing`] for a bound folder: the guard is asked before SQLite
+/// opens the file and again before it writes, and a refusal is reported as
+/// "not the bound copy" with nothing written.
+fn open_bound(db: &Path, guard: &DataGuard) -> Result<(), Unavailable> {
+    pc_db::Db::open_bound(db, guard).map_err(|e| {
+        match e.downcast_ref::<pc_core::storage::NotBound>() {
+            Some(refusal) => Unavailable::NotTheBoundCopy(refusal.0.clone()),
+            None => Unavailable::NotADatabase(format!("{e:#}")),
+        }
+    })?;
+    Ok(())
 }
 
 /// Open an existing database without the power to create one, so that a

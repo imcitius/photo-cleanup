@@ -45,19 +45,32 @@ pub fn lock_path(db_path: &Path) -> PathBuf {
 /// refusal can be specific rather than "busy".
 pub fn take_writer(db_path: &Path, what: &str) -> Result<WriterLock> {
     let path = lock_path(db_path);
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .with_context(|| {
-            crate::tf!(
-                "не открыть файл замка {0}",
-                "cannot open the lock file {0}",
-                path.display()
-            )
-        })?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    // The note below is written into whatever the name leads to. A link
+    // there — a symbolic link, or a second name of somebody else's file —
+    // would have that file truncated and overwritten, so the name is never
+    // followed, and a file with other names is refused before a byte of it
+    // changes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options.open(&path).with_context(|| {
+        crate::tf!(
+            "не открыть файл замка {0} (он должен быть обычным файлом, не ссылкой)",
+            "cannot open the lock file {0} (it must be a plain file, not a link)",
+            path.display()
+        )
+    })?;
+    lone_file(&file).with_context(|| {
+        crate::tf!(
+            "файл замка {0} не тронут",
+            "the lock file {0} was left untouched",
+            path.display()
+        )
+    })?;
 
     if !try_lock(&file)? {
         let held = note_of(&path);
@@ -89,6 +102,33 @@ pub fn take_writer(db_path: &Path, what: &str) -> Result<WriterLock> {
     let _ = file.write_all(note.as_bytes());
     let _ = file.flush();
     Ok(WriterLock { _file: file })
+}
+
+/// The lock file is a plain file with this one name, so writing the note
+/// cannot change anything else.
+#[cfg(unix)]
+fn lone_file(file: &File) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let m = file.metadata()?;
+    if !m.is_file() {
+        anyhow::bail!(crate::tr!("это не обычный файл", "it is not a plain file"));
+    }
+    if m.nlink() != 1 {
+        anyhow::bail!(crate::tf!(
+            "у этого файла {0} имени: запись изменила бы и другие",
+            "this file has {0} names: writing to it would change the others too",
+            m.nlink()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn lone_file(file: &File) -> Result<()> {
+    if !file.metadata()?.is_file() {
+        anyhow::bail!(crate::tr!("это не обычный файл", "it is not a plain file"));
+    }
+    Ok(())
 }
 
 /// The first byte is the lock itself; the note lives after it.
@@ -191,6 +231,42 @@ mod tests {
         let db = tmp.path().join("test.db");
         let _held = take_writer(&db, "перенос копий").unwrap();
         assert!(note_of(&lock_path(&db)).contains("перенос копий"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_lock_name_is_refused_and_its_file_keeps_every_byte() {
+        // Somebody else's file behind a symbolic link or a second name at
+        // the lock's name would be truncated and overwritten by the note.
+        for hard in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let db = tmp.path().join("photo-cleanup.db");
+            let foreign = tmp.path().join("foreign-notes.txt");
+            std::fs::write(&foreign, b"foreign original 97301").unwrap();
+            let before = std::fs::metadata(&foreign).unwrap().modified().unwrap();
+            if hard {
+                std::fs::hard_link(&foreign, lock_path(&db)).unwrap();
+            } else {
+                std::os::unix::fs::symlink(&foreign, lock_path(&db)).unwrap();
+            }
+            for _ in 0..2 {
+                let refused = take_writer(&db, "перенос копий").unwrap_err();
+                assert!(!refused.is::<Busy>(), "{refused:#}");
+                assert!(
+                    format!("{refused:#}").contains("writer-lock"),
+                    "the refusal names the lock file: {refused:#}"
+                );
+            }
+            assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign original 97301");
+            assert_eq!(
+                std::fs::metadata(&foreign).unwrap().modified().unwrap(),
+                before
+            );
+            assert!(
+                std::fs::symlink_metadata(lock_path(&db)).is_ok(),
+                "left in place"
+            );
+        }
     }
 
     #[test]

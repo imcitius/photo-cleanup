@@ -26,6 +26,25 @@ pub struct Db {
     pub conn: Connection,
 }
 
+/// SQLite's own answer to "is the file I hold still the one at my path?".
+fn has_moved(conn: &Connection) -> Result<bool> {
+    let mut moved: std::ffi::c_int = 0;
+    // SAFETY: a live connection handle, the schema name is NUL-terminated,
+    // and HAS_MOVED writes one int through the pointer.
+    let rc = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            conn.handle(),
+            c"main".as_ptr(),
+            rusqlite::ffi::SQLITE_FCNTL_HAS_MOVED,
+            (&raw mut moved).cast(),
+        )
+    };
+    if rc != rusqlite::ffi::SQLITE_OK {
+        anyhow::bail!("SQLite cannot say which file it opened (code {rc})");
+    }
+    Ok(moved != 0)
+}
+
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -40,6 +59,73 @@ impl Db {
                 path.display()
             )
         })?;
+        Self::setup(conn)
+    }
+
+    /// [`Db::open`] for a bound data folder ([`pc_core::storage`]): the
+    /// database must already exist and be the proven file, and that is
+    /// established before SQLite writes anything — no journal mode, no
+    /// `-wal`/`-shm`, no migration touches a replacement.
+    ///
+    /// In order:
+    ///
+    /// 1. the binding confirms the path, the file and its companions;
+    /// 2. SQLite opens the path read-write *without* the right to create it
+    ///    and without following a link. Opening reads and writes nothing;
+    /// 3. SQLite itself is asked whether the file it holds is still the one
+    ///    at the path (`SQLITE_FCNTL_HAS_MOVED`), and the binding confirms
+    ///    the path once more. Together they say that the object SQLite holds
+    ///    is the proven one: for it to be another, the name would have to
+    ///    change to the other file and back again within these few calls —
+    ///    in a namespace only this user can change, only this user's own
+    ///    programs could do that;
+    /// 4. only then journal mode, pragmas and migrations.
+    ///
+    /// A refusal at 1–3 closes the connection having written nothing.
+    pub fn open_bound(path: &Path, binding: &dyn pc_core::storage::StorageBinding) -> Result<Self> {
+        use rusqlite::OpenFlags;
+        let refused = |why: String| {
+            anyhow::Error::new(pc_core::storage::NotBound(why)).context(pc_core::tf!(
+                "база {0} не открыта; в ней ничего не записано",
+                "the database {0} was not opened; nothing was written to it",
+                path.display()
+            ))
+        };
+        binding.check_database().map_err(refused)?;
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .with_context(|| {
+            pc_core::tf!(
+                "не удалось открыть базу {0}",
+                "could not open the database {0}",
+                path.display()
+            )
+        })?;
+        if has_moved(&conn)? {
+            return Err(refused(
+                pc_core::tr!(
+                    "файл под этим именем сменился, пока база открывалась",
+                    "the file at this name changed while the database was being opened"
+                )
+                .into(),
+            ));
+        }
+        binding.check_database().map_err(refused)?;
+        if conn.is_readonly(rusqlite::MAIN_DB)? {
+            anyhow::bail!(pc_core::tf!(
+                "база {0} открылась только для чтения",
+                "the database {0} opened read-only",
+                path.display()
+            ));
+        }
+        Self::setup(conn)
+    }
+
+    fn setup(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;

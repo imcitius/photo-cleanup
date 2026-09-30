@@ -26,6 +26,10 @@ pub enum Unavailable {
     /// The directory or database cannot be written. SQLite in WAL mode
     /// needs the directory itself writable, not just the file.
     NotWritable(String),
+    /// A folder the data was moved into holds other objects than the proven
+    /// copy, or its path is no longer protected ([`crate::binding`]).
+    /// Nothing there was opened, created or changed.
+    NotTheBoundCopy(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -95,6 +99,7 @@ impl fmt::Display for Unavailable {
             Self::NotWritable(r) => {
                 pc_core::tf!("нет доступа на запись: {0}", "cannot write there: {0}", r)
             }
+            Self::NotTheBoundCopy(r) => r.clone(),
         };
         f.write_str(&s)
     }

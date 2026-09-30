@@ -185,3 +185,138 @@ test("the data folder is shown, and a change needs a preview and an explicit but
   // Cancel and the refused folder never reached the change.
   expect(commands.indexOf("change_data_dir")).toBe(commands.length - 1);
 });
+
+test("a volume that cannot keep private folders forbids the copy, not the switch", async ({
+  page,
+}) => {
+  const card = "/Volumes/CARD/photo-cleanup";
+  const reason =
+    "/Volumes/CARD/photo-cleanup cannot hold the move's temporary folders private to this user: " +
+    "volume /Volumes/CARD (msdos) is mounted with ownership ignored (noowners): every user of " +
+    "this computer has owner rights to every folder on it. Choose a folder on another volume";
+  const refused = {
+    from: info.layout.dir,
+    to: card,
+    size: info.size,
+    needed: 70 * 1024 * 1024,
+    available: 900 * 1024 * 1024,
+    blockers: [{ kind: "no_private_folders", path: card, reason: "..." }],
+    reasons: [reason],
+    existing_database: false,
+  };
+  const calls = await desktop(page, {
+    pick_folder: [card, card],
+    preview_data_dir_change: [
+      refused,
+      {
+        ...refused,
+        blockers: [...refused.blockers, { kind: "database_exists" }],
+        reasons: [
+          ...refused.reasons,
+          "the folder already holds photo-cleanup.db; it is not overwritten",
+        ],
+        existing_database: true,
+      },
+    ],
+  });
+  await open(page, "Settings");
+  const change = page.getByRole("button", { name: "Change folder…" });
+  const dialog = page.getByRole("dialog", { name: "Change the data folder" });
+
+  // An empty folder there: the reason, with path and volume, and no copy.
+  await change.click();
+  await expect(dialog).toContainText(reason);
+  await expect(
+    dialog.getByRole("button", { name: "Copy and restart" }),
+  ).toBeDisabled();
+  await expect(
+    dialog.getByRole("button", {
+      name: "Switch to the database in this folder without copying",
+    }),
+  ).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+
+  // A database already there: switching to it makes no temporary folders,
+  // so it stays available.
+  await change.click();
+  await expect(dialog).toContainText(reason);
+  await expect(
+    dialog.getByRole("button", {
+      name: "Switch to the database in this folder without copying",
+    }),
+  ).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  expect((await calls()).map((c) => c.command)).not.toContain(
+    "change_data_dir",
+  );
+});
+
+test("a path others could redirect forbids the copy, not the switch", async ({
+  page,
+}) => {
+  const shared = "/Users/Shared/photo-cleanup";
+  const reason =
+    "the target folder /Users/Shared/photo-cleanup is on a path other users could redirect " +
+    "or re-permission: /Users/Shared permissions 1777 let other users add, rename and " +
+    "remove entries in it. Choose a folder whose whole path belongs only to you and the " +
+    "system, for example inside your home folder";
+  const refused = {
+    from: info.layout.dir,
+    to: shared,
+    size: info.size,
+    needed: 70 * 1024 * 1024,
+    available: 900 * 1024 * 1024,
+    blockers: [
+      {
+        kind: "unprotected_folder",
+        role: "target",
+        path: shared,
+        component: "/Users/Shared",
+        reason: "...",
+      },
+    ],
+    reasons: [reason],
+    existing_database: false,
+  };
+  const calls = await desktop(page, {
+    pick_folder: [shared, shared],
+    preview_data_dir_change: [
+      refused,
+      {
+        ...refused,
+        blockers: [...refused.blockers, { kind: "database_exists" }],
+        reasons: [
+          ...refused.reasons,
+          "the folder already holds photo-cleanup.db; it is not overwritten",
+        ],
+        existing_database: true,
+      },
+    ],
+  });
+  await open(page, "Settings");
+  const change = page.getByRole("button", { name: "Change folder…" });
+  const dialog = page.getByRole("dialog", { name: "Change the data folder" });
+
+  await change.click();
+  await expect(dialog).toContainText(reason);
+  await expect(
+    dialog.getByRole("button", { name: "Copy and restart" }),
+  ).toBeDisabled();
+  await expect(
+    dialog.getByRole("button", {
+      name: "Switch to the database in this folder without copying",
+    }),
+  ).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+
+  await change.click();
+  await expect(
+    dialog.getByRole("button", {
+      name: "Switch to the database in this folder without copying",
+    }),
+  ).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  expect((await calls()).map((c) => c.command)).not.toContain(
+    "change_data_dir",
+  );
+});

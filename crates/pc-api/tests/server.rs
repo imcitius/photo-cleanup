@@ -15,6 +15,7 @@ fn config(dir: &Path) -> ServerConfig {
         thumbs: dir.join("thumbs"),
         quarantine: None,
         bind: "127.0.0.1:0".parse().unwrap(),
+        binding: None,
     }
 }
 

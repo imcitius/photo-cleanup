@@ -27,9 +27,9 @@ use pc_api::{Server, ServerConfig, Shutdown, ShutdownError};
 use pc_desktop::{
     confirm_started, interface_origin, is_bundled_page, is_server_page, move_data, parse_args,
     permission, prepare, preview_move, resolve, revert_to_previous, server_url, switch_to_existing,
-    ChangeAction, DataLayout, DesktopInfo, MovePreview, Source, StartupError, StartupReport,
-    SystemDirs, ERROR_PAGE, ERROR_PAGE_COMMANDS, INTERFACE_COMMANDS, SERVER_BIND, WINDOW_LABEL,
-    WINDOW_MIN_SIZE, WINDOW_SIZE, WINDOW_TITLE,
+    ChangeAction, DataGuard, DataLayout, DesktopInfo, MovePreview, Source, StartupError,
+    StartupReport, SystemDirs, ERROR_PAGE, ERROR_PAGE_COMMANDS, INTERFACE_COMMANDS, SERVER_BIND,
+    WINDOW_LABEL, WINDOW_MIN_SIZE, WINDOW_SIZE, WINDOW_TITLE,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -48,6 +48,9 @@ struct Desktop {
     dirs: Mutex<Option<SystemDirs>>,
     /// The data folder in use, and how it was chosen.
     data: Mutex<Option<(Source, DataLayout)>>,
+    /// A bound data folder's proven objects, held open for the whole run
+    /// (`pc_desktop::DataGuard`).
+    guard: Mutex<Option<Arc<DataGuard>>>,
     server: Mutex<Option<Server>>,
     /// The server's address. Shared with the window's navigation rule, which
     /// must follow the server if it has to be restarted on another port.
@@ -62,6 +65,7 @@ impl Desktop {
         Self {
             dirs: Mutex::new(None),
             data: Mutex::new(None),
+            guard: Mutex::new(None),
             server: Mutex::new(None),
             addr: Arc::new(Mutex::new(None)),
             changing: tauri::async_runtime::Mutex::new(()),
@@ -177,8 +181,21 @@ fn launch(app: &AppHandle, data_dir: Option<&Path>) -> Result<Server, StartupRep
     // to the existing database" (`desktop_info().legacy_dir`).
     let previous = resolved.previous.clone();
     let prepared = prepare(&dirs, &resolved).map_err(|e| StartupReport::from_startup(&e))?;
-    let server = tauri::async_runtime::block_on(start_server(&prepared.layout, SERVER_BIND));
+    // A bound folder's guard goes with the server: it is asked before the
+    // server's first write and before every later database open, writer
+    // lock and thumbnail change, so a replacement put at one of the names
+    // is refused and left as it is.
+    let server = tauri::async_runtime::block_on(start_server(
+        &prepared.layout,
+        prepared.storage_binding(),
+        SERVER_BIND,
+    ));
     let server = server.map_err(|e| {
+        // Refused by the guard: the same report as a refusal before start,
+        // with the way back to the previous folder.
+        if let Err(refused) = prepared.verify_binding() {
+            return StartupReport::from_startup(&refused);
+        }
         let db = prepared.layout.db.display().to_string();
         let mut report = StartupReport::other("server", move || {
             pc_core::tf!(
@@ -202,10 +219,15 @@ fn launch(app: &AppHandle, data_dir: Option<&Path>) -> Result<Server, StartupRep
         return Err(StartupReport::from_startup(&e));
     }
     *lock(&state.data) = Some((prepared.source, prepared.layout.clone()));
+    *lock(&state.guard) = prepared.guard.clone();
     Ok(server)
 }
 
-async fn start_server(layout: &DataLayout, bind: SocketAddr) -> Result<Server, String> {
+async fn start_server(
+    layout: &DataLayout,
+    binding: Option<pc_core::storage::Binding>,
+    bind: SocketAddr,
+) -> Result<Server, String> {
     let config = ServerConfig {
         db_path: layout.db.clone(),
         thumbs: layout.thumbs.clone(),
@@ -213,6 +235,7 @@ async fn start_server(layout: &DataLayout, bind: SocketAddr) -> Result<Server, S
         // a rename on the same device.
         quarantine: None,
         bind,
+        binding,
     };
     pc_api::start(config).await.map_err(|e| format!("{e:#}"))
 }
@@ -385,10 +408,12 @@ async fn preview_data_dir_change(
     state: State<'_, Desktop>,
     target: String,
 ) -> Result<MovePreview, String> {
-    let (_, source, layout) = state.current()?;
-    tauri::async_runtime::spawn_blocking(move || preview_move(&layout, source, Path::new(&target)))
-        .await
-        .map_err(|e| e.to_string())
+    let (dirs, source, layout) = state.current()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        preview_move(&dirs, &layout, source, Path::new(&target))
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Change the data folder: stop the server, copy and verify (or switch to
@@ -417,8 +442,8 @@ async fn change_data_dir(
     // Everything that can be refused is refused while the server still runs.
     match action {
         ChangeAction::Copy => {
-            let (l, t) = (layout.clone(), target.clone());
-            let p = tauri::async_runtime::spawn_blocking(move || preview_move(&l, source, &t))
+            let (d, l, t) = (dirs.clone(), layout.clone(), target.clone());
+            let p = tauri::async_runtime::spawn_blocking(move || preview_move(&d, &l, source, &t))
                 .await
                 .map_err(|e| e.to_string())?;
             if !p.blockers.is_empty() {
@@ -597,9 +622,15 @@ mod tests {
 /// the old folder, so that is what it opens.
 async fn recover(app: &AppHandle, state: &Desktop, layout: &DataLayout, old_port: u16) {
     let same = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), old_port);
-    let server = match start_server(layout, same).await {
+    // A bound old folder is reopened through its guard, exactly as at
+    // start-up: a replacement is refused before the server writes to it,
+    // and the app restarts into the start-up checks, which say why.
+    let binding = lock(&state.guard)
+        .clone()
+        .map(|g| g as pc_core::storage::Binding);
+    let server = match start_server(layout, binding.clone(), same).await {
         Ok(s) => Ok(s),
-        Err(_) => start_server(layout, SERVER_BIND).await,
+        Err(_) => start_server(layout, binding, SERVER_BIND).await,
     };
     let server = match server {
         Ok(s) => s,

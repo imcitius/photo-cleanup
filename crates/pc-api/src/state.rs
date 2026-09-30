@@ -1,4 +1,5 @@
 use anyhow::Result;
+use pc_core::storage::Binding;
 use pc_core::ThumbStore;
 use pc_db::Db;
 use std::path::{Path, PathBuf};
@@ -21,14 +22,36 @@ pub struct AppState {
     /// Where moved files are parked. `None` means the default: the root of
     /// each file's own filesystem, which keeps the move a rename.
     pub quarantine: Option<PathBuf>,
+    /// A bound data folder's proof ([`pc_core::storage`]): asked before
+    /// every database open, writer lock and thumbnail write or removal.
+    pub binding: Option<Binding>,
+}
+
+/// Open the database the way this server does: through the binding when
+/// there is one, so a replaced file is refused before SQLite writes to it.
+pub fn open_db(path: &Path, binding: Option<&Binding>) -> Result<Db> {
+    match binding {
+        None => Db::open(path),
+        Some(b) => Db::open_bound(path, b.as_ref()),
+    }
 }
 
 impl AppState {
     pub fn new(db_path: &Path, thumbs: &Path, quarantine: Option<PathBuf>) -> Result<Self> {
+        Self::open(db_path, thumbs, quarantine, None)
+    }
+
+    /// [`AppState::new`], with a bound data folder's proof when there is one.
+    pub fn open(
+        db_path: &Path,
+        thumbs: &Path,
+        quarantine: Option<PathBuf>,
+        binding: Option<Binding>,
+    ) -> Result<Self> {
         let db_path = std::path::absolute(db_path)?;
         let thumbs = std::path::absolute(thumbs)?;
         let quarantine = quarantine.map(std::path::absolute).transpose()?;
-        let db = Db::open(&db_path)?;
+        let db = open_db(&db_path, binding.as_ref())?;
         // A job still marked as running belongs to a process that is gone —
         // unless it does not. A second server on the same database sees the
         // first one's live work here, and calling it interrupted is a lie
@@ -38,7 +61,7 @@ impl AppState {
         // writing, so whatever is still marked running stopped without
         // saying so. It is let go again at once; this is a question, not a
         // claim on the archive.
-        match pc_core::lock::take_writer(&db_path, "") {
+        match take_writer(&db_path, binding.as_ref(), "") {
             Ok(writer) => {
                 db.conn.execute(
                     "UPDATE jobs SET state='interrupted', finished_at=?1, error=?2
@@ -64,9 +87,34 @@ impl AppState {
             network: false,
             closing: AtomicBool::new(false),
             db: Mutex::new(db),
-            thumbs: ThumbStore::new(thumbs),
+            thumbs: match &binding {
+                None => ThumbStore::new(thumbs),
+                Some(b) => ThumbStore::bound(thumbs, b.clone()),
+            },
             db_path,
             quarantine,
+            binding,
         })
     }
+
+    pub fn open_db(&self) -> Result<Db> {
+        open_db(&self.db_path, self.binding.as_ref())
+    }
+
+    pub fn take_writer(&self, what: &str) -> Result<pc_core::lock::WriterLock> {
+        take_writer(&self.db_path, self.binding.as_ref(), what)
+    }
+}
+
+/// The writer lock lives beside the database, so a bound folder is
+/// confirmed before its file is opened and written.
+fn take_writer(
+    db_path: &Path,
+    binding: Option<&Binding>,
+    what: &str,
+) -> Result<pc_core::lock::WriterLock> {
+    if let Some(b) = binding {
+        b.check_database().map_err(pc_core::storage::NotBound)?;
+    }
+    pc_core::lock::take_writer(db_path, what)
 }

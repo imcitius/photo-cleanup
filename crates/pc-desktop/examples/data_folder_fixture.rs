@@ -76,9 +76,9 @@ fn main() {
     let mut wal_connection = None;
     match scenario {
         "recovery" => {
-            copy_data(&source, Source::System, &target, enough)
+            copy_data(&dirs, &source, Source::System, &target, enough)
                 .unwrap()
-                .commit(&dirs, Source::System)
+                .commit()
                 .unwrap();
             restart_or_restore(&dirs, || Err("injected spawn failure".into())).unwrap_err();
             assert_eq!(fs::read(dirs.bootstrap_path()).unwrap(), bootstrap);
@@ -126,7 +126,7 @@ fn main() {
         }
         _ => panic!("unknown scenario"),
     }
-    let preview = preview_move_with(&source, Source::System, &target, enough);
+    let preview = preview_move_with(&dirs, &source, Source::System, &target, enough);
     let positive = matches!(scenario, "recovery" | "wal");
     assert_eq!(preview.existing_database, positive || scenario == "partial");
     let before = contents(&root);
@@ -153,7 +153,7 @@ fn main() {
             }
             "check" => {
                 assert!(!positive);
-                assert!(copy_data(&source, Source::System, &target, enough).is_err());
+                assert!(copy_data(&dirs, &source, Source::System, &target, enough).is_err());
                 if scenario.starts_with("sidecar") {
                     assert!(switch_to_existing(&dirs, Source::System, &target).is_err());
                 }

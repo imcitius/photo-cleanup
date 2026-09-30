@@ -46,6 +46,17 @@ same-file = "1"
 # created in the user's folder and removed by path (el-693s).
 libc.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Private folders for relocation: created with an owner and a protected
+# DACL of this user only, checked through the handle (el-2xri).
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 pc-api.workspace = true
 anyhow.workspace = true
@@ -73,4 +84,8 @@ tauri-build = "2"
 
 [dev-dependencies]
 tempfile.workspace = true
+# The real server on a bound folder, in the lifecycle tests (el-2xri): its
+# start-up, reset and later writes must go through the binding.
+pc-api.workspace = true
+tokio.workspace = true
 

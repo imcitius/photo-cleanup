@@ -246,7 +246,7 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
     // written to from the command line, or by a second server on the same
     // database, and neither of them can see that memory — so the writing job
     // takes a lock the operating system keeps, for as long as it runs.
-    let writer = match pc_core::lock::take_writer(&st.db_path, &req.kind) {
+    let writer = match st.take_writer(&req.kind) {
         Ok(lock) => lock,
         Err(e) if e.is::<pc_core::lock::Busy>() => return service::error(409, &format!("{e:#}")),
         Err(e) => return service::error(500, &format!("{e:#}")),
@@ -283,9 +283,10 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
             };
             let Some(snapshot) = snapshot else { break };
             let path = monitor.db_path.clone();
+            let binding = monitor.binding.clone();
             drop(monitor);
             let _ = tokio::task::spawn_blocking(move || {
-                if let Ok(db) = Db::open(&path) {
+                if let Ok(db) = crate::state::open_db(&path, binding.as_ref()) {
                     let _ = db.conn.busy_timeout(Duration::from_millis(100));
                     let _ = db.conn.execute(
                         "UPDATE jobs SET progress=?1 WHERE id=?2 AND state='running'",
@@ -326,7 +327,7 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
         *st.jobs.active.lock().unwrap() = None;
         drop(writer);
         pause_between_letting_go_and_saying_so();
-        if let Ok(db) = Db::open(&st.db_path) {
+        if let Ok(db) = st.open_db() {
             let err = result.err().map(|e| format!("{e:#}"));
             let _ = db.conn.execute(
                 "UPDATE jobs SET state=?1,finished_at=?2,error=?3,progress=?4 WHERE id=?5",
@@ -347,7 +348,7 @@ pub async fn start(State(st): State<Arc<AppState>>, Json(req): Json<Request>) ->
     (axum::http::StatusCode::ACCEPTED, Json(json!({"job_id":id}))).into_response()
 }
 fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<()> {
-    let db = Db::open(&st.db_path)?;
+    let db = st.open_db()?;
     db.conn.busy_timeout(Duration::from_secs(5))?;
     db.conn
         .execute("UPDATE jobs SET state='running' WHERE id=?1", [id])?;

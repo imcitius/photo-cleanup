@@ -2677,6 +2677,8 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tempfile",
+ "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
