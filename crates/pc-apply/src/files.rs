@@ -177,7 +177,12 @@ pub fn quarantine_file(
             c.file_id
         )
     })?;
-    let dst = crate::quarantine_dest_for(&file.path, c.file_id, db, override_root)?;
+    let target = crate::quarantine_target_for(&file.path, override_root)?;
+    // The file and its keeper have passed; now the volume, and only then the
+    // gathered quarantine's note — before the journal, so a refusal here
+    // leaves neither a row nor a byte behind.
+    crate::admit(&target)?;
+    let dst = target.dst;
 
     let dst_str = dst.to_string_lossy().into_owned();
 
@@ -187,6 +192,7 @@ pub fn quarantine_file(
     let mut planned = vec![pc_db::Moved {
         src: c.path.clone(),
         dst: dst_str.clone(),
+        ident: None,
     }];
     let mut bytes = c.size;
     for side in companions(src) {
@@ -198,6 +204,7 @@ pub fn quarantine_file(
         planned.push(pc_db::Moved {
             src: side.to_string_lossy().into_owned(),
             dst: target.to_string_lossy().into_owned(),
+            ident: None,
         });
     }
 
@@ -214,7 +221,7 @@ pub fn quarantine_file(
 
     match rename_with_parents(src, &dst) {
         Ok(()) => {
-            let (moved, failed) = crate::carry(&planned[1..]);
+            let (moved, failed, stop) = crate::carry(&planned[1..]);
             let note = match (moved.len(), failed.as_slice()) {
                 (0, []) => None,
                 (n, []) => Some(pc_core::tf!(
@@ -237,6 +244,12 @@ pub fn quarantine_file(
             // The row must stop claiming the file is still in the archive,
             // or the planner will offer the same work again forever.
             db.set_file_state(c.file_id, "quarantined")?;
+            if let Some(e) = stop {
+                // The photograph moved and is journaled as moved; its sidecar
+                // met a volume that cannot move without replacing, and the
+                // run stops here — with that said.
+                return Err(crate::at_sidecar_of(e, src));
+            }
             // The photograph moved; a sidecar that stayed behind is still
             // something the run has to say out loud.
             Ok((FileOutcome::Moved, crate::listed(&failed)))
@@ -280,11 +293,29 @@ pub fn apply(
             }
             Ok((FileOutcome::Refused, why)) => report.refused.push((c.path.clone(), why)),
             // It names the destination already, and callers tell it apart.
-            Err(e) if crate::is_no_exclusive_rename(&e) => return Err(e),
+            // What moved before it stays moved; the caller hears how much.
+            Err(e) if crate::is_no_exclusive_rename(&e) => {
+                if crate::moved_before_stop(&e) {
+                    report.totals.bundles += 1;
+                    report.totals.files += 1;
+                    report.totals.bytes += c.size as u64;
+                }
+                let refused = report
+                    .refused
+                    .iter()
+                    .map(|(p, why)| format!("{p} — {why}"))
+                    .collect();
+                return Err(crate::stop_run(
+                    e,
+                    &report.totals,
+                    crate::Route::Quarantine,
+                    refused,
+                ));
+            }
             Err(e) => {
                 // A hard error stops the run: something is wrong beyond one
                 // file, and continuing would multiply it.
-                bail!("{}: {e}", c.path);
+                bail!("{}: {e:#}", c.path);
             }
         }
     }

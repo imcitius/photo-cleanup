@@ -685,17 +685,210 @@ pub mod quarantine_layout {
     /// Written before the first file of a disk lands and left alone
     /// afterwards, so the note is there for anything that arrives later — and
     /// so a reader finds it whatever order the moves happened in.
+    ///
+    /// The note sits in a folder the user named, and whatever already has
+    /// its name is not assumed to be ours (el-23goa). A symlink, a second
+    /// hard link to some other file, a file that is not a layout, a label
+    /// already recorded for another mount: each is refused and named, never
+    /// written through or over. A new note is written to a fresh file
+    /// (`create_new`, which does not follow links) and published with a
+    /// rename that does not replace; an existing one of ours is extended
+    /// through the descriptor that was checked, so a file swapped in at the
+    /// name meanwhile is not the one written.
+    ///
+    /// Call this only once the move it serves has been admitted: it writes.
     pub fn note(root: &Path, label: &str, mount: &Path) -> std::io::Result<()> {
-        let mut disks = read(root);
         let mount = mount.display().to_string();
-        if disks.get(label).map(String::as_str) == Some(mount.as_str()) {
-            return Ok(());
+        // The folders this call creates, deepest first, to take away again
+        // if the note cannot be written: a refusal leaves the tree as found.
+        let mut created = Vec::new();
+        match std::fs::symlink_metadata(root) {
+            Ok(md) if md.file_type().is_symlink() => {
+                return Err(foreign(root, ("символическая ссылка", "a symbolic link")))
+            }
+            Ok(md) if md.is_dir() => {}
+            Ok(_) => return Err(foreign(root, ("не каталог", "not a folder"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let mut at = root;
+                while std::fs::symlink_metadata(at).is_err() {
+                    created.push(at.to_path_buf());
+                    match at.parent() {
+                        Some(p) if !p.as_os_str().is_empty() => at = p,
+                        _ => break,
+                    }
+                }
+                std::fs::create_dir_all(root)?;
+            }
+            Err(e) => return Err(e),
         }
-        disks.insert(label.to_string(), mount);
-        std::fs::create_dir_all(root)?;
+        let done = publish(root, label, &mount);
+        if done.is_err() {
+            // `remove_dir` takes nothing that is not empty.
+            for dir in &created {
+                if std::fs::remove_dir(dir).is_err() {
+                    break;
+                }
+            }
+        }
+        done
+    }
+
+    fn foreign(path: &Path, (ru, en): (&str, &str)) -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            crate::tf!(
+                "{0} — {1}: чужое не перезаписывается, уберите или переименуйте его",
+                "{0} — {1}: something not ours is not written over; move or rename it",
+                path.display(),
+                crate::tr!(ru, en)
+            ),
+        )
+    }
+
+    fn publish(root: &Path, label: &str, mount: &str) -> std::io::Result<()> {
+        use std::io::{Read, Seek, Write};
+        let path = file(root);
+        let mut current = match open_checked(&path, false) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let disks = Disks::from([(label.to_string(), mount.to_string())]);
+                return create(root, &path, &disks);
+            }
+            Err(e) => return Err(e),
+        };
+        let mut raw = String::new();
+        current.read_to_string(&mut raw)?;
+        let mut disks: Disks = serde_json::from_str(&raw)
+            .map_err(|_| foreign(&path, ("не раскладка карантина", "not a quarantine layout")))?;
+        match disks.get(label) {
+            Some(m) if m == mount => return Ok(()),
+            Some(_) => {
+                return Err(foreign(
+                    &path,
+                    (
+                        "эта метка диска уже записана для другой точки монтирования",
+                        "this disk label is already recorded for another mount point",
+                    ),
+                ))
+            }
+            None => {}
+        }
+        disks.insert(label.to_string(), mount.to_string());
         let body = serde_json::to_string_pretty(&disks)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(file(root), body)
+        // The same file that was read and checked, not whatever bears the
+        // name now.
+        let mut f = open_checked(&path, true)?;
+        if identity(&f.metadata()?) != identity(&current.metadata()?) {
+            return Err(foreign(
+                &path,
+                ("заменён во время записи", "replaced while being read"),
+            ));
+        }
+        drop(current);
+        // Only labels are ever added, so the new text is longer than the old
+        // and covers it whole.
+        f.seek(std::io::SeekFrom::Start(0))?;
+        f.write_all(body.as_bytes())?;
+        f.set_len(body.len() as u64)?;
+        f.sync_all()
+    }
+
+    /// A brand-new note: a fresh file, then a rename that replaces nothing.
+    fn create(root: &Path, path: &Path, disks: &Disks) -> std::io::Result<()> {
+        use std::io::Write;
+        let body = serde_json::to_string_pretty(disks)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = root.join(format!(
+            ".{}.{}.{nanos}.tmp",
+            super::QUARANTINE_LAYOUT,
+            std::process::id()
+        ));
+        let written = (|| {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            f.write_all(body.as_bytes())?;
+            f.sync_all()
+        })();
+        let published = written.and_then(|()| crate::disk::rename_no_replace(&tmp, path));
+        if let Err(e) = published {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(if e.kind() == std::io::ErrorKind::AlreadyExists {
+                foreign(
+                    path,
+                    (
+                        "появился, пока писалась раскладка",
+                        "appeared while the layout was written",
+                    ),
+                )
+            } else {
+                e
+            });
+        }
+        Ok(())
+    }
+
+    /// Open the note without following a link at its name, and only if it is
+    /// a plain file with no other name.
+    fn open_checked(path: &Path, write: bool) -> std::io::Result<std::fs::File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(write);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(not(unix))]
+        {
+            if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+                return Err(foreign(path, ("символическая ссылка", "a symbolic link")));
+            }
+        }
+        let f = match options.open(path) {
+            Ok(f) => f,
+            #[cfg(unix)]
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+                return Err(foreign(path, ("символическая ссылка", "a symbolic link")))
+            }
+            Err(e) => return Err(e),
+        };
+        let md = f.metadata()?;
+        if !md.is_file() {
+            return Err(foreign(path, ("не обычный файл", "not a plain file")));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if md.nlink() != 1 {
+                return Err(foreign(
+                    path,
+                    (
+                        "у файла есть другое имя (жёсткая ссылка)",
+                        "the file has another name (a hard link)",
+                    ),
+                ));
+            }
+        }
+        Ok(f)
+    }
+
+    fn identity(md: &std::fs::Metadata) -> (u64, u64) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            (md.dev(), md.ino())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = md;
+            (0, 0)
+        }
     }
 
     /// The path a file under a gathered quarantine came from.

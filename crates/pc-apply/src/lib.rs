@@ -101,32 +101,75 @@ fn beside(src: &Path) -> Result<PathBuf> {
 ///
 /// Beside the data goes a note of what each disk label stood for. The label
 /// alone — `disk3` — means nothing once the database is gone, and that is
-/// precisely when this has to be readable.
-fn gathered(root: &Path, label: &str, mount: &Path, rel: &Path) -> Result<PathBuf> {
+/// precisely when this has to be readable. Working out the destination only
+/// says which note is due; it is written by [`admit`], once the file and its
+/// volume have passed their checks (el-23goa: the preview and the check
+/// before a run used to write it, through whatever sat at its name).
+fn gathered(root: &Path, label: &str, mount: &Path, rel: &Path) -> Target {
     let home = root.join(pc_core::QUARANTINE_DIR);
-    pc_core::quarantine_layout::note(&home, label, mount).with_context(|| {
-        pc_core::tf!(
-            "не записать раскладку карантина в {0}",
-            "cannot record the quarantine layout in {0}",
-            home.display()
-        )
-    })?;
-    Ok(home.join(label).join(rel))
+    Target {
+        dst: home.join(label).join(rel),
+        layout: Some(Layout {
+            home,
+            label: label.to_string(),
+            mount: mount.to_path_buf(),
+        }),
+    }
 }
 
-/// Where a bundle goes when quarantined.
-///
-/// Beside itself by default, so the move is a rename and the directory is one
-/// that already takes writes. `override_root` gathers everything in one place
-/// instead, and is rejected unless it lives on the same device, because a
-/// cross-device "move" would silently become a copy of the whole bundle.
-pub fn quarantine_dest(b: &Bundle, override_root: Option<&Path>) -> Result<PathBuf> {
+/// A gathered quarantine's note that a move into it needs.
+#[derive(Debug, Clone)]
+struct Layout {
+    home: PathBuf,
+    label: String,
+    mount: PathBuf,
+}
+
+/// Where a move goes, and what has to be written before it can.
+#[derive(Debug, Clone)]
+pub(crate) struct Target {
+    pub(crate) dst: PathBuf,
+    layout: Option<Layout>,
+}
+
+impl Target {
+    fn beside(src: &Path) -> Result<Self> {
+        Ok(Self {
+            dst: beside(src)?,
+            layout: None,
+        })
+    }
+}
+
+/// The last word before the journal and the move: the destination's volume
+/// can move without replacing, and a gathered quarantine's layout note is
+/// in place. Nothing is written until the volume has said yes, and the note
+/// never goes through or over anything that is not ours.
+pub(crate) fn admit(t: &Target) -> Result<()> {
+    check_exclusive_rename(&t.dst)?;
+    let Some(l) = &t.layout else {
+        return Ok(());
+    };
+    pc_core::quarantine_layout::note(&l.home, &l.label, &l.mount).map_err(|e| {
+        if pc_core::disk::lacks_exclusive_rename(&e) {
+            NoExclusiveRename::new(l.home.join(pc_core::QUARANTINE_LAYOUT), e.to_string()).into()
+        } else {
+            anyhow::Error::new(e).context(pc_core::tf!(
+                "не записать раскладку карантина в {0}",
+                "cannot record the quarantine layout in {0}",
+                l.home.display()
+            ))
+        }
+    })
+}
+
+fn bundle_target(b: &Bundle, override_root: Option<&Path>) -> Result<Target> {
     let disk = disk_of(b);
     let src = PathBuf::from(&b.path);
     let rel = disk.relative(&src);
 
     match override_root {
-        None => beside(&src),
+        None => Target::beside(&src),
         Some(root) => {
             let dev = pc_core::dev_of_nearest_existing(root)?;
             if dev != b.dev as u64 {
@@ -140,12 +183,45 @@ pub fn quarantine_dest(b: &Bundle, override_root: Option<&Path>) -> Result<PathB
                     )
                 );
             }
-            gathered(root, &b.disk, &disk.mount, rel)
+            Ok(gathered(root, &b.disk, &disk.mount, rel))
         }
     }
 }
 
-/// Where an indexed file goes when quarantined.
+fn file_target(path: &str, override_root: Option<&Path>) -> Result<Target> {
+    let src = PathBuf::from(path);
+    let Some(root) = override_root else {
+        return Target::beside(&src);
+    };
+    let mut map = pc_core::DiskMap::new();
+    let disk = map.resolve(&src)?;
+    let rel = disk.relative(&src);
+    let dev = pc_core::dev_of_nearest_existing(root)?;
+    if dev != disk.dev {
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "карантин {0} на другой файловой системе, чем {1} — перенос превратился бы в копирование",
+                "quarantine {0} is on a different filesystem from {1} — the move would become a copy",
+                root.display(),
+                path
+            )
+        );
+    }
+    Ok(gathered(root, &disk.label, &disk.mount, rel))
+}
+
+/// Where a bundle goes when quarantined. Only reads.
+///
+/// Beside itself by default, so the move is a rename and the directory is one
+/// that already takes writes. `override_root` gathers everything in one place
+/// instead, and is rejected unless it lives on the same device, because a
+/// cross-device "move" would silently become a copy of the whole bundle.
+pub fn quarantine_dest(b: &Bundle, override_root: Option<&Path>) -> Result<PathBuf> {
+    Ok(bundle_target(b, override_root)?.dst)
+}
+
+/// Where an indexed file goes when quarantined. Only reads.
 ///
 /// Beside itself by default; under `override_root`, mirroring its path from
 /// the mount point so two files of the same name do not collide.
@@ -155,31 +231,11 @@ pub fn quarantine_dest_for(
     _db: &Db,
     override_root: Option<&Path>,
 ) -> Result<PathBuf> {
-    let src = PathBuf::from(path);
-    if override_root.is_none() {
-        return beside(&src);
-    }
-    let mut map = pc_core::DiskMap::new();
-    let disk = map.resolve(&src)?;
-    let rel = disk.relative(&src);
-    match override_root {
-        None => unreachable!("handled above"),
-        Some(root) => {
-            let dev = pc_core::dev_of_nearest_existing(root)?;
-            if dev != disk.dev {
-                bail!(
-                    "{}",
-                    pc_core::tf!(
-                        "карантин {0} на другой файловой системе, чем {1} — перенос превратился бы в копирование",
-                        "quarantine {0} is on a different filesystem from {1} — the move would become a copy",
-                        root.display(),
-                        path
-                    )
-                );
-            }
-            gathered(root, &disk.label, &disk.mount, rel)
-        }
-    }
+    Ok(file_target(path, override_root)?.dst)
+}
+
+pub(crate) fn quarantine_target_for(path: &str, override_root: Option<&Path>) -> Result<Target> {
+    file_target(path, override_root)
 }
 
 /// Re-check that what is on disk still matches what was scanned.
@@ -231,14 +287,76 @@ fn dir_stats(root: &Path) -> (u64, u64, i64) {
 /// The volume a move would happen on cannot rename without replacing.
 ///
 /// Not a fact about one file: every move onto that volume would meet it, so
-/// a run stops at it rather than collecting one refusal per photograph. It
-/// is found before anything moves (the volume is asked where it can answer,
-/// and where it cannot the refused call itself moved nothing).
+/// a run stops at it rather than collecting one refusal per photograph —
+/// wherever it is met, a sidecar or a litter sweep included. Where the
+/// volume can be asked (macOS) it is met before anything moves; where it
+/// cannot (Linux), the first refused call itself moved nothing, but earlier
+/// moves of the same run may have gone through. Those stay done and
+/// journaled, and the message says so instead of claiming the opposite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoExclusiveRename {
     /// The destination that could not be reached safely.
     pub path: PathBuf,
     pub reason: String,
+    /// The photograph that did move, when what was refused is its sidecar.
+    pub sidecar_of: Option<PathBuf>,
+    /// What the run that stopped here had already done.
+    pub run: Option<Stopped>,
+}
+
+/// What a run had done when it stopped at a [`NoExclusiveRename`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stopped {
+    /// Already moved, in words: `2 objects, 2 files, 1.2 MB`.
+    pub moved: String,
+    pub route: Route,
+    /// `path — why` for every file the run refused before it stopped.
+    pub refused: Vec<String>,
+}
+
+/// How the moves a stopped run made are walked back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// Into quarantine: each entry comes back on its own.
+    Quarantine,
+    /// A reorganisation: the run comes back as a whole.
+    Organize { run_id: i64 },
+    /// An undo itself: what came back stays back, the rest waits.
+    Restore,
+}
+
+impl Route {
+    /// `moved` in the words of this kind of run.
+    fn moved(self, done: &Totals) -> String {
+        match self {
+            Route::Quarantine => done.summary(),
+            Route::Organize { .. } => format!(
+                "{}, {}",
+                pc_core::count(
+                    done.files as i64,
+                    ["файл", "файла", "файлов"],
+                    ["file", "files"]
+                ),
+                fmt_bytes(done.bytes)
+            ),
+            Route::Restore => pc_core::count(
+                done.files as i64,
+                ["запись", "записи", "записей"],
+                ["entry", "entries"],
+            ),
+        }
+    }
+}
+
+impl NoExclusiveRename {
+    pub fn new(path: PathBuf, reason: String) -> Self {
+        Self {
+            path,
+            reason,
+            sidecar_of: None,
+            run: None,
+        }
+    }
 }
 
 impl std::fmt::Display for NoExclusiveRename {
@@ -247,16 +365,70 @@ impl std::fmt::Display for NoExclusiveRename {
             f,
             "{}",
             pc_core::tf!(
-                "перенос в {0} отменён: том не умеет переименовывать без замены существующего ({1}); \
-                 обычный перенос мог бы молча заменить файл, появившийся там в последний момент, \
-                 поэтому ничего не перенесено",
+                "перенос в {0} отменён: том не умеет переименовывать без замены существующего ({1}), \
+                 а обычный перенос мог бы молча заменить файл, появившийся там в последний момент. \
+                 Этот файл не перенесён.",
                 "the move to {0} is refused: the volume cannot rename without replacing what is \
-                 there ({1}); a plain move could silently replace a file that appeared there at \
-                 the last moment, so nothing was moved",
+                 there ({1}), and a plain move could silently replace a file that appeared there \
+                 at the last moment. This file was not moved.",
                 self.path.display(),
                 self.reason
             )
-        )
+        )?;
+        if let Some(photo) = &self.sidecar_of {
+            write!(
+                f,
+                " {}",
+                pc_core::tf!(
+                    "Его снимок {0} перенесён и записан в журнал; спутник остался на месте.",
+                    "Its photograph {0} did move and is in the journal; this sidecar stayed where it was.",
+                    photo.display()
+                )
+            )?;
+        }
+        let tail = match &self.run {
+            None => pc_core::tr!(
+                "Переносы, сделанные раньше в этой же операции, если они были, выполнены, \
+                 записаны в журнал и отменяемы.",
+                "Moves made earlier in the same operation, if any, are done, in the journal, \
+                 and can be undone."
+            )
+            .to_string(),
+            Some(Stopped {
+                moved,
+                route: Route::Restore,
+                ..
+            }) => pc_core::tf!(
+                "Откат остановлен на этом файле. До остановки вернулось: {0}; остальное там, где было, \
+                 и повторный откат продолжит с этого места.",
+                "The undo stopped at this file. Before the stop, back: {0}; the rest is where it \
+                 was, and asking again carries on from here.",
+                moved
+            ),
+            Some(Stopped { moved, route, .. }) => {
+                let how = match route {
+                    Route::Organize { run_id } => pc_core::tf!(
+                        "`photo-cleanup organize undo --run {0} --yes` или журнал в веб-интерфейсе",
+                        "`photo-cleanup organize undo --run {0} --yes`, or the journal in the web interface",
+                        run_id
+                    ),
+                    _ => pc_core::tr!(
+                        "страница «Карантин» или `photo-cleanup derived undo --journal <id>`",
+                        "the Quarantine page, or `photo-cleanup derived undo --journal <id>`"
+                    )
+                    .to_string(),
+                };
+                pc_core::tf!(
+                    "Прогон остановлен на этом файле. До остановки перенесено: {0} — эти переносы \
+                     выполнены, записаны в журнал и отменяемы: {1}.",
+                    "The run stopped at this file. Before the stop it moved {0} — those moves are \
+                     done, in the journal, and can be undone: {1}.",
+                    moved,
+                    how
+                )
+            }
+        };
+        write!(f, " {tail}")
     }
 }
 
@@ -265,6 +437,44 @@ impl std::error::Error for NoExclusiveRename {}
 /// Whether `e` is [`NoExclusiveRename`]: a run stops at it.
 pub fn is_no_exclusive_rename(e: &anyhow::Error) -> bool {
     e.downcast_ref::<NoExclusiveRename>().is_some()
+}
+
+/// What a run that stopped at `e` had done, if `e` says.
+pub fn stopped_run(e: &anyhow::Error) -> Option<&Stopped> {
+    e.downcast_ref::<NoExclusiveRename>()?.run.as_ref()
+}
+
+/// A run stops at `e`: write into it what the run had done before, so the
+/// caller — command line and web alike — is told the truth about a partial
+/// run. Anything that is not a [`NoExclusiveRename`] passes unchanged.
+pub fn stop_run(
+    mut e: anyhow::Error,
+    done: &Totals,
+    route: Route,
+    refused: Vec<String>,
+) -> anyhow::Error {
+    if let Some(n) = e.downcast_mut::<NoExclusiveRename>() {
+        n.run = Some(Stopped {
+            moved: route.moved(done),
+            route,
+            refused,
+        });
+    }
+    e
+}
+
+/// The photograph moved and its sidecar met `e`.
+pub(crate) fn at_sidecar_of(mut e: anyhow::Error, photo: &Path) -> anyhow::Error {
+    if let Some(n) = e.downcast_mut::<NoExclusiveRename>() {
+        n.sidecar_of = Some(photo.to_path_buf());
+    }
+    e
+}
+
+/// Whether the file behind `e` itself moved and only its sidecar did not.
+pub fn moved_before_stop(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<NoExclusiveRename>()
+        .is_some_and(|n| n.sidecar_of.is_some())
 }
 
 /// The nearest existing folder of `path` (itself, if it exists).
@@ -287,11 +497,7 @@ pub fn check_exclusive_rename(dst: &Path) -> Result<()> {
     use pc_core::disk::ExclusiveRename;
     let at = nearest_existing(dst.parent().unwrap_or(dst));
     let refused = |reason: String| -> Result<()> {
-        Err(NoExclusiveRename {
-            path: dst.to_path_buf(),
-            reason,
-        }
-        .into())
+        Err(NoExclusiveRename::new(dst.to_path_buf(), reason).into())
     };
     match pc_core::disk::exclusive_rename(at) {
         Ok(ExclusiveRename::Supported | ExclusiveRename::NoQuery) => Ok(()),
@@ -327,25 +533,46 @@ fn check_all<'a>(dsts: impl IntoIterator<Item = &'a Path>) -> Result<()> {
 
 /// Before a quarantine of bundles: every destination volume can move
 /// without replacing. The command line and the web preview ask the same.
+///
+/// Only reads (el-23goa B1). A destination that cannot be worked out is the
+/// answer, not something to skip: it refuses the run before the first move.
+/// Bundles that never reach a move — kept by their kind, blocked, no longer
+/// present — are left to `quarantine`, which says why for each.
 pub fn check_bundles(bundles: &[Bundle], override_root: Option<&Path>) -> Result<()> {
-    let dsts: Vec<PathBuf> = bundles
-        .iter()
-        .filter_map(|b| quarantine_dest(b, override_root).ok())
-        .collect();
+    let mut dsts = Vec::new();
+    for b in bundles {
+        if !b.regenerable || b.blocked_code.is_some() || b.state != BundleState::Present {
+            continue;
+        }
+        dsts.push(bundle_target(b, override_root)?.dst);
+    }
     check_all(dsts.iter().map(PathBuf::as_path))
 }
 
 /// Before an apply of photographs: as [`check_bundles`]. Sidecars land
-/// beside their photograph, in the same folder.
+/// beside their photograph, in the same folder. A photograph that is already
+/// gone is refused on its own by `quarantine_file`; any other doubt about a
+/// destination refuses the run.
 pub fn check_candidates(
-    db: &Db,
+    _db: &Db,
     candidates: &[pc_family::plan::Candidate],
     override_root: Option<&Path>,
 ) -> Result<()> {
-    let dsts: Vec<PathBuf> = candidates
-        .iter()
-        .filter_map(|c| quarantine_dest_for(&c.path, c.file_id, db, override_root).ok())
-        .collect();
+    let mut dsts = Vec::new();
+    for c in candidates {
+        match fs::symlink_metadata(&c.path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(pc_core::tf!(
+                    "не прочитать {0}",
+                    "cannot read {0}",
+                    c.path
+                )))
+            }
+            Ok(_) => {}
+        }
+        dsts.push(file_target(&c.path, override_root)?.dst);
+    }
     check_all(dsts.iter().map(PathBuf::as_path))
 }
 
@@ -384,11 +611,9 @@ pub(crate) fn rename_with_parents(src: &Path, dst: &Path) -> Result<()> {
                 dst.display()
             )
         ),
-        Err(e) if pc_core::disk::lacks_exclusive_rename(&e) => Err(NoExclusiveRename {
-            path: dst.to_path_buf(),
-            reason: e.to_string(),
+        Err(e) if pc_core::disk::lacks_exclusive_rename(&e) => {
+            Err(NoExclusiveRename::new(dst.to_path_buf(), e.to_string()).into())
         }
-        .into()),
         Err(e) => Err(anyhow::Error::new(e).context(pc_core::tf!(
             "не переместить {0} -> {1} (перенос обязан быть в пределах одного диска)",
             "cannot move {0} -> {1} (a move has to stay within one disk)",
@@ -515,7 +740,9 @@ pub fn quarantine(
     }
     lightroom_gate(b)?;
 
-    let dst = quarantine_dest(b, override_root)?;
+    let target = bundle_target(b, override_root)?;
+    admit(&target)?;
+    let dst = target.dst;
     let dst_str = dst.to_string_lossy().into_owned();
     let jid = db.journal_begin(&pc_db::NewJournalEntry {
         run_id,
@@ -564,29 +791,56 @@ pub fn quarantine_many(
                 "{0} — changed since the scan",
                 b.path
             )),
-            Err(e) if is_no_exclusive_rename(&e) => return Err(e),
+            Err(e) if is_no_exclusive_rename(&e) => {
+                let refused = t.skipped.clone();
+                return Err(stop_run(e, &t, Route::Quarantine, refused));
+            }
             Err(e) => t.skipped.push(format!("{} — {e}", b.path)),
         }
     }
     Ok(t)
 }
 
-/// Move a quarantined bundle back where it came from.
 /// Move the rest of an operation's files and say which of them made it.
 ///
 /// A sidecar that refuses to move is a fact worth keeping: it stays out of
 /// the manifest, so an undo is not surprised by a file that never left, and
-/// the journal note names it.
-pub(crate) fn carry(rest: &[pc_db::Moved]) -> (Vec<pc_db::Moved>, Vec<(String, String)>) {
+/// the journal note names it. A refusal by the volume is more than that: no
+/// further move onto it is tried, the sidecars not reached are named too,
+/// and the refusal comes back so the caller stops its run (el-23goa B3).
+pub(crate) fn carry(
+    rest: &[pc_db::Moved],
+) -> (
+    Vec<pc_db::Moved>,
+    Vec<(String, String)>,
+    Option<anyhow::Error>,
+) {
     let mut moved = Vec::new();
     let mut failed = Vec::new();
-    for m in rest {
+    let mut todo = rest.iter();
+    for m in todo.by_ref() {
         match rename_with_parents(Path::new(&m.src), Path::new(&m.dst)) {
             Ok(()) => moved.push(m.clone()),
+            Err(e) if is_no_exclusive_rename(&e) => {
+                failed.push((m.src.clone(), e.to_string()));
+                for left in todo {
+                    failed.push((left.src.clone(), not_tried()));
+                }
+                return (moved, failed, Some(e));
+            }
             Err(e) => failed.push((m.src.clone(), e.to_string())),
         }
     }
-    (moved, failed)
+    (moved, failed, None)
+}
+
+/// Why a file the run never reached did not move.
+pub(crate) fn not_tried() -> String {
+    pc_core::tr!(
+        "не перенесён: прогон остановлен отказом тома",
+        "not moved: the run stopped at the volume's refusal"
+    )
+    .to_string()
 }
 
 /// `path — why; path — why`, for a journal note.
@@ -627,6 +881,7 @@ pub fn adopt_orphan(db: &Db, run_id: i64, src: &str, dst: &str) -> Result<()> {
         manifest: &[pc_db::Moved {
             src: src.to_string(),
             dst: dst.to_string(),
+            ident: None,
         }],
     })?;
     match rename_with_parents(Path::new(src), Path::new(dst)) {
@@ -703,39 +958,88 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
     // The operation wrote down what it moved, so the undo carries back that
     // list and nothing else. A file found by name in the quarantine folder
     // may be a stranger's — one that was already there when this one arrived.
-    let mut failed: Vec<String> = Vec::new();
-    if entry.manifest.is_empty() {
+    let legacy = entry.manifest.is_empty();
+    let mut list = if legacy {
         // Written before the journal held a list: name matching is all there
-        // is, and it is why the list exists now.
-        let sidecars = files::companions(&dst_path);
-        home_first(db, journal_id, &dst_path, &src_path)?;
+        // is, and it is why the list exists now. The names are matched once,
+        // here, and written down below, so a retry works from the same list
+        // instead of from whatever the quarantine folder holds by then.
         let new_stem = organize::stem_of(&name_of(&dst_path)).to_string();
         let old_stem = organize::stem_of(&name_of(&src_path)).to_string();
-        for side in sidecars {
+        let mut list = vec![pc_db::Moved::new(entry.src.clone(), dst.clone())];
+        for side in files::companions(&dst_path) {
             if let Some(name) = side.file_name().and_then(|s| s.to_str()) {
                 let back =
                     src_path.with_file_name(organize::sidecar_name(name, &new_stem, &old_stem));
-                if let Err(e) = rename_with_parents(&side, &back) {
-                    failed.push(format!("{} — {e}", side.display()));
-                }
+                list.push(pc_db::Moved::new(
+                    back.to_string_lossy(),
+                    side.to_string_lossy(),
+                ));
             }
         }
+        list
     } else {
-        // The photograph first: if it cannot come back, nothing should move.
-        // Unless it already has — an undo that failed halfway can be asked
-        // for again, and the retry must carry back what is still in
-        // quarantine without touching what is already home.
-        if dst_path.exists() || !src_path.exists() {
-            home_first(db, journal_id, &dst_path, &src_path)?;
+        entry.manifest.clone()
+    };
+    // Before anything moves: which file each one still in quarantine is. A
+    // retry finds files at home and has to tell the ones this undo brought
+    // back from strangers that took their names (el-23goa B2).
+    let mut noted = legacy;
+    for m in &mut list {
+        if m.ident.is_none() {
+            if let Ok(md) = fs::symlink_metadata(&m.dst) {
+                m.ident = Some(pc_core::volume::entry_key(&md, Path::new(&m.dst)));
+                noted = true;
+            }
         }
-        for m in entry.manifest.iter().filter(|m| m.src != entry.src) {
-            let (from, to) = (Path::new(&m.dst), Path::new(&m.src));
-            if !from.exists() {
-                if to.exists() {
-                    // Came back on an earlier attempt. Nothing to report and
-                    // nothing to do.
-                    continue;
-                }
+    }
+    // An old row is given its list only while its photograph is still in
+    // quarantine, so that every file on the list carries its identity. Had
+    // an older version already brought the photograph home, there is
+    // nothing to tell it from a stranger by, and the row stays as it was.
+    if legacy && fs::symlink_metadata(&dst_path).is_err() {
+        noted = false;
+    }
+    if noted {
+        db.journal_record_manifest(journal_id, &list)?;
+    }
+
+    // The photograph first: if it cannot come back, nothing should move.
+    // Unless it already has — an undo that stopped halfway can be asked for
+    // again, and the retry carries back what is still in quarantine without
+    // touching what is already home.
+    let frame = list
+        .iter()
+        .find(|m| m.src == entry.src)
+        .cloned()
+        .unwrap_or_else(|| pc_db::Moved::new(entry.src.clone(), dst.clone()));
+    match whereabouts(&frame, legacy) {
+        Whereabouts::Held | Whereabouts::Lost => home_first(db, journal_id, &dst_path, &src_path)?,
+        Whereabouts::Home => {}
+        Whereabouts::Doubt(why) => {
+            let why = pc_core::tf!(
+                "откат: не вернулось {0} — {1}",
+                "undo: did not come back — {0} — {1}",
+                dst_path.display(),
+                why
+            );
+            db.journal_finish(
+                journal_id,
+                JournalStatus::Done,
+                Some(&extended(db, journal_id, &why)?),
+            )?;
+            bail!("{why}");
+        }
+    }
+    let mut failed: Vec<String> = Vec::new();
+    let mut stop = None;
+    let mut rest = list.iter().filter(|m| m.src != entry.src);
+    for m in rest.by_ref() {
+        let (from, to) = (Path::new(&m.dst), Path::new(&m.src));
+        match whereabouts(m, legacy) {
+            Whereabouts::Home => continue,
+            Whereabouts::Held => {}
+            Whereabouts::Lost => {
                 failed.push(pc_core::tf!(
                     "{0} — файла нет в карантине",
                     "{0} — not in quarantine any more",
@@ -743,9 +1047,25 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
                 ));
                 continue;
             }
-            if let Err(e) = rename_with_parents(from, to) {
-                failed.push(format!("{} — {e}", m.dst));
+            Whereabouts::Doubt(why) => {
+                failed.push(format!("{} — {why}", m.dst));
+                continue;
             }
+        }
+        match rename_with_parents(from, to) {
+            Ok(()) => {}
+            Err(e) if is_no_exclusive_rename(&e) => {
+                // The volume: nothing more is tried on it.
+                failed.push(format!("{} — {e}", m.dst));
+                stop = Some(e);
+                break;
+            }
+            Err(e) => failed.push(format!("{} — {e}", m.dst)),
+        }
+    }
+    if stop.is_some() {
+        for left in rest {
+            failed.push(format!("{} — {}", left.dst, not_tried()));
         }
     }
     // The directories the file came out of are ours to remove only while
@@ -792,22 +1112,82 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
         // the only door back to what stayed behind — the entry would stop
         // being offered, and a sidecar holding a photograph's edits would sit
         // in quarantine with nothing left pointing at it. It stays `done`,
-        // with the reason written down, and asking again carries on from
-        // where this stopped.
+        // with the reason added to what was written before, and asking again
+        // carries on from where this stopped.
         let why = pc_core::tf!(
             "откат: не вернулось {0}",
             "undo: did not come back — {0}",
             failed.join("; ")
         );
-        db.journal_finish(journal_id, JournalStatus::Done, Some(&why))?;
+        db.journal_finish(
+            journal_id,
+            JournalStatus::Done,
+            Some(&extended(db, journal_id, &why)?),
+        )?;
+        if let Some(e) = stop {
+            // Its own words, so the caller can tell a volume refusal apart
+            // and stop; the full list is in the journal.
+            return Err(e);
+        }
         bail!("{why}");
     }
     db.journal_mark_undone(journal_id)?;
     Ok(())
 }
 
+/// Where one file of an entry being undone is now.
+enum Whereabouts {
+    /// In quarantine: it is to be carried back.
+    Held,
+    /// At home, and known to be the file this undo brought back.
+    Home,
+    /// At neither path.
+    Lost,
+    /// At home there is a file, and it cannot be shown to be this one.
+    Doubt(String),
+}
+
+fn whereabouts(m: &pc_db::Moved, legacy: bool) -> Whereabouts {
+    if fs::symlink_metadata(&m.dst).is_ok() {
+        return Whereabouts::Held;
+    }
+    let Ok(md) = fs::symlink_metadata(&m.src) else {
+        return Whereabouts::Lost;
+    };
+    match &m.ident {
+        Some(was) if *was == pc_core::volume::entry_key(&md, Path::new(&m.src)) => {
+            Whereabouts::Home
+        }
+        Some(_) => Whereabouts::Doubt(pc_core::tf!(
+            "на месте {0} лежит другой файл, не тот, что вернул откат",
+            "at {0} there is another file, not the one the undo brought back",
+            m.src
+        )),
+        // An undo begun by an older version, which wrote nothing down before
+        // moving. With the operation's own list, that version also took a
+        // file at home for one it had brought back, and this keeps that so
+        // its half-done undos can still be finished. Without a list there is
+        // nothing to go on, and a name is not proof.
+        None if !legacy => Whereabouts::Home,
+        None => Whereabouts::Doubt(pc_core::tf!(
+            "на месте {0} уже есть файл, и не доказать, что это он",
+            "at {0} there is already a file, and nothing proves it is this one",
+            m.src
+        )),
+    }
+}
+
+/// `why` after what the entry already says: a retry adds to the history of
+/// an entry, it does not erase it.
+fn extended(db: &Db, journal_id: i64, why: &str) -> Result<String> {
+    Ok(match db.journal_note(journal_id)? {
+        Some(before) if !before.is_empty() && !before.contains(why) => format!("{before} | {why}"),
+        _ => why.to_string(),
+    })
+}
+
 /// Bring the photograph of an entry home, or leave the entry as it was —
-/// still `done`, still offered — with the refusal written on it.
+/// still `done`, still offered — with the refusal added to its note.
 fn home_first(db: &Db, journal_id: i64, from: &Path, to: &Path) -> Result<()> {
     rename_with_parents(from, to).inspect_err(|e| {
         let why = pc_core::tf!(
@@ -817,7 +1197,8 @@ fn home_first(db: &Db, journal_id: i64, from: &Path, to: &Path) -> Result<()> {
             e
         );
         // The refusal is the answer; a failure to note it must not hide it.
-        let _ = db.journal_finish(journal_id, JournalStatus::Done, Some(&why));
+        let note = extended(db, journal_id, &why).unwrap_or(why);
+        let _ = db.journal_finish(journal_id, JournalStatus::Done, Some(&note));
     })
 }
 
@@ -946,9 +1327,42 @@ pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Vec<Item>> {
         .iter()
         .filter(|i| i.standing == Standing::Moved)
         .collect();
-    check_all(back.iter().map(|i| Path::new(&i.src)))?;
-    for item in back {
-        rename_with_parents(Path::new(&item.dst), Path::new(&item.src))?;
+    // A refusal on the way — a stranger at home, a volume that cannot move
+    // without replacing — leaves the entry `pending`, which it still is,
+    // with what came back and what did not written on it (el-23goa B5).
+    let mut came: Vec<&str> = Vec::new();
+    let mut at: Option<&Item> = None;
+    let carried = check_all(back.iter().map(|i| Path::new(&i.src))).and_then(|()| {
+        for item in &back {
+            at = Some(item);
+            rename_with_parents(Path::new(&item.dst), Path::new(&item.src))?;
+            came.push(&item.src);
+        }
+        Ok(())
+    });
+    if let Err(e) = carried {
+        let mut why = match at {
+            Some(i) => pc_core::tf!(
+                "сверка: не вернулось {0} — {1}",
+                "reconcile: did not come back — {0} — {1}",
+                i.src,
+                e
+            ),
+            None => pc_core::tf!("сверка: отказ — {0}", "reconcile: refused — {0}", e),
+        };
+        if !came.is_empty() {
+            why.push_str(&pc_core::tf!(
+                "; уже вернулось: {0}",
+                "; already back: {0}",
+                came.join(", ")
+            ));
+        }
+        db.journal_finish(
+            journal_id,
+            JournalStatus::Pending,
+            Some(&extended(db, journal_id, &why)?),
+        )?;
+        return Err(e);
     }
     let entry = db.journal_entry(journal_id)?.expect("read a moment ago");
     if entry.op == "quarantine-file" {
@@ -1186,10 +1600,12 @@ mod undo_tests {
                     Moved {
                         src: s.clone(),
                         dst: d.clone(),
+                        ident: None,
                     },
                     Moved {
                         src: src.with_extension("xmp").display().to_string(),
                         dst: dst.with_extension("xmp").display().to_string(),
+                        ident: None,
                     },
                 ],
             })

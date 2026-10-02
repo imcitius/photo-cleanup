@@ -119,6 +119,7 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
         let mut planned = vec![pc_db::Moved {
             src: m.src.clone(),
             dst: m.dst.clone(),
+            ident: None,
         }];
         let mut bytes = m.size;
         for side in companions(src) {
@@ -130,6 +131,7 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
             planned.push(pc_db::Moved {
                 src: side.to_string_lossy().into_owned(),
                 dst: target.to_string_lossy().into_owned(),
+                ident: None,
             });
         }
 
@@ -146,7 +148,7 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
 
         match rename_with_parents(src, dst) {
             Ok(()) => {
-                let (carried, failed) = crate::carry(&planned[1..]);
+                let (carried, failed, stop) = crate::carry(&planned[1..]);
                 let moved_with = carried.len() as u64;
                 report.sidecars += moved_with;
                 report.refused.extend(failed.iter().cloned());
@@ -196,12 +198,18 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
                 }
                 report.moved += 1;
                 report.bytes += m.size as u64;
+                if let Some(e) = stop {
+                    // The file moved and is journaled; its sidecar met a
+                    // volume that cannot move without replacing. Nothing
+                    // more moves — no litter sweep either.
+                    return Err(stopped(crate::at_sidecar_of(e, src), &report, run_id));
+                }
             }
             Err(e) => {
                 db.journal_finish(jid, JournalStatus::Failed, Some(&e.to_string()))?;
                 if crate::is_no_exclusive_rename(&e) {
                     // The volume, not this file: nothing more moves.
-                    return Err(e);
+                    return Err(stopped(e, &report, run_id));
                 }
                 // One failed rename is a fact about one file; a storm of them
                 // means the destination is wrong, and continuing would spread
@@ -221,9 +229,26 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
     }
 
     let roots: BTreeSet<PathBuf> = db.all_run_roots()?.into_iter().map(PathBuf::from).collect();
-    sweep_litter(db, run_id, &source_dirs, &roots, &mut report)?;
+    if let Err(e) = sweep_litter(db, run_id, &source_dirs, &roots, &mut report) {
+        return Err(stopped(e, &report, run_id));
+    }
     report.pruned_dirs = prune_empty(&source_dirs, &roots, usize::MAX);
     Ok(report)
+}
+
+/// A reorganisation stops at `e`, and says what it had moved by then.
+fn stopped(e: anyhow::Error, report: &OrganizeReport, run_id: i64) -> anyhow::Error {
+    let done = crate::Totals {
+        files: report.moved,
+        bytes: report.bytes,
+        ..Default::default()
+    };
+    let refused = report
+        .refused
+        .iter()
+        .map(|(p, why)| format!("{p} — {why}"))
+        .collect();
+    crate::stop_run(e, &done, crate::Route::Organize { run_id }, refused)
 }
 
 /// Service files the system leaves behind: Finder's note about a folder, and
@@ -269,7 +294,8 @@ fn sweep_litter(
             let src = e.path();
             let dst = home.join(e.file_name());
             let src_s = src.to_string_lossy().into_owned();
-            if dst.exists() {
+            // An early answer; the move itself never replaces anything.
+            if fs::symlink_metadata(&dst).is_ok() {
                 report.refused.push((
                     src_s,
                     pc_core::tf!("цель занята: {0}", "destination taken: {0}", dst.display()),
@@ -289,6 +315,7 @@ fn sweep_litter(
                 manifest: &[pc_db::Moved {
                     src: src_s.clone(),
                     dst: dst_s.clone(),
+                    ident: None,
                 }],
             })?;
             match rename_with_parents(&src, &dst) {
@@ -305,6 +332,10 @@ fn sweep_litter(
                 }
                 Err(err) => {
                     db.journal_finish(jid, JournalStatus::Failed, Some(&err.to_string()))?;
+                    if crate::is_no_exclusive_rename(&err) {
+                        // The volume: no further service file is tried.
+                        return Err(err);
+                    }
                     report.refused.push((src_s, err.to_string()));
                 }
             }
@@ -367,6 +398,16 @@ pub fn undo_run(db: &Db, run_id: i64) -> Result<(u64, Vec<String>)> {
     for e in entries {
         match crate::undo(db, e.id) {
             Ok(()) => back += 1,
+            // The volume cannot move without replacing: every later entry
+            // would meet it too, so the walk stops here, saying how far it
+            // got. Its own entry stays `done`, with the reason on it.
+            Err(err) if crate::is_no_exclusive_rename(&err) => {
+                let done = crate::Totals {
+                    files: back,
+                    ..Default::default()
+                };
+                return Err(crate::stop_run(err, &done, crate::Route::Restore, failed));
+            }
             Err(err) => failed.push(format!("{} — {err}", e.src)),
         }
     }

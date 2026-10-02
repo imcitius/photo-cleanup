@@ -863,7 +863,8 @@ fn cmd_clean(db: &Db, a: CleanArgs) -> Result<()> {
     }
 
     let run_id = db.latest_run()?.context("no runs yet; run scan first")?;
-    let totals = pc_apply::quarantine_many(db, run_id, &selected, a.quarantine.as_deref())?;
+    let totals = pc_apply::quarantine_many(db, run_id, &selected, a.quarantine.as_deref())
+        .inspect_err(print_stop)?;
 
     println!("\nMoved: {}", totals.summary());
     for s in &totals.skipped {
@@ -1034,7 +1035,8 @@ fn cmd_plan(
     // rather than assumed.
     println!("\nCarrying out the plan above, computed just now.");
     println!("Checking every file before it moves…");
-    let report = pc_apply::apply(db, run_id, &plan.candidates, quarantine)?;
+    let report =
+        pc_apply::apply(db, run_id, &plan.candidates, quarantine).inspect_err(print_stop)?;
     println!("Moved: {}", report.totals.summary());
     for (path, why) in &report.refused {
         println!("  refused: {path} — {why}");
@@ -1045,6 +1047,23 @@ fn cmd_plan(
          To reclaim it: photo-cleanup derived purge --older-than 7d --yes"
     );
     Ok(())
+}
+
+/// A run stopped by a volume that cannot move without replacing: what it
+/// had already done is printed as the summary of a finished run would be,
+/// before the error ends the command with a non-zero status. Some moves
+/// may have gone through; they stay done, journaled and undoable.
+fn print_stop(e: &anyhow::Error) {
+    let Some(stop) = pc_apply::stopped_run(e) else {
+        return;
+    };
+    println!("\nStopped. Moved before the stop: {}", stop.moved);
+    for line in stop.refused.iter().take(10) {
+        println!("  refused: {line}");
+    }
+    if stop.refused.len() > 10 {
+        println!("  … and {} more", stop.refused.len() - 10);
+    }
 }
 
 /// Reorganisation runs after deduplication, never before it: laying copies
@@ -1158,7 +1177,7 @@ fn cmd_organize(db: &Db, a: &OrganizeArgs, execute: bool) -> Result<()> {
     }
 
     let run_id = db.latest_run()?.context("no runs yet; run scan first")?;
-    let report = pc_apply::organize(db, run_id, &plan.moves)?;
+    let report = pc_apply::organize(db, run_id, &plan.moves).inspect_err(print_stop)?;
 
     println!(
         "\nMoved: {}, {}{}{}",
@@ -1235,7 +1254,7 @@ fn cmd_organize_undo(db: &Db, a: &OrganizeUndoArgs) -> Result<()> {
         println!("Add --yes to carry it out.");
         return Ok(());
     }
-    let (back, failed) = pc_apply::undo_run(db, run_id)?;
+    let (back, failed) = pc_apply::undo_run(db, run_id).inspect_err(print_stop)?;
     println!("Restored: {back}.");
     for f in failed.iter().take(10) {
         println!("  failed: {f}");

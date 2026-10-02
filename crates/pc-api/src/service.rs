@@ -1080,6 +1080,37 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
         .to_string());
     Ok((out, actions))
 }
+/// Add one carried-out action to what a job has done, the way the command
+/// line counts the same moves.
+pub fn count_done(done: &mut pc_apply::Totals, a: &Action) {
+    match a {
+        Action::Copy(c) => {
+            done.bundles += 1;
+            done.files += 1;
+            done.bytes += c.size.max(0) as u64;
+        }
+        Action::Bundle(b) => {
+            done.bundles += 1;
+            done.files += b.file_count.max(0) as u64;
+            done.bytes += b.size.max(0) as u64;
+        }
+        Action::Move(m) => {
+            done.files += 1;
+            done.bytes += m.size.max(0) as u64;
+        }
+        _ => done.files += 1,
+    }
+}
+
+/// How the moves of a job stopped at `a` are walked back.
+pub fn route_of(a: &Action, run_id: i64) -> pc_apply::Route {
+    match a {
+        Action::Copy(_) | Action::Bundle(_) => pc_apply::Route::Quarantine,
+        Action::Move(_) => pc_apply::Route::Organize { run_id },
+        _ => pc_apply::Route::Restore,
+    }
+}
+
 pub fn apply_action(
     st: &AppState,
     db: &Db,

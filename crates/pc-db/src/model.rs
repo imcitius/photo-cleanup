@@ -189,6 +189,23 @@ pub struct NewJournalEntry<'a> {
 pub struct Moved {
     pub src: String,
     pub dst: String,
+    /// Which file this is (`pc_core::volume::entry_key`), written by an undo
+    /// just before it carries the file back. A retried undo finds a file at
+    /// `src` and has to know whether it is this one, brought home by the
+    /// earlier attempt, or a stranger with the same name (el-23goa B2).
+    /// Absent in rows from before that, and in JSON written without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ident: Option<String>,
+}
+
+impl Moved {
+    pub fn new(src: impl Into<String>, dst: impl Into<String>) -> Self {
+        Self {
+            src: src.into(),
+            dst: dst.into(),
+            ident: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -445,6 +462,26 @@ impl Db {
             params![manifest_json(moved), moved.len() as i64, id],
         )?;
         Ok(())
+    }
+
+    /// Write down the list an undo works from, without touching the count
+    /// of files the operation moved: a directory moved whole is one entry in
+    /// the list and many files in the count.
+    pub fn journal_record_manifest(&self, id: i64, moved: &[Moved]) -> Result<()> {
+        self.conn.execute(
+            "UPDATE journal SET manifest=?1 WHERE id=?2",
+            params![manifest_json(moved), id],
+        )?;
+        Ok(())
+    }
+
+    /// What the journal says about an entry so far.
+    pub fn journal_note(&self, id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT note FROM journal WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?
+            .flatten())
     }
 
     pub fn journal_finish(&self, id: i64, status: JournalStatus, note: Option<&str>) -> Result<()> {

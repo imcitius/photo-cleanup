@@ -1649,6 +1649,7 @@ async fn an_interrupted_move_can_be_read_against_the_disk_and_undone() {
             manifest: &[pc_db::Moved {
                 src: s.clone(),
                 dst: d.clone(),
+                ident: None,
             }],
         })
         .unwrap()
@@ -1699,6 +1700,7 @@ async fn an_interrupted_move_whose_file_is_in_two_places_is_left_to_a_person() {
             manifest: &[pc_db::Moved {
                 src: s.clone(),
                 dst: d.clone(),
+                ident: None,
             }],
         })
         .unwrap()

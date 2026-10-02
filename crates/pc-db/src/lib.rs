@@ -324,10 +324,12 @@ mod tests {
                     model::Moved {
                         src: "/archive/frame.arw".into(),
                         dst: format!("{q}/frame.arw"),
+                        ident: None,
                     },
                     model::Moved {
                         src: "/archive/frame.xmp".into(),
                         dst: format!("{q}/frame.xmp"),
+                        ident: None,
                     },
                 ],
             })

@@ -87,6 +87,7 @@ fn pair(src: &Path, dst: &Path) -> pc_db::Moved {
     pc_db::Moved {
         src: src.display().to_string(),
         dst: dst.display().to_string(),
+        ident: None,
     }
 }
 
@@ -331,6 +332,35 @@ fn a_retried_undo_does_not_take_a_stranger_at_home_for_the_frame() {
     assert_eq!(journal_row(&a.db, id).0, "done");
 }
 
+/// An old row whose photograph an older version already brought home,
+/// leaving its sidecar behind, and wrote nothing down. There is nothing to
+/// tell that file from a stranger with its name: the undo does not guess,
+/// the sidecar stays held, the entry stays `done`, and the reason is noted.
+#[test]
+fn an_old_half_undo_without_a_list_is_not_finished_by_guessing() {
+    let a = archive();
+    let home = a.dir.join("old.arw");
+    let held = a.quarantine.join("old.arw");
+    let held_side = a.quarantine.join("old.xmp");
+    fs::create_dir_all(&a.quarantine).unwrap();
+    fs::write(&home, b"some file named old.arw").unwrap();
+    fs::write(&held_side, b"original edits").unwrap();
+    let id = entry(&a, &home, &held, &[], JournalStatus::Done);
+
+    let err = crate::undo(&a.db, id).unwrap_err();
+
+    assert!(err.to_string().contains(&home.display().to_string()), "{err:#}");
+    assert_eq!(fs::read(&held_side).unwrap(), b"original edits");
+    assert!(fs::symlink_metadata(a.dir.join("old.xmp")).is_err());
+    let (status, note) = journal_row(&a.db, id);
+    assert_eq!(status, "done");
+    assert!(note.contains(&home.display().to_string()), "{note}");
+    // Asked again, the same answer: the row did not turn into one that a
+    // later retry would take on trust.
+    assert!(crate::undo(&a.db, id).is_err());
+    assert!(a.db.journal_entry(id).unwrap().unwrap().manifest.is_empty());
+}
+
 // ---------------------------------------------------------------- B3 -----
 
 /// A sidecar the volume refuses to move the way it would refuse every move:
@@ -454,9 +484,10 @@ fn a_volume_refusal_stops_the_undo_of_a_run() {
         "после отказа тома откат продолжился"
     );
     assert_eq!(a.db.journal_by_run_op(a.run, "organize").unwrap().len(), 2);
+    let shown = err.to_string();
     assert!(
-        err.to_string().contains("1"),
-        "what came back before the stop: {err}"
+        shown.contains("1 entry") || shown.contains("1 запись"),
+        "what came back before the stop: {shown}"
     );
 }
 

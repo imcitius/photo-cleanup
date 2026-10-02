@@ -396,22 +396,37 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
                 )
             })
             .collect();
+        // What has moved so far, counted the way the command line counts
+        // it, so a run stopped by the volume tells both the same thing.
+        let mut done = pc_apply::Totals::default();
+        let mut refused: Vec<String> = Vec::new();
         for action in actions {
             control.current(action.source_path())?;
             let bytes = reviewed_bytes
                 .get(action.source_path())
                 .copied()
                 .unwrap_or(action.size());
-            if let Err(e) = service::apply_action(st, &db, run, &action, req, control) {
-                if e.is::<pc_core::work::Cancelled>() {
-                    return Err(e);
-                }
-                control.refuse(action.path(), &format!("{e:#}"));
-                // The volume, not this file: nothing more moves, as on the
-                // command line (el-usdqi). The refused call moved nothing.
-                if pc_apply::is_no_exclusive_rename(&e) {
-                    db.finish_run(run)?;
-                    return Err(e);
+            match service::apply_action(st, &db, run, &action, req, control) {
+                Ok(()) => service::count_done(&mut done, &action),
+                Err(e) => {
+                    if e.is::<pc_core::work::Cancelled>() {
+                        return Err(e);
+                    }
+                    // The volume, not this file: nothing more moves, as on
+                    // the command line (el-usdqi). What moved before stays
+                    // moved and journaled, and the error says how much.
+                    if pc_apply::is_no_exclusive_rename(&e) {
+                        if pc_apply::moved_before_stop(&e) {
+                            service::count_done(&mut done, &action);
+                        }
+                        let e =
+                            pc_apply::stop_run(e, &done, service::route_of(&action, run), refused);
+                        control.refuse(action.path(), &format!("{e:#}"));
+                        db.finish_run(run)?;
+                        return Err(e);
+                    }
+                    control.refuse(action.path(), &format!("{e:#}"));
+                    refused.push(format!("{} — {e:#}", action.path()));
                 }
             }
             control.advance(bytes, None);

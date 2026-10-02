@@ -583,6 +583,7 @@ mod exfat {
                 manifest: &[pc_db::Moved {
                     src: s.clone(),
                     dst: d.clone(),
+                    ident: None,
                 }],
             })
             .unwrap();
