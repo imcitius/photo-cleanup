@@ -11,6 +11,7 @@ use crate::race;
 use pc_db::{Db, JournalStatus};
 use pc_family::plan::Candidate;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// What turns up at the destination.
@@ -40,9 +41,19 @@ fn link(target: &Path, at: &Path) {
     std::os::unix::fs::symlink(target, at).unwrap();
 }
 
-#[cfg(windows)]
-fn link(target: &Path, at: &Path) {
-    std::os::windows::fs::symlink_file(target, at).unwrap();
+/// A symlink on Windows needs a privilege CI runners do not have.
+#[cfg(not(unix))]
+fn link(_: &Path, _: &Path) {
+    unreachable!("a dangling symlink is planted on Unix only")
+}
+
+/// The strangers a file destination can meet on this system.
+fn strangers() -> Vec<Stranger> {
+    let mut all = vec![Stranger::File];
+    if cfg!(unix) {
+        all.push(Stranger::Dangling);
+    }
+    all
 }
 
 /// The stranger is still there, exactly as planted.
@@ -152,7 +163,7 @@ fn file_state(db: &Db, path: &Path) -> String {
 
 #[test]
 fn apply_never_replaces_what_appears_in_quarantine() {
-    for what in [Stranger::File, Stranger::Dangling] {
+    for what in strangers() {
         let a = archive();
         let photo = a.dir.join("photo.bmp");
         fs::write(&photo, b"picture").unwrap();
@@ -242,7 +253,7 @@ fn a_bundle_never_replaces_what_appears_in_quarantine() {
 
 #[test]
 fn an_undo_never_replaces_what_appears_at_home() {
-    for what in [Stranger::File, Stranger::Dangling] {
+    for what in strangers() {
         let a = archive();
         let photo = a.dir.join("photo.bmp");
         fs::write(&photo, b"picture").unwrap();
@@ -332,7 +343,7 @@ fn organized(a: &Archive, src: &Path, dst: &Path) -> pc_organize::Move {
 
 #[test]
 fn organize_never_replaces_what_appears_at_the_destination() {
-    for what in [Stranger::File, Stranger::Dangling] {
+    for what in strangers() {
         let a = archive();
         let src = a.dir.join("a.jpg");
         let dst = a.dir.join("2019/a.jpg");
@@ -375,4 +386,233 @@ fn an_organize_undo_never_replaces_what_appears_at_the_old_place() {
     );
     intact(&src, Stranger::File);
     assert_eq!(fs::read(&dst).unwrap(), b"picture");
+}
+
+/// What exFAT answers on macOS, and what Linux answers (`EINVAL`) on a file
+/// system without `RENAME_NOREPLACE`: the call is refused and nothing moves.
+fn no_exclusive_rename() -> race::Guard {
+    race::before_move(|_, _| Err(io::Error::from(io::ErrorKind::Unsupported)))
+}
+
+fn journal_rows(db: &Db) -> i64 {
+    db.conn
+        .query_row("SELECT count(*) FROM journal", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn a_volume_that_cannot_refuse_to_replace_stops_apply_before_anything_moves() {
+    let a = archive();
+    let (one, two) = (a.dir.join("one.bmp"), a.dir.join("two.bmp"));
+    fs::write(&one, b"first").unwrap();
+    fs::write(&two, b"second").unwrap();
+    let cs = [candidate(&a.db, a.run, &one), candidate(&a.db, a.run, &two)];
+
+    let _refused = no_exclusive_rename();
+    let err = crate::apply(&a.db, a.run, &cs, None).unwrap_err();
+
+    assert!(crate::is_no_exclusive_rename(&err), "{err:#}");
+    let shown = err.to_string();
+    assert!(
+        shown.contains(&a.quarantine.join("one.bmp").display().to_string()),
+        "{shown}"
+    );
+    assert_eq!(fs::read(&one).unwrap(), b"first");
+    assert_eq!(fs::read(&two).unwrap(), b"second");
+    // One refusal, written down; the second photograph was never tried.
+    assert_eq!(journal_rows(&a.db), 1);
+    let (status, note) = journal_row(&a.db, last_journal_id(&a.db));
+    assert_eq!(status, JournalStatus::Failed.as_str());
+    assert!(
+        note.contains("RENAME") || note.contains("заменить") || note.contains("replac"),
+        "{note}"
+    );
+}
+
+#[test]
+fn a_volume_that_cannot_refuse_to_replace_stops_organize_and_undo() {
+    let a = archive();
+    let src = a.dir.join("a.jpg");
+    let dst = a.dir.join("2019/a.jpg");
+    fs::write(&src, b"picture").unwrap();
+    let m = organized(&a, &src, &dst);
+    {
+        let _refused = no_exclusive_rename();
+        let err = crate::organize(&a.db, a.run, std::slice::from_ref(&m)).unwrap_err();
+        assert!(crate::is_no_exclusive_rename(&err), "{err:#}");
+        assert_eq!(fs::read(&src).unwrap(), b"picture");
+        assert!(fs::symlink_metadata(&dst).is_err());
+    }
+    // Moved for real, then the volume stops cooperating on the way back.
+    assert_eq!(crate::organize(&a.db, a.run, &[m]).unwrap().moved, 1);
+    let entry =
+        a.db.journal_by_run_op(a.run, "organize")
+            .unwrap()
+            .pop()
+            .unwrap();
+    let _refused = no_exclusive_rename();
+    let err = crate::undo(&a.db, entry.id).unwrap_err();
+    assert!(crate::is_no_exclusive_rename(&err), "{err:#}");
+    assert_eq!(fs::read(&dst).unwrap(), b"picture");
+    let (status, note) = journal_row(&a.db, entry.id);
+    assert_eq!(
+        status,
+        JournalStatus::Done.as_str(),
+        "откат закрыл дверь назад"
+    );
+    assert!(note.contains(&dst.display().to_string()), "{note}");
+}
+
+/// Natively, on a real exFAT volume (macOS disk image): the volume reports
+/// it cannot rename without replacing, so apply, organize and an undo are
+/// refused before the first move and nothing at all is written there — not
+/// even the quarantine folder.
+#[cfg(target_os = "macos")]
+mod exfat {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::process::Command;
+    use std::sync::Mutex;
+
+    static HDIUTIL: Mutex<()> = Mutex::new(());
+
+    struct Image {
+        _dir: tempfile::TempDir,
+        mount: PathBuf,
+    }
+
+    impl Image {
+        fn new(fs_name: &str) -> Self {
+            let _one = HDIUTIL.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().unwrap();
+            let image = dir.path().join("volume.dmg");
+            let mount = dir.path().join("mnt");
+            run(Command::new("hdiutil")
+                .args(["create", "-quiet", "-size", "64m", "-fs", fs_name])
+                .args(["-volname", "PCTEST"])
+                .arg(&image));
+            run(Command::new("hdiutil")
+                .args(["attach", "-quiet", "-nobrowse", "-noverify", "-mountpoint"])
+                .arg(&mount)
+                .arg(&image));
+            let mount = mount.canonicalize().unwrap();
+            Self { _dir: dir, mount }
+        }
+    }
+
+    impl Drop for Image {
+        fn drop(&mut self) {
+            let _one = HDIUTIL.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = Command::new("hdiutil")
+                .args(["detach", "-quiet", "-force"])
+                .arg(&self.mount)
+                .status();
+        }
+    }
+
+    fn run(command: &mut Command) {
+        let out = command.output().unwrap();
+        assert!(out.status.success(), "{command:?}: {out:?}");
+    }
+
+    fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        let mut all = BTreeMap::new();
+        let mut todo = vec![dir.to_path_buf()];
+        while let Some(d) = todo.pop() {
+            for entry in fs::read_dir(&d).unwrap() {
+                let path = entry.unwrap().path();
+                if fs::symlink_metadata(&path).unwrap().is_dir() {
+                    todo.push(path.clone());
+                    all.insert(path, None);
+                } else {
+                    all.insert(path.clone(), Some(fs::read(&path).unwrap()));
+                }
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn exfat_is_refused_before_the_first_move() {
+        let image = Image::new("ExFAT");
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let dir = image.mount.join("archive");
+        fs::create_dir_all(&dir).unwrap();
+        let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
+        let photo = dir.join("photo.bmp");
+        fs::write(&photo, b"synthetic").unwrap();
+        fs::write(dir.join("photo.xmp"), b"synthetic edits").unwrap();
+        let before = tree(&image.mount);
+
+        let c = candidate(&db, run, &photo);
+        let err = crate::apply(&db, run, &[c], None).unwrap_err();
+        assert!(crate::is_no_exclusive_rename(&err), "{err:#}");
+        assert!(err.to_string().contains("RENAME_EXCL"), "{err}");
+
+        let a = Archive {
+            _tmp: tempfile::tempdir().unwrap(),
+            dir: dir.clone(),
+            quarantine: dir.join(pc_core::QUARANTINE_DIR),
+            db,
+            run,
+        };
+        let m = organized(&a, &photo, &dir.join("2019/photo.bmp"));
+        let err = crate::organize(&a.db, a.run, &[m]).unwrap_err();
+        assert!(crate::is_no_exclusive_rename(&err), "{err:#}");
+
+        assert_eq!(tree(&image.mount), before, "на томе что-то записано");
+        assert_eq!(journal_rows(&a.db), 0, "отказ до первого переноса");
+
+        // An undo onto the same volume: a quarantined frame as the journal
+        // records it, coming home to exFAT.
+        let held = dir.join(pc_core::QUARANTINE_DIR).join("held.bmp");
+        fs::create_dir_all(held.parent().unwrap()).unwrap();
+        fs::write(&held, b"held").unwrap();
+        let home = dir.join("held.bmp");
+        let (s, d) = (home.display().to_string(), held.display().to_string());
+        let id =
+            a.db.journal_begin(&pc_db::NewJournalEntry {
+                run_id: a.run,
+                op: "quarantine-file",
+                target_id: None,
+                src: &s,
+                dst: Some(&d),
+                size: 4,
+                file_count: 1,
+                manifest: &[pc_db::Moved {
+                    src: s.clone(),
+                    dst: d.clone(),
+                }],
+            })
+            .unwrap();
+        a.db.journal_finish(id, JournalStatus::Done, None).unwrap();
+        let err = crate::undo(&a.db, id).unwrap_err();
+        assert!(crate::is_no_exclusive_rename(&err), "{err:#}");
+        assert_eq!(fs::read(&held).unwrap(), b"held");
+        assert!(fs::symlink_metadata(&home).is_err());
+        assert_eq!(journal_row(&a.db, id).0, JournalStatus::Done.as_str());
+    }
+
+    /// APFS and HFS+ report the capability; the same apply goes through.
+    #[test]
+    fn apfs_and_hfs_take_the_move() {
+        for fs_name in ["APFS", "HFS+"] {
+            let image = Image::new(fs_name);
+            let tmp = tempfile::tempdir().unwrap();
+            let db = Db::open(&tmp.path().join("test.db")).unwrap();
+            let dir = image.mount.join("archive");
+            fs::create_dir_all(&dir).unwrap();
+            let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
+            let photo = dir.join("photo.bmp");
+            fs::write(&photo, b"synthetic").unwrap();
+            let c = candidate(&db, run, &photo);
+            let report = crate::apply(&db, run, &[c], None).unwrap();
+            assert_eq!(report.totals.files, 1, "{fs_name}: {:?}", report.refused);
+            assert!(dir
+                .join(pc_core::QUARANTINE_DIR)
+                .join("photo.bmp")
+                .is_file());
+        }
+    }
 }

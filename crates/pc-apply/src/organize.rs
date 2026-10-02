@@ -1,6 +1,7 @@
 //! Carrying out a reorganisation.
 //!
-//! Every file moves by `rename(2)` within one filesystem, with both paths in
+//! Every file moves by `rename(2)` within one filesystem, never replacing
+//! what is at the destination (el-usdqi), with both paths in
 //! the journal before the call and the index updated after it. Nothing is
 //! copied, nothing is deleted, and the whole run can be walked backwards —
 //! which is the only reason it is safe to rearrange an archive at all.
@@ -69,6 +70,9 @@ fn unchanged(path: &Path, size: i64, mtime: i64) -> bool {
 pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> {
     let mut report = OrganizeReport::default();
     let mut source_dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    // A volume that cannot move without replacing stops the run before its
+    // first move.
+    crate::check_organize(moves)?;
 
     for m in moves {
         let src = Path::new(&m.src);
@@ -92,7 +96,9 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
             ));
             continue;
         }
-        if dst.exists() {
+        // An early answer only; the move itself refuses to replace anything.
+        // `symlink_metadata` also sees a dangling link, which `exists` does not.
+        if fs::symlink_metadata(dst).is_ok() {
             report.refused.push((
                 m.src.clone(),
                 pc_core::tf!("цель занята: {0}", "destination taken: {0}", m.dst),
@@ -193,6 +199,10 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
             }
             Err(e) => {
                 db.journal_finish(jid, JournalStatus::Failed, Some(&e.to_string()))?;
+                if crate::is_no_exclusive_rename(&e) {
+                    // The volume, not this file: nothing more moves.
+                    return Err(e);
+                }
                 // One failed rename is a fact about one file; a storm of them
                 // means the destination is wrong, and continuing would spread
                 // the mess across the archive.

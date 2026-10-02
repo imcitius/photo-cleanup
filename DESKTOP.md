@@ -1309,6 +1309,13 @@ uid 1000 — `cargo test -p pc-desktop --lib` 54/54 (overlayfs принят;
 
 #### Том цели: переименование без замены (el-21zyg)
 
+Сам вызов (`rename_no_replace_at` / `rename_no_replace`) и запрос
+`VOL_CAP_INT_RENAME_EXCL` (`exclusive_rename`) с el-usdqi живут в
+`pc_core::disk` и общие с переносами `pc-apply` (apply, откат, organize):
+`relocate.rs` `at::rename_no_replace` и `relocate/volume.rs`
+`exclusive_rename` только делегируют туда (тестовая эмуляция `at::fault`
+осталась в `pc-desktop`). Поведение переноса данных не менялось.
+
 Всё, что перенос двигает, двигается одним вызовом — rename без замены
 (`renameatx_np(RENAME_EXCL)` на macOS, `renameat2(RENAME_NOREPLACE)` на
 Linux): публикация `thumbs/` и `photo-cleanup.db` из staging и перенос

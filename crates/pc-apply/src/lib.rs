@@ -228,7 +228,139 @@ fn dir_stats(root: &Path) -> (u64, u64, i64) {
     (count, size, newest)
 }
 
+/// The volume a move would happen on cannot rename without replacing.
+///
+/// Not a fact about one file: every move onto that volume would meet it, so
+/// a run stops at it rather than collecting one refusal per photograph. It
+/// is found before anything moves (the volume is asked where it can answer,
+/// and where it cannot the refused call itself moved nothing).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoExclusiveRename {
+    /// The destination that could not be reached safely.
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+impl std::fmt::Display for NoExclusiveRename {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            pc_core::tf!(
+                "перенос в {0} отменён: том не умеет переименовывать без замены существующего ({1}); \
+                 обычный перенос мог бы молча заменить файл, появившийся там в последний момент, \
+                 поэтому ничего не перенесено",
+                "the move to {0} is refused: the volume cannot rename without replacing what is \
+                 there ({1}); a plain move could silently replace a file that appeared there at \
+                 the last moment, so nothing was moved",
+                self.path.display(),
+                self.reason
+            )
+        )
+    }
+}
+
+impl std::error::Error for NoExclusiveRename {}
+
+/// Whether `e` is [`NoExclusiveRename`]: a run stops at it.
+pub fn is_no_exclusive_rename(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<NoExclusiveRename>().is_some()
+}
+
+/// The nearest existing folder of `path` (itself, if it exists).
+fn nearest_existing(path: &Path) -> &Path {
+    let mut at = path;
+    while fs::symlink_metadata(at).is_err() {
+        match at.parent() {
+            Some(p) if !p.as_os_str().is_empty() => at = p,
+            _ => break,
+        }
+    }
+    at
+}
+
+/// Refuse, before anything moves, a destination whose volume says it cannot
+/// rename without replacing (macOS exFAT), or will not say. Where the system
+/// has no such question (Linux, Windows) this passes, and the move itself
+/// answers: the refused call moves nothing, and the run stops there.
+pub fn check_exclusive_rename(dst: &Path) -> Result<()> {
+    use pc_core::disk::ExclusiveRename;
+    let at = nearest_existing(dst.parent().unwrap_or(dst));
+    let refused = |reason: String| -> Result<()> {
+        Err(NoExclusiveRename {
+            path: dst.to_path_buf(),
+            reason,
+        }
+        .into())
+    };
+    match pc_core::disk::exclusive_rename(at) {
+        Ok(ExclusiveRename::Supported | ExclusiveRename::NoQuery) => Ok(()),
+        Ok(ExclusiveRename::Absent) => refused("RENAME_EXCL".into()),
+        Ok(ExclusiveRename::Unreported) => refused(
+            pc_core::tr!(
+                "том не сообщает о RENAME_EXCL",
+                "the volume does not report RENAME_EXCL"
+            )
+            .into(),
+        ),
+        Err(e) => refused(pc_core::tf!(
+            "не узнать свойства тома {0}: {1}",
+            "cannot read the properties of the volume of {0}: {1}",
+            at.display(),
+            e
+        )),
+    }
+}
+
+/// [`check_exclusive_rename`] for every destination of a run, before its
+/// first move. Each folder is asked once.
+fn check_all<'a>(dsts: impl IntoIterator<Item = &'a Path>) -> Result<()> {
+    let mut asked = std::collections::BTreeSet::new();
+    for dst in dsts {
+        let folder = dst.parent().unwrap_or(dst);
+        if asked.insert(folder.to_path_buf()) {
+            check_exclusive_rename(dst)?;
+        }
+    }
+    Ok(())
+}
+
+/// Before a quarantine of bundles: every destination volume can move
+/// without replacing. The command line and the web preview ask the same.
+pub fn check_bundles(bundles: &[Bundle], override_root: Option<&Path>) -> Result<()> {
+    let dsts: Vec<PathBuf> = bundles
+        .iter()
+        .filter_map(|b| quarantine_dest(b, override_root).ok())
+        .collect();
+    check_all(dsts.iter().map(PathBuf::as_path))
+}
+
+/// Before an apply of photographs: as [`check_bundles`]. Sidecars land
+/// beside their photograph, in the same folder.
+pub fn check_candidates(
+    db: &Db,
+    candidates: &[pc_family::plan::Candidate],
+    override_root: Option<&Path>,
+) -> Result<()> {
+    let dsts: Vec<PathBuf> = candidates
+        .iter()
+        .filter_map(|c| quarantine_dest_for(&c.path, c.file_id, db, override_root).ok())
+        .collect();
+    check_all(dsts.iter().map(PathBuf::as_path))
+}
+
+/// Before a reorganisation: as [`check_bundles`].
+pub fn check_organize(moves: &[pc_organize::Move]) -> Result<()> {
+    check_all(moves.iter().map(|m| Path::new(&m.dst)))
+}
+
+/// The one move of this crate: create the parents, then rename `src` to
+/// `dst` **without replacing** anything at `dst` — not a file another
+/// program created a moment ago, not a dangling symlink `exists()` cannot
+/// see (el-usdqi). Apply, every undo, organize and orphan adoption go
+/// through here; there is no other `rename` of a photograph.
 pub(crate) fn rename_with_parents(src: &Path, dst: &Path) -> Result<()> {
+    check_exclusive_rename(dst)?;
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -238,26 +370,32 @@ pub(crate) fn rename_with_parents(src: &Path, dst: &Path) -> Result<()> {
             )
         })?;
     }
-    if dst.exists() {
-        bail!(
+    #[cfg(test)]
+    let raced = race::fire(src, dst);
+    #[cfg(not(test))]
+    let raced = Ok(());
+    match raced.and_then(|()| pc_core::disk::rename_no_replace(src, dst)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => bail!(
             "{}",
             pc_core::tf!(
-                "цель уже существует: {0}",
-                "the destination already exists: {0}",
+                "цель уже существует и не будет заменена: {0}",
+                "the destination already exists and is not replaced: {0}",
                 dst.display()
             )
-        );
-    }
-    #[cfg(test)]
-    race::fire(src, dst)?;
-    fs::rename(src, dst).with_context(|| {
-        pc_core::tf!(
+        ),
+        Err(e) if pc_core::disk::lacks_exclusive_rename(&e) => Err(NoExclusiveRename {
+            path: dst.to_path_buf(),
+            reason: e.to_string(),
+        }
+        .into()),
+        Err(e) => Err(anyhow::Error::new(e).context(pc_core::tf!(
             "не переместить {0} -> {1} (перенос обязан быть в пределах одного диска)",
             "cannot move {0} -> {1} (a move has to stay within one disk)",
             src.display(),
             dst.display()
-        )
-    })
+        ))),
+    }
 }
 
 /// Tests only: what happens between the last look at a destination and the
@@ -411,6 +549,9 @@ pub fn quarantine_many(
     override_root: Option<&Path>,
 ) -> Result<Totals> {
     let mut t = Totals::default();
+    // A volume that cannot move without replacing stops the run before its
+    // first move, not halfway through it.
+    check_bundles(bundles, override_root)?;
     for b in bundles {
         match quarantine(db, run_id, b, override_root) {
             Ok(Outcome::Moved) => {
@@ -423,6 +564,7 @@ pub fn quarantine_many(
                 "{0} — changed since the scan",
                 b.path
             )),
+            Err(e) if is_no_exclusive_rename(&e) => return Err(e),
             Err(e) => t.skipped.push(format!("{} — {e}", b.path)),
         }
     }
@@ -462,7 +604,8 @@ pub(crate) fn listed(failed: &[(String, String)]) -> String {
 /// it got there, so it writes one now, and the move can be walked back like
 /// any other.
 pub fn adopt_orphan(db: &Db, run_id: i64, src: &str, dst: &str) -> Result<()> {
-    if Path::new(dst).exists() {
+    // An early answer; the move itself never replaces what is there.
+    if fs::symlink_metadata(dst).is_ok() {
         bail!(
             "{}",
             pc_core::tf!(
@@ -565,14 +708,16 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
         // Written before the journal held a list: name matching is all there
         // is, and it is why the list exists now.
         let sidecars = files::companions(&dst_path);
-        rename_with_parents(&dst_path, &src_path)?;
+        home_first(db, journal_id, &dst_path, &src_path)?;
         let new_stem = organize::stem_of(&name_of(&dst_path)).to_string();
         let old_stem = organize::stem_of(&name_of(&src_path)).to_string();
         for side in sidecars {
             if let Some(name) = side.file_name().and_then(|s| s.to_str()) {
                 let back =
                     src_path.with_file_name(organize::sidecar_name(name, &new_stem, &old_stem));
-                let _ = rename_with_parents(&side, &back);
+                if let Err(e) = rename_with_parents(&side, &back) {
+                    failed.push(format!("{} — {e}", side.display()));
+                }
             }
         }
     } else {
@@ -581,7 +726,7 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
         // for again, and the retry must carry back what is still in
         // quarantine without touching what is already home.
         if dst_path.exists() || !src_path.exists() {
-            rename_with_parents(&dst_path, &src_path)?;
+            home_first(db, journal_id, &dst_path, &src_path)?;
         }
         for m in entry.manifest.iter().filter(|m| m.src != entry.src) {
             let (from, to) = (Path::new(&m.dst), Path::new(&m.src));
@@ -659,6 +804,21 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<()> {
     }
     db.journal_mark_undone(journal_id)?;
     Ok(())
+}
+
+/// Bring the photograph of an entry home, or leave the entry as it was —
+/// still `done`, still offered — with the refusal written on it.
+fn home_first(db: &Db, journal_id: i64, from: &Path, to: &Path) -> Result<()> {
+    rename_with_parents(from, to).inspect_err(|e| {
+        let why = pc_core::tf!(
+            "откат: не вернулось {0} — {1}",
+            "undo: did not come back — {0} — {1}",
+            from.display(),
+            e
+        );
+        // The refusal is the answer; a failure to note it must not hide it.
+        let _ = db.journal_finish(journal_id, JournalStatus::Done, Some(&why));
+    })
 }
 
 /// What an interrupted operation actually did, item by item.
@@ -782,7 +942,12 @@ pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Vec<Item>> {
         db.journal_finish(journal_id, JournalStatus::Pending, Some(&why))?;
         bail!("{why}");
     }
-    for item in items.iter().filter(|i| i.standing == Standing::Moved) {
+    let back: Vec<&Item> = items
+        .iter()
+        .filter(|i| i.standing == Standing::Moved)
+        .collect();
+    check_all(back.iter().map(|i| Path::new(&i.src)))?;
+    for item in back {
         rename_with_parents(Path::new(&item.dst), Path::new(&item.src))?;
     }
     let entry = db.journal_entry(journal_id)?.expect("read a moment ago");

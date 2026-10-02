@@ -1041,6 +1041,21 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             !blocked.contains(src)
         });
     }
+    // A volume that cannot move without replacing refuses the whole
+    // operation before its first move: the same answer, from the same
+    // pc-apply functions, as the command line (el-usdqi).
+    let (mut copies, mut bundles, mut moves) = (Vec::new(), Vec::new(), Vec::new());
+    for a in &actions {
+        match a {
+            Action::Copy(c) => copies.push(c.clone()),
+            Action::Bundle(b) => bundles.push(b.clone()),
+            Action::Move(m) => moves.push(m.clone()),
+            _ => {}
+        }
+    }
+    pc_apply::check_candidates(db, &copies, root.as_deref())?;
+    pc_apply::check_bundles(&bundles, root.as_deref())?;
+    pc_apply::check_organize(&moves)?;
     // A refused file deserves the same inspection as a candidate. Metadata
     // is read from the index; previewing never opens an arbitrary client path.
     if r.kind == "plan-apply" {

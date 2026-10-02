@@ -407,6 +407,12 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
                     return Err(e);
                 }
                 control.refuse(action.path(), &format!("{e:#}"));
+                // The volume, not this file: nothing more moves, as on the
+                // command line (el-usdqi). The refused call moved nothing.
+                if pc_apply::is_no_exclusive_rename(&e) {
+                    db.finish_run(run)?;
+                    return Err(e);
+                }
             }
             control.advance(bytes, None);
             db.conn.execute(

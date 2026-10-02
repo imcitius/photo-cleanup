@@ -228,9 +228,22 @@ mod space_tests {
     }
 }
 
-/// Publish a file or directory on the same filesystem without replacing any
-/// existing name, including a dangling symlink. A check followed by `rename`
-/// is not enough: another process can create the destination in between.
+/// Move a file or directory within one filesystem without replacing any
+/// existing name — a file, a directory (even an empty one) or a dangling
+/// symlink. A check followed by `rename` is not enough: another program can
+/// create the destination in between, and a plain `rename` replaces it
+/// without a word (el-usdqi).
+///
+/// - macOS: `renameatx_np(RENAME_EXCL)`;
+/// - Linux: `renameat2(RENAME_NOREPLACE)`;
+/// - Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` (and
+///   without `MOVEFILE_COPY_ALLOWED`, so it never becomes a copy);
+/// - other systems have no such call and refuse.
+///
+/// An existing destination fails with [`io::ErrorKind::AlreadyExists`]. A
+/// volume that lacks the call fails as [`lacks_exclusive_rename`] says; there
+/// is deliberately no fallback — every substitute (check then rename, a
+/// placeholder, link then unlink) reopens the window or leaves debris.
 pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -238,30 +251,7 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
         use std::os::unix::ffi::OsStrExt;
         let from = CString::new(from.as_os_str().as_bytes())?;
         let to = CString::new(to.as_os_str().as_bytes())?;
-        // SAFETY: both C strings remain valid throughout the syscall.
-        #[cfg(target_os = "macos")]
-        let rc = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
-        #[cfg(target_os = "linux")]
-        let rc = unsafe {
-            libc::renameat2(
-                libc::AT_FDCWD,
-                from.as_ptr(),
-                libc::AT_FDCWD,
-                to.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "exclusive rename is unavailable",
-        ));
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+        exclusive::rename(libc::AT_FDCWD, &from, libc::AT_FDCWD, &to)
     }
     #[cfg(windows)]
     {
@@ -276,5 +266,198 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
         } else {
             Err(io::Error::last_os_error())
         }
+    }
+}
+
+/// [`rename_no_replace`] relative to open directories: `from` in `from_dir`
+/// to `to` in `to_dir`. The one implementation behind both forms.
+#[cfg(unix)]
+pub fn rename_no_replace_at(
+    from_dir: &fs::File,
+    from: &std::ffi::CStr,
+    to_dir: &fs::File,
+    to: &std::ffi::CStr,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    exclusive::rename(from_dir.as_raw_fd(), from, to_dir.as_raw_fd(), to)
+}
+
+#[cfg(unix)]
+mod exclusive {
+    use std::ffi::CStr;
+    use std::io;
+    use std::os::fd::RawFd;
+
+    pub(super) fn rename(a: RawFd, from: &CStr, b: RawFd, to: &CStr) -> io::Result<()> {
+        // SAFETY: descriptors (or AT_FDCWD) and NUL-terminated names that
+        // outlive the call.
+        #[cfg(target_os = "macos")]
+        let rc = unsafe { libc::renameatx_np(a, from.as_ptr(), b, to.as_ptr(), libc::RENAME_EXCL) };
+        // SAFETY: as above.
+        #[cfg(target_os = "linux")]
+        let rc =
+            unsafe { libc::renameat2(a, from.as_ptr(), b, to.as_ptr(), libc::RENAME_NOREPLACE) };
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = (a, b, from, to);
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "exclusive rename is unavailable",
+            ));
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
+/// Whether `e`, returned by [`rename_no_replace`], means the volume (or the
+/// system) cannot rename without replacing — not that this one entry could
+/// not move. exFAT on macOS answers `ENOTSUP`; Linux answers `EINVAL` where
+/// the file system lacks `RENAME_NOREPLACE` (NFS, many FUSE mounts).
+pub fn lacks_exclusive_rename(e: &io::Error) -> bool {
+    if e.kind() == io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        let code = e.raw_os_error();
+        if code == Some(libc::ENOTSUP) || code == Some(libc::EOPNOTSUPP) {
+            return true;
+        }
+        #[cfg(target_os = "linux")]
+        if code == Some(libc::EINVAL) {
+            return true;
+        }
+    }
+    false
+}
+
+/// What a volume says about renaming without replacing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusiveRename {
+    /// The volume reports the capability.
+    Supported,
+    /// The volume reports that it lacks it (macOS exFAT).
+    Absent,
+    /// The volume does not say either way: not proven, treat as absent.
+    Unreported,
+    /// This system has no such query (Linux, Windows): only the call
+    /// itself answers, and it moves nothing when it refuses.
+    NoQuery,
+}
+
+/// Ask the volume that holds the existing `path` whether it can rename
+/// without replacing. macOS: `VOL_CAP_INT_RENAME_EXCL` of
+/// `ATTR_VOL_CAPABILITIES` (el-21zyg: exFAT reports it absent, APFS and
+/// HFS+ report it). Read only.
+pub fn exclusive_rename(path: &Path) -> io::Result<ExclusiveRename> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        /// `ATTR_VOL_CAPABILITIES` as `getattrlist` returns it: a length,
+        /// then the attribute.
+        #[repr(C, packed(4))]
+        struct Capabilities {
+            length: u32,
+            caps: libc::vol_capabilities_attr_t,
+        }
+
+        let c = CString::new(path.as_os_str().as_bytes())?;
+        // SAFETY: plain data; zero is a valid value for every field.
+        let mut list: libc::attrlist = unsafe { std::mem::zeroed() };
+        list.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
+        list.volattr = libc::ATTR_VOL_INFO | libc::ATTR_VOL_CAPABILITIES;
+        let mut out: Capabilities = unsafe { std::mem::zeroed() };
+        // SAFETY: `c` is NUL-terminated; `out` is writable for its size.
+        let rc = unsafe {
+            libc::getattrlist(
+                c.as_ptr(),
+                (&mut list as *mut libc::attrlist).cast(),
+                (&mut out as *mut Capabilities).cast(),
+                std::mem::size_of::<Capabilities>(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let caps = out.caps;
+        let i = libc::VOL_CAPABILITIES_INTERFACES;
+        let bit = libc::VOL_CAP_INT_RENAME_EXCL;
+        Ok(
+            match (caps.valid[i] & bit != 0, caps.capabilities[i] & bit != 0) {
+                (true, true) => ExclusiveRename::Supported,
+                (true, false) => ExclusiveRename::Absent,
+                (false, _) => ExclusiveRename::Unreported,
+            },
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        fs::symlink_metadata(path)?;
+        Ok(ExclusiveRename::NoQuery)
+    }
+}
+
+#[cfg(test)]
+mod exclusive_tests {
+    use super::*;
+
+    #[test]
+    fn nothing_at_the_new_name_is_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        fs::write(&a, b"mine").unwrap();
+        fs::write(&b, b"theirs").unwrap();
+        let e = rename_no_replace(&a, &b).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{e}");
+        assert!(!lacks_exclusive_rename(&e));
+        assert_eq!(fs::read(&a).unwrap(), b"mine");
+        assert_eq!(fs::read(&b).unwrap(), b"theirs");
+
+        // A directory onto an empty directory: plain `rename` replaces it.
+        let (d, e_) = (tmp.path().join("d"), tmp.path().join("e"));
+        fs::create_dir(&d).unwrap();
+        fs::create_dir(&e_).unwrap();
+        assert!(rename_no_replace(&d, &e_).is_err());
+        assert!(d.is_dir() && e_.is_dir());
+
+        let c = tmp.path().join("c");
+        rename_no_replace(&a, &c).unwrap();
+        assert_eq!(fs::read(&c).unwrap(), b"mine");
+        assert!(!a.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_is_not_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        fs::write(&a, b"mine").unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("nowhere"), &b).unwrap();
+        assert!(!b.exists(), "exists() does not see it — that is the point");
+        let e = rename_no_replace(&a, &b).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{e}");
+        assert!(fs::symlink_metadata(&b).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&a).unwrap(), b"mine");
+    }
+
+    #[test]
+    fn an_ordinary_temporary_folder_can_rename_without_replacing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let answer = exclusive_rename(tmp.path()).unwrap();
+        assert!(
+            matches!(
+                answer,
+                ExclusiveRename::Supported | ExclusiveRename::NoQuery
+            ),
+            "{answer:?}"
+        );
     }
 }

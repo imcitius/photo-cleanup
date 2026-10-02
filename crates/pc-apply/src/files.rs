@@ -243,6 +243,10 @@ pub fn quarantine_file(
         }
         Err(e) => {
             db.journal_finish(jid, JournalStatus::Failed, Some(&e.to_string()))?;
+            if crate::is_no_exclusive_rename(&e) {
+                // Not this file's problem but the volume's: stop the run.
+                return Err(e);
+            }
             Ok((FileOutcome::Refused, e.to_string()))
         }
     }
@@ -261,6 +265,9 @@ pub fn apply(
     override_root: Option<&Path>,
 ) -> Result<ApplyReport> {
     let mut report = ApplyReport::default();
+    // A volume that cannot move without replacing stops the run before its
+    // first move.
+    crate::check_candidates(db, candidates, override_root)?;
     for c in candidates {
         match quarantine_file(db, run_id, c, override_root) {
             Ok((FileOutcome::Moved, stuck)) => {
@@ -272,6 +279,8 @@ pub fn apply(
                 }
             }
             Ok((FileOutcome::Refused, why)) => report.refused.push((c.path.clone(), why)),
+            // It names the destination already, and callers tell it apart.
+            Err(e) if crate::is_no_exclusive_rename(&e) => return Err(e),
             Err(e) => {
                 // A hard error stops the run: something is wrong beyond one
                 // file, and continuing would multiply it.

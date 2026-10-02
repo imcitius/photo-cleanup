@@ -1809,3 +1809,95 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 
 #[path = "review_tests.rs"]
 mod review_tests;
+
+/// el-usdqi: on a volume that cannot rename without replacing (exFAT), the
+/// web refuses the whole operation in the preview and in the job, before
+/// anything moves — with the same words the command line gets from the same
+/// pc-apply function. Natively on a macOS disk image.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn exfat_is_refused_in_the_preview_and_the_job_like_the_command_line() {
+    use std::process::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let image = tmp.path().join("volume.dmg");
+    let mount = tmp.path().join("mnt");
+    let run = |c: &mut Command| assert!(c.output().unwrap().status.success(), "{c:?}");
+    run(Command::new("hdiutil")
+        .args([
+            "create", "-quiet", "-size", "64m", "-fs", "ExFAT", "-volname", "PCTEST",
+        ])
+        .arg(&image));
+    run(Command::new("hdiutil")
+        .args(["attach", "-quiet", "-nobrowse", "-noverify", "-mountpoint"])
+        .arg(&mount)
+        .arg(&image));
+    struct Detach(PathBuf);
+    impl Drop for Detach {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("hdiutil")
+                .args(["detach", "-quiet", "-force"])
+                .arg(&self.0)
+                .status();
+        }
+    }
+    let mount = mount.canonicalize().unwrap();
+    let _detach = Detach(mount.clone());
+    let archive = mount.join("archive");
+    let previews = archive.join("Library Previews.lrdata");
+    std::fs::create_dir_all(&previews).unwrap();
+    std::fs::write(previews.join("preview.jpg"), b"rebuildable preview").unwrap();
+    let state = Arc::new(
+        AppState::new(
+            &tmp.path().join("test.db"),
+            &tmp.path().join("thumbs"),
+            None,
+        )
+        .unwrap(),
+    );
+    let f = Fixture {
+        _tmp: tempfile::tempdir().unwrap(),
+        state,
+        archive: archive.clone(),
+        quarantine: archive.join(pc_core::QUARANTINE_DIR),
+    };
+    f.scan().await;
+
+    let params = json!({"kinds":["lr-previews"],"min_size":0});
+    let (status, web) = f
+        .req(
+            "POST",
+            "/api/preview",
+            json!({"kind":"derived-clean","params":params}),
+        )
+        .await;
+    assert_eq!(status, 400, "{web}");
+    let web = web.to_string();
+    assert!(web.contains("RENAME_EXCL"), "{web}");
+
+    let (s, v) = f
+        .req(
+            "POST",
+            "/api/jobs",
+            json!({"kind":"derived-clean","params":params,"plan_token":"any","confirmation":"DELETE"}),
+        )
+        .await;
+    assert_eq!(s, 202, "{v}");
+    let job = f.wait(v["job_id"].as_i64().unwrap()).await;
+    assert_eq!(job["state"], "failed", "{job}");
+    assert!(
+        job["error"].as_str().unwrap().contains("RENAME_EXCL"),
+        "{job}"
+    );
+    assert!(previews.join("preview.jpg").is_file());
+    assert!(!f.quarantine.exists(), "карантин создан на томе");
+
+    // The command line's answer, from the same function.
+    let db = f.state.db.lock().unwrap();
+    let bundles = db.list_bundles(&Default::default()).unwrap();
+    let cli = pc_apply::quarantine_many(&db, 0, &bundles, None).unwrap_err();
+    assert!(pc_apply::is_no_exclusive_rename(&cli));
+    assert!(
+        web.contains(&cli.to_string().replace('"', "\\\"")),
+        "{web}\n{cli}"
+    );
+}
