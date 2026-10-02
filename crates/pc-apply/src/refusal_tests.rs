@@ -349,7 +349,10 @@ fn an_old_half_undo_without_a_list_is_not_finished_by_guessing() {
 
     let err = crate::undo(&a.db, id).unwrap_err();
 
-    assert!(err.to_string().contains(&home.display().to_string()), "{err:#}");
+    assert!(
+        err.to_string().contains(&home.display().to_string()),
+        "{err:#}"
+    );
     assert_eq!(fs::read(&held_side).unwrap(), b"original edits");
     assert!(fs::symlink_metadata(a.dir.join("old.xmp")).is_err());
     let (status, note) = journal_row(&a.db, id);
