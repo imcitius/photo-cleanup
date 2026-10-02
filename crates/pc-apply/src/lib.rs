@@ -248,6 +248,8 @@ pub(crate) fn rename_with_parents(src: &Path, dst: &Path) -> Result<()> {
             )
         );
     }
+    #[cfg(test)]
+    race::fire(src, dst)?;
     fs::rename(src, dst).with_context(|| {
         pc_core::tf!(
             "не переместить {0} -> {1} (перенос обязан быть в пределах одного диска)",
@@ -257,6 +259,49 @@ pub(crate) fn rename_with_parents(src: &Path, dst: &Path) -> Result<()> {
         )
     })
 }
+
+/// Tests only: what happens between the last look at a destination and the
+/// move itself — another program creating a file there, or (with an `Err`)
+/// the move being refused the way a volume refuses a call it lacks. Every
+/// move of this crate passes through [`rename_with_parents`], so a test on
+/// any of its consumers can stage the race deterministically.
+#[cfg(test)]
+pub(crate) mod race {
+    use std::cell::RefCell;
+    use std::io;
+    use std::path::Path;
+
+    type Hook = Box<dyn FnMut(&Path, &Path) -> io::Result<()>>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// While the guard lives, `hook(src, dst)` runs right before each move
+    /// on this thread; an `Err` it returns is the move's error.
+    pub(crate) fn before_move(hook: impl FnMut(&Path, &Path) -> io::Result<()> + 'static) -> Guard {
+        HOOK.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+        Guard
+    }
+
+    pub(crate) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOOK.with(|h| *h.borrow_mut() = None);
+        }
+    }
+
+    pub(crate) fn fire(src: &Path, dst: &Path) -> io::Result<()> {
+        HOOK.with(|h| match h.borrow_mut().as_mut() {
+            Some(hook) => hook(src, dst),
+            None => Ok(()),
+        })
+    }
+}
+
+#[cfg(test)]
+mod race_tests;
 
 /// The catalogue's own answer, asked at the moment of the move.
 ///
