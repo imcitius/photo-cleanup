@@ -451,7 +451,9 @@ pc_desktop::confirm_started(&dirs, &p)?;             // снять `previous`
    Том цели, на котором временные папки переноса нельзя закрыть от других
    пользователей (FAT/exFAT, noowners, без ACL), запрещает копирование
    блокером `no_private_folders` с путём и причиной, но не переключение на
-   уже лежащую там базу — см. «Том цели: владельцы и ACL».
+   уже лежащую там базу — см. «Том цели: владельцы и ACL». Том без
+   rename без замены (exFAT) — так же, блокером `no_exclusive_rename`
+   (см. «Том цели: переименование без замены»).
 3. **Остановка записей**: `Server::shutdown(IfIdle)` отказывает при
    идущей задаче; пользователь ждёт или останавливает её обычным UI.
    Mutation gate завершает начатые записи и запрещает новые. Writer locks
@@ -1267,9 +1269,9 @@ restore/take ownership (Windows, уровень администратора). �
 данные приложения нельзя перенести копированием на SD-карту/флешку с
 FAT/exFAT или на внешний диск с игнорированием владельцев — это
 намеренное ограничение совместимости; путь — включить учёт владельцев или
-выбрать другой том. Отдельная pre-existing проблема exFAT
-(`RENAME_EXCL` → `ENOTSUP`) вынесена в зависимую задачу; семантика
-no-overwrite не ослаблялась.
+выбрать другой том. Отдельная проблема exFAT (`RENAME_EXCL` →
+`ENOTSUP`) — см. «Том цели: переименование без замены (el-21zyg)»;
+семантика no-overwrite не ослаблялась.
 
 Регрессии на настоящих томах (`relocate::volume_tests`, macOS,
 одноразовые образы `hdiutil create/attach`, без root, данные — tempfile):
@@ -1304,6 +1306,98 @@ uid 1000 — `cargo test -p pc-desktop --lib` 54/54 (overlayfs принят;
 только type-check модуля `volume.rs` в scratch-крейте (`cargo clippy
 --target x86_64-pc-windows-msvc -D warnings`); вызов в `open_created_dir`
 не компилировался под Windows, **не запускалось**.
+
+#### Том цели: переименование без замены (el-21zyg)
+
+Всё, что перенос двигает, двигается одним вызовом — rename без замены
+(`renameatx_np(RENAME_EXCL)` на macOS, `renameat2(RENAME_NOREPLACE)` на
+Linux): публикация `thumbs/` и `photo-cleanup.db` из staging и перенос
+собственных остатков в `.photo-cleanup-removing-*` при очистке. Замены у
+этого вызова нет: обычный `rename` может заменить чужую запись, а
+«проверить имя, потом переименовать/удалить» этого не исключает. Поэтому
+том, где вызова нет, — отказ, а не fallback; поддержка exFAT **не**
+добавлялась.
+
+Наблюдение на нативных образах (macOS 27 arm64, `hdiutil create -fs …`,
+синтетические файлы, main 5a83474):
+
+| ФС (attach) | `RENAME_EXCL` | `VOL_CAP_INT_RENAME_EXCL` | noowners |
+|---|---|---|---|
+| ExFAT (по умолчанию и `-owners on`) | `ENOTSUP` (45) | valid, **нет** | да, всегда |
+| MS-DOS FAT32 `-owners on` | работает | valid, **нет** | да, всегда |
+| HFS+ по умолчанию / `-owners on` | работает | есть | да / нет |
+| APFS `-owners on`, системный APFS | работает | есть | нет |
+
+На main 5a83474 exFAT как цель уже отклонялся до первой записи (noowners,
+решение A): `move_data` дважды — тот же `NoPrivateFolders`, том байт в
+байт неизменен. Путь `ENOTSUP` через настоящий exFAT поэтому не
+достижим; он воспроизводился эмуляцией (`at::fault`, только в тестах:
+`rename_no_replace` на этом потоке отвечает `ENOTSUP`) на томе, прошедшем
+допуск. Результат на main: публикация `thumbs` падала с `ENOTSUP`, очистка
+тем же вызовом не могла унести свои записи, в цели оставались
+`photo-cleanup.db.partial/` (с копией внутри), пустые резервации
+`photo-cleanup.db-wal`/`-shm`/`-journal` и `.writer-lock`; ошибка их
+называла, но повтор отклонялся из-за них же (`SidecarExists` ×3 и
+`LeftoverPartial`).
+
+Что теперь (`relocate/volume.rs` `check_exclusive_rename`,
+`relocate.rs` `probe_exclusive_rename`):
+
+1. **Preview, только чтение**: macOS спрашивает у тома
+   `getattrlist(ATTR_VOL_CAPABILITIES)`; если `VOL_CAP_INT_RENAME_EXCL` не
+   объявлен действительным и установленным — блокер
+   `Blocker::NoExclusiveRename { path, reason }` (`kind:
+   "no_exclusive_rename"`): «`<цель>` cannot receive the data: its volume
+   cannot rename without replacing (volume `<точка монтирования>` (exfat)
+   cannot rename without replacing what is at the new name (RENAME_EXCL))…
+   Choose a folder on another volume». На exFAT он стоит рядом с
+   `NoPrivateFolders`; FAT32 по признаку тоже его получает, хотя вызов там
+   срабатывает (том и так отклонён за noowners). Linux такого запроса не
+   имеет, Windows копирование не выполняет — там решает шаг 2.
+2. **Проба до первой записи, которую пришлось бы убирать**: после допуска
+   цели и создания её недостающих каталогов, но до `.writer-lock`,
+   резерваций и staging, в цели создаётся свежий приватный
+   `.photo-cleanup-removing-*` (`Aside::create`), в нём эксклюзивно —
+   пустой файл `rename-probe`, и он переименовывается без замены внутри
+   того же каталога. Файл удаляется только через дескриптор приватного
+   каталога и только пока запись — тот самый файл (`dev`/`ino`), затем
+   каталог убирается как обычно (`Aside::remove`). Ошибка вызова → тот же
+   блокер `NoExclusiveRename` с текстом ошибки ОС (`Operation not
+   supported (os error 45)`), созданные переносом каталоги цели удаляются
+   (`rmdir` пустых), в цели не остаётся ничего; повтор встречает то же
+   состояние и тот же ответ. Остаток самой пробы не удаляется по имени, а
+   называется в `RelocateError::Cleanup`.
+3. **Если вызов перестал работать уже после пробы** (том сменился, сбой):
+   публикация отменяется; если очистка своим вызовом может унести записи —
+   они убираются как всегда, и повтор после восстановления вызова проходит
+   как первая попытка. Если не может — ничего не удаляется по имени и не
+   переименовывается с заменой: `.partial` с копией и резервации остаются,
+   каждая названа в ошибке (`<путь> was left in place: Operation not
+   supported`), повтор отклоняется блокерами `SidecarExists`/
+   `LeftoverPartial` с путями и ничего не меняет (fail closed).
+
+UI: `no_exclusive_rename`, как `no_private_folders`, запрещает копирование,
+но не переключение на уже лежащую там базу (`switch_to_existing` пишет
+только bootstrap и ничего на томе не переименовывает).
+
+Регрессии: `relocate::rename_tests` (Unix) —
+`a_volume_that_cannot_rename_without_replacing_is_refused_without_leftovers`
+(все переименования `ENOTSUP`; существующая папка с чужим файлом и
+несуществующая `new/data`; по две попытки, одинаковый
+`NoExclusiveRename` с путём, листинг цели неизменен, `new` не создан,
+bootstrap и исходная база не меняются; на main 5a83474 FAIL — остатки
+выше), `an_unsupported_rename_at_publication_is_undone_and_a_retry_completes`
+(`ENOTSUP` только на публикации `thumbs`, затем `photo-cleanup.db`: ничего
+не осталось, повтор проходит),
+`leftovers_that_cannot_be_moved_aside_are_kept_and_named_never_removed_by_name`;
+`relocate::volume_tests::exfat_cannot_rename_without_replacing_and_is_refused_for_it`
+(нативный ExFAT: `ENOTSUP` 45 у `pc_core::disk::rename_no_replace`,
+блокер в preview и в `move_data` дважды, том неизменен; APFS/HFS+
+`-owners on` — признак есть).
+
+Не покрыто: карантин фотографий (`pc-apply`) этим вызовом не пользуется и
+здесь не менялся. Windows/Linux нативно в рамках el-21zyg не запускались
+(Linux: проба шага 2 — единственная проверка, признака тома нет).
 
 Где запускалось (исправление el-5null): macOS — `cargo test --workspace`
 445/0/0, pc-desktop lib 57/57; Linux Docker `rust:1.98-slim-bookworm` под

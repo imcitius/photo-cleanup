@@ -57,6 +57,9 @@ pub(crate) mod volume;
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod storage_tests;
 
+#[cfg(all(test, unix))]
+mod rename_tests;
+
 /// Room left over after the copy, on top of its own size.
 ///
 /// The database copy is written by SQLite, which needs scratch space of its
@@ -146,6 +149,17 @@ pub enum Blocker {
     /// or not known): `reason` says which, naming the volume. Refused
     /// before anything is written there ([`volume`]).
     NoPrivateFolders {
+        path: PathBuf,
+        reason: String,
+    },
+    /// The volume that would hold `path` cannot rename an entry without
+    /// replacing whatever is at the new name (macOS exFAT: `ENOTSUP`), or
+    /// does not say it can (`reason`, naming the volume or the error).
+    /// Publishing the copy and removing this run's own leftovers both rest
+    /// on that call, and nothing replaces it safely, so the move is refused
+    /// before anything is written there that would have to be cleaned up
+    /// (el-21zyg).
+    NoExclusiveRename {
         path: PathBuf,
         reason: String,
     },
@@ -264,6 +278,12 @@ pub fn preview_move_with(
             blockers.push(Blocker::NoPrivateFolders {
                 path: target.to_path_buf(),
                 reason: reason.clone(),
+            });
+        }
+        if let Err(reason) = volume::check_exclusive_rename(target) {
+            blockers.push(Blocker::NoExclusiveRename {
+                path: target.to_path_buf(),
+                reason,
             });
         }
         // The same proof the move itself starts with ([`Spaces::admit`]):
@@ -583,6 +603,16 @@ impl fmt::Display for Blocker {
                 path.display(),
                 reason
             ),
+            Self::NoExclusiveRename { path, reason } => pc_core::tf!(
+                "в {0} нельзя перенести данные: том не умеет переименовывать без замены \
+                 существующего ({1}), а без этого перенос не может ни опубликовать копию, \
+                 ни безопасно убрать за собой. Выберите папку на другом томе",
+                "{0} cannot receive the data: its volume cannot rename without replacing \
+                 ({1}), and without that the move can neither publish the copy nor safely \
+                 remove its own leftovers. Choose a folder on another volume",
+                path.display(),
+                reason
+            ),
             Self::UnprotectedFolder {
                 role,
                 path,
@@ -776,13 +806,23 @@ fn copy_data_with(
             // `stage` has released the target lock by now, so an empty
             // folder this run created can go too.
             let left = cleanup.abort();
-            return Err(if left.is_empty() {
-                error
-            } else {
-                RelocateError::Cleanup {
+            return Err(match (error, left.is_empty()) {
+                (error, true) => error,
+                // Already a cleanup report (the rename probe's): one list.
+                (
+                    RelocateError::Cleanup {
+                        error,
+                        left: mut first,
+                    },
+                    false,
+                ) => {
+                    first.extend(left);
+                    RelocateError::Cleanup { error, left: first }
+                }
+                (error, false) => RelocateError::Cleanup {
                     error: Box::new(error),
                     left,
-                }
+                },
             });
         }
     };
@@ -864,6 +904,11 @@ fn stage(
             .map_err(copy_err)?,
     )
     .map_err(copy_err)?;
+    // Before the first file this run would have to remove again — the
+    // writer lock, the reservations, the staging folder: on a volume that
+    // cannot rename without replacing, the cleanup could not move them
+    // aside either, and they would block every retry (el-21zyg).
+    probe_exclusive_rename(&target, target_dir.file())?;
     let to = DataLayout::in_dir(&target);
     let target_lock = pc_core::lock::take_writer(&to.db, "receiving app data").map_err(|e| {
         RelocateError::Locked {
@@ -975,6 +1020,99 @@ fn publish_err(partial: &Path, name: &str, target: &Path, e: &io::Error) -> Relo
         target.display(),
         e
     ))
+}
+
+/// Try the call everything of this run is moved with — a rename that never
+/// replaces ([`at::rename_no_replace`]) — inside the open `target`, before
+/// anything is written there that the run would have to remove again
+/// (el-21zyg). [`volume::check_exclusive_rename`] already asked the volume;
+/// this catches a volume that does not say (Linux has no such query) or
+/// says wrongly.
+///
+/// The trial runs in a fresh private folder ([`Aside::create`]): an empty
+/// file is created in it exclusively and renamed within it. Whatever the
+/// answer, the file is deleted only from that folder's descriptor and only
+/// while the entry is the file just made, then the folder is removed as
+/// the cleanup removes its own ([`Aside::remove`]). Anything that cannot be
+/// removed that way is left where it is and named.
+///
+/// Not supported → [`Blocker::NoExclusiveRename`] for `target`, nothing
+/// left behind; a leftover of the trial → [`RelocateError::Cleanup`]
+/// naming it. Never falls back to a rename that could replace an entry.
+#[cfg(unix)]
+fn probe_exclusive_rename(target: &Path, target_dir: &fs::File) -> Result<(), RelocateError> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    const FROM: &std::ffi::CStr = c"rename-probe";
+    const TO: &std::ffi::CStr = c"rename-probe-moved";
+    // Not the run's `race` hook: the trial is not the cleanup it watches.
+    let aside = Aside::create(target, target_dir, &mut no_race).map_err(copy_err)?;
+    let file = match at::open_at(
+        &aside.dir,
+        FROM,
+        libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+        0o600,
+    ) {
+        Ok(file) => file,
+        Err(e) => {
+            let made = format!(
+                "{} could not be created: {e}",
+                aside.describe(std::ffi::OsStr::new("rename-probe"))
+            );
+            return Err(match aside.remove(target_dir, Ok(())) {
+                Ok(()) => copy_err(made),
+                Err(left) => RelocateError::Cleanup {
+                    error: Box::new(copy_err(made)),
+                    left: vec![left],
+                },
+            });
+        }
+    };
+    let renamed = at::rename_no_replace(&aside.dir, FROM, &aside.dir, TO);
+    let name = if renamed.is_ok() { TO } else { FROM };
+    let shown = || aside.describe(std::ffi::OsStr::from_bytes(name.to_bytes()));
+    let removed = match (at::lstat(&aside.dir, name), file.metadata()) {
+        (Ok(st), Ok(m))
+            if at::kind(&st) == libc::S_IFREG && at::identity(&st) == (m.dev(), m.ino()) =>
+        {
+            at::unlink(&aside.dir, name, false)
+                .map_err(|e| format!("{} could not be removed: {e}", shown()))
+        }
+        _ => Err(format!(
+            "{} was left in place: it is not the trial file this run made",
+            shown()
+        )),
+    };
+    let left = aside.remove(target_dir, removed).err();
+    let error = match renamed {
+        Ok(()) => None,
+        Err(e) => Some(blocked(Blocker::NoExclusiveRename {
+            path: target.to_path_buf(),
+            reason: e.to_string(),
+        })),
+    };
+    match (error, left) {
+        (None, None) => Ok(()),
+        (Some(error), None) => Err(error),
+        (error, Some(left)) => Err(RelocateError::Cleanup {
+            error: Box::new(error.unwrap_or_else(|| {
+                copy_err(format!(
+                    "the trial rename in {} worked, but its private folder could not be \
+                     removed",
+                    target.display()
+                ))
+            })),
+            left: vec![left],
+        }),
+    }
+}
+
+/// Windows renames through handles ([`anchored::move_child`]) and does not
+/// copy at all ([`crate::namespace`]); other systems have no exclusive
+/// rename, which [`at::rename_no_replace`] already refuses.
+#[cfg(not(unix))]
+fn probe_exclusive_rename(_: &Path, _: &fs::File) -> Result<(), RelocateError> {
+    Ok(())
 }
 
 /// The target folder, opened once before anything is created in it. Staging
@@ -2047,6 +2185,11 @@ mod at {
         to_dir: &fs::File,
         to: &CStr,
     ) -> io::Result<()> {
+        #[cfg(test)]
+        if fault::refuses(from, to) {
+            // What `renameatx_np(RENAME_EXCL)` returns on exFAT (el-21zyg).
+            return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+        }
         let (a, b) = (from_dir.as_raw_fd(), to_dir.as_raw_fd());
         // SAFETY: open descriptors and NUL-terminated names.
         #[cfg(target_os = "macos")]
@@ -2262,6 +2405,40 @@ mod at {
         // SAFETY: `stream` is valid and closed exactly once.
         unsafe { libc::closedir(stream) };
         result
+    }
+
+    /// Tests only: make [`rename_no_replace`] on this thread fail the way
+    /// exFAT does (`ENOTSUP`), for the calls a rule picks, without a volume
+    /// that both passes the admission and lacks the call — macOS has none.
+    #[cfg(test)]
+    pub(super) mod fault {
+        use std::cell::RefCell;
+        use std::ffi::CStr;
+
+        type Rule = Box<dyn FnMut(&CStr, &CStr) -> bool>;
+
+        thread_local! {
+            static RULE: RefCell<Option<Rule>> = const { RefCell::new(None) };
+        }
+
+        /// While the guard lives, a rename from `from` to `to` fails when
+        /// `rule(from, to)` says so.
+        pub(in super::super) fn refuse(rule: impl FnMut(&CStr, &CStr) -> bool + 'static) -> Guard {
+            RULE.with(|r| *r.borrow_mut() = Some(Box::new(rule)));
+            Guard
+        }
+
+        pub(in super::super) struct Guard;
+
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                RULE.with(|r| *r.borrow_mut() = None);
+            }
+        }
+
+        pub(super) fn refuses(from: &CStr, to: &CStr) -> bool {
+            RULE.with(|r| r.borrow_mut().as_mut().is_some_and(|rule| rule(from, to)))
+        }
     }
 }
 
@@ -5493,6 +5670,53 @@ mod volume_tests {
             assert!(!target.join(PARTIAL_DB).exists());
             assert!(!target.join(PARTIAL_THUMBS).exists());
             assert!(aside_dirs(&target).is_empty());
+        }
+    }
+
+    /// el-21zyg, observed natively: exFAT fails `renameatx_np(RENAME_EXCL)`
+    /// with `ENOTSUP` (45) and reports `VOL_CAP_INT_RENAME_EXCL` absent;
+    /// APFS and HFS+ report it. The preview names that for exFAT next to
+    /// the ownership refusal, and the move is refused with both before
+    /// anything is written, every time.
+    #[test]
+    fn exfat_cannot_rename_without_replacing_and_is_refused_for_it() {
+        let exfat = Image::new("ExFAT", None);
+        let (from, to) = (exfat.mount.join("a"), exfat.mount.join("b"));
+        fs::write(&from, b"synthetic").unwrap();
+        let error = pc_core::disk::rename_no_replace(&from, &to).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ENOTSUP), "{error}");
+        assert!(from.exists() && !to.exists());
+        fs::remove_file(&from).unwrap();
+
+        let reason = volume::check_exclusive_rename(&exfat.mount.join("data")).unwrap_err();
+        assert!(reason.contains("(exfat)"), "{reason}");
+        let env = Env::new();
+        let target = exfat.mount.join("data");
+        let preview = preview_move_with(&env.dirs, &env.layout, Source::System, &target, plenty);
+        assert!(preview.blockers.iter().any(|b| matches!(b,
+            Blocker::NoExclusiveRename { path, reason: r } if *path == target && *r == reason)));
+        assert!(preview
+            .blockers
+            .iter()
+            .any(|b| matches!(b, Blocker::NoPrivateFolders { .. })));
+        let volume_before = tree(&exfat.mount);
+        for _ in 0..2 {
+            let result = move_data(&env.dirs, &env.layout, Source::System, &target, plenty);
+            let Err(RelocateError::Blocked { blockers }) = &result else {
+                panic!("{result:?}");
+            };
+            assert_eq!(blockers, &preview.blockers);
+            assert_eq!(tree(&exfat.mount), volume_before);
+        }
+        assert_eq!(marker(&env.layout.db), "исходная");
+
+        for fs_name in ["APFS", "HFS+"] {
+            let image = Image::new(fs_name, Some(true));
+            assert_eq!(
+                volume::check_exclusive_rename(&image.mount.join("new/data")),
+                Ok(()),
+                "{fs_name}"
+            );
         }
     }
 

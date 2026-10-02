@@ -92,6 +92,20 @@ pub(crate) fn verdict(volume: &Volume) -> Result<(), String> {
 /// Check the volume that holds `target`, or would hold it once created:
 /// that of its nearest existing ancestor. `Err` is the reason, in words.
 pub(crate) fn check_target(target: &Path) -> Result<(), String> {
+    let existing = nearest_existing(target)?;
+    let volume = probe_path(existing).map_err(|e| {
+        pc_core::tf!(
+            "не узнать свойства тома, на котором {0}: {1}",
+            "cannot read the properties of the volume holding {0}: {1}",
+            existing.display(),
+            e
+        )
+    })?;
+    verdict(&volume)
+}
+
+/// The nearest existing folder of `target` (itself, if it exists).
+fn nearest_existing(target: &Path) -> Result<&Path, String> {
     let mut existing = target;
     while fs::metadata(existing).is_err() {
         existing = existing.parent().ok_or_else(|| {
@@ -102,15 +116,36 @@ pub(crate) fn check_target(target: &Path) -> Result<(), String> {
             )
         })?;
     }
-    let volume = probe_path(existing).map_err(|e| {
+    Ok(existing)
+}
+
+/// Whether the volume that holds `target` (or would hold it) says it can
+/// rename an entry *without replacing* whatever is at the new name
+/// (el-21zyg). Every move of this run's objects — publication and the
+/// cleanup's move into a private folder — depends on that call; there is
+/// no safe substitute for it (a plain rename can replace someone's entry,
+/// and "check the name, then rename" cannot exclude that either). Read
+/// only; `Err` is the reason, naming the volume.
+///
+/// - macOS: the volume's `VOL_CAP_INT_RENAME_EXCL` capability. exFAT
+///   reports it absent and fails `renameatx_np(RENAME_EXCL)` with `ENOTSUP`
+///   (45); APFS and HFS+ report it. A capability not reported at all is
+///   not proven and is refused too.
+/// - Elsewhere there is no such query: Linux answers only by trying
+///   (`renameat2(RENAME_NOREPLACE)` fails with `EINVAL` where unsupported),
+///   which the move does before it writes anything it would have to clean
+///   up ([`super::probe_exclusive_rename`]); Windows renames through handles
+///   and does not copy at all ([`crate::namespace`]).
+pub(crate) fn check_exclusive_rename(target: &Path) -> Result<(), String> {
+    let existing = nearest_existing(target)?;
+    platform::exclusive_rename(existing).map_err(|e| {
         pc_core::tf!(
-            "не узнать свойства тома, на котором {0}: {1}",
-            "cannot read the properties of the volume holding {0}: {1}",
+            "не узнать, умеет ли том, на котором {0}, переименовывать без замены: {1}",
+            "cannot tell whether the volume holding {0} can rename without replacing: {1}",
             existing.display(),
             e
         )
-    })?;
-    verdict(&volume)
+    })?
 }
 
 /// The same check through an open handle: for a folder just created, so
@@ -176,6 +211,60 @@ mod platform {
         let acl = unsafe { libc::fpathconf(file.as_raw_fd(), PC_EXTENDED_SECURITY_NP) };
         Ok(volume(&st, acl))
     }
+
+    /// `ATTR_VOL_CAPABILITIES` as `getattrlist` returns it: a length, then
+    /// the attribute.
+    #[repr(C, packed(4))]
+    struct Capabilities {
+        length: u32,
+        caps: libc::vol_capabilities_attr_t,
+    }
+
+    /// `Ok(Err(reason))`: the volume is known not to (or does not say it
+    /// can) rename without replacing.
+    pub(crate) fn exclusive_rename(path: &Path) -> io::Result<Result<(), String>> {
+        let c = CString::new(path.as_os_str().as_bytes())?;
+        // SAFETY: plain data; zero is a valid value for every field.
+        let mut list: libc::attrlist = unsafe { std::mem::zeroed() };
+        list.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
+        list.volattr = libc::ATTR_VOL_INFO | libc::ATTR_VOL_CAPABILITIES;
+        let mut out: Capabilities = unsafe { std::mem::zeroed() };
+        // SAFETY: `c` is NUL-terminated; `out` is writable for its size.
+        let rc = unsafe {
+            libc::getattrlist(
+                c.as_ptr(),
+                (&mut list as *mut libc::attrlist).cast(),
+                (&mut out as *mut Capabilities).cast(),
+                std::mem::size_of::<Capabilities>(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let caps = out.caps;
+        let i = libc::VOL_CAPABILITIES_INTERFACES;
+        let bit = libc::VOL_CAP_INT_RENAME_EXCL;
+        let (valid, set) = (caps.valid[i] & bit != 0, caps.capabilities[i] & bit != 0);
+        if valid && set {
+            return Ok(Ok(()));
+        }
+        let name = probe_path(path).map_or_else(|_| path.display().to_string(), |v| v.describe());
+        Ok(Err(if valid {
+            pc_core::tf!(
+                "том {0} не умеет переименовывать без замены существующего (RENAME_EXCL)",
+                "volume {0} cannot rename without replacing what is at the new name \
+                 (RENAME_EXCL)",
+                name
+            )
+        } else {
+            pc_core::tf!(
+                "том {0} не сообщает, умеет ли он переименовывать без замены (RENAME_EXCL)",
+                "volume {0} does not say whether it can rename without replacing (RENAME_EXCL)",
+                name
+            )
+        }))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -238,6 +327,11 @@ mod platform {
             return Err(io::Error::last_os_error());
         }
         Ok(from_magic(magic(&st)))
+    }
+
+    /// No capability query here; see [`super::check_exclusive_rename`].
+    pub(crate) fn exclusive_rename(_: &Path) -> io::Result<Result<(), String>> {
+        Ok(Ok(()))
     }
 }
 
@@ -319,6 +413,11 @@ mod platform {
         }
         Ok(volume(flags, &name, None))
     }
+
+    /// No capability query here; see [`super::check_exclusive_rename`].
+    pub(crate) fn exclusive_rename(_: &Path) -> io::Result<Result<(), String>> {
+        Ok(Ok(()))
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
@@ -340,6 +439,11 @@ mod platform {
 
     pub(crate) fn probe_file(_: &fs::File) -> io::Result<Volume> {
         Err(unknown())
+    }
+
+    /// No capability query here; see [`super::check_exclusive_rename`].
+    pub(crate) fn exclusive_rename(_: &Path) -> io::Result<Result<(), String>> {
+        Ok(Ok(()))
     }
 }
 
@@ -400,6 +504,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("not/yet/there");
         assert_eq!(check_target(&target), Ok(()));
+        assert_eq!(check_exclusive_rename(&target), Ok(()));
         assert!(!tmp.path().join("not").exists());
         let dir = fs::File::open(tmp.path()).unwrap();
         assert_eq!(check_open(&dir), Ok(()));

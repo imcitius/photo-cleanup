@@ -192,16 +192,26 @@ test("a volume that cannot keep private folders forbids the copy, not the switch
   const card = "/Volumes/CARD/photo-cleanup";
   const reason =
     "/Volumes/CARD/photo-cleanup cannot hold the move's temporary folders private to this user: " +
-    "volume /Volumes/CARD (msdos) is mounted with ownership ignored (noowners): every user of " +
+    "volume /Volumes/CARD (exfat) is mounted with ownership ignored (noowners): every user of " +
     "this computer has owner rights to every folder on it. Choose a folder on another volume";
+  // exFAT also cannot rename without replacing (el-21zyg): a second
+  // blocker of the same kind — it forbids the copy, not the switch.
+  const rename =
+    "/Volumes/CARD/photo-cleanup cannot receive the data: its volume cannot rename without " +
+    "replacing (volume /Volumes/CARD (exfat) cannot rename without replacing what is at the " +
+    "new name (RENAME_EXCL)), and without that the move can neither publish the copy nor " +
+    "safely remove its own leftovers. Choose a folder on another volume";
   const refused = {
     from: info.layout.dir,
     to: card,
     size: info.size,
     needed: 70 * 1024 * 1024,
     available: 900 * 1024 * 1024,
-    blockers: [{ kind: "no_private_folders", path: card, reason: "..." }],
-    reasons: [reason],
+    blockers: [
+      { kind: "no_private_folders", path: card, reason: "..." },
+      { kind: "no_exclusive_rename", path: card, reason: "..." },
+    ],
+    reasons: [reason, rename],
     existing_database: false,
   };
   const calls = await desktop(page, {
@@ -226,6 +236,7 @@ test("a volume that cannot keep private folders forbids the copy, not the switch
   // An empty folder there: the reason, with path and volume, and no copy.
   await change.click();
   await expect(dialog).toContainText(reason);
+  await expect(dialog).toContainText(rename);
   await expect(
     dialog.getByRole("button", { name: "Copy and restart" }),
   ).toBeDisabled();
