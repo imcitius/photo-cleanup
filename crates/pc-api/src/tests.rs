@@ -1901,3 +1901,54 @@ async fn exfat_is_refused_in_the_preview_and_the_job_like_the_command_line() {
         "{web}\n{cli}"
     );
 }
+
+/// el-23goa B1: the preview only reads. With a configured quarantine it
+/// used to work out each destination by writing the quarantine's layout
+/// note — before anyone had confirmed anything. Now the folder stays as it
+/// was until the job moves the first photograph, and then the note is there.
+#[tokio::test]
+async fn the_preview_writes_nothing_into_a_configured_quarantine() {
+    let f = Fixture::new();
+    let img = image::RgbImage::from_fn(200, 150, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 40])
+    });
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+        .encode_image(&img)
+        .unwrap();
+    let photo = f.archive.join("DSC9002.JPG");
+    std::fs::write(&photo, &encoded).unwrap();
+    let id = f
+        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+    let (_, recent) = f.req("GET", "/api/recent?limit=1", Value::Null).await;
+    let file_id = recent[0]["id"].as_i64().unwrap();
+    f.req(
+        "POST",
+        &format!("/api/files/{file_id}/reject"),
+        json!({"rejected":true}),
+    )
+    .await;
+
+    let preview = f.preview("plan-apply", json!({"roles":["copy"]})).await;
+    let dst = preview["items"][0]["dst"].as_str().unwrap().to_string();
+    assert!(
+        dst.starts_with(&f.quarantine.display().to_string()),
+        "{preview}"
+    );
+    assert!(
+        walk(&f.quarantine).is_empty(),
+        "предпросмотр записал в карантин: {:?}",
+        walk(&f.quarantine)
+    );
+
+    let done = f.apply(&preview).await;
+    assert_eq!(done["state"], "done", "{done}");
+    assert!(Path::new(&dst).is_file());
+    assert!(f
+        .quarantine
+        .join(pc_core::QUARANTINE_DIR)
+        .join(pc_core::QUARANTINE_LAYOUT)
+        .is_file());
+}

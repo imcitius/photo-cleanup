@@ -594,6 +594,32 @@ mod exfat {
         assert_eq!(journal_row(&a.db, id).0, JournalStatus::Done.as_str());
     }
 
+    /// A configured quarantine that does not exist yet, on exFAT: refused,
+    /// and the volume is exactly as it was — no quarantine folder, no
+    /// layout note (el-23goa B1). The default beside-quarantine likewise.
+    #[test]
+    fn exfat_refusal_with_a_configured_quarantine_writes_nothing() {
+        let image = Image::new("ExFAT");
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let dir = image.mount.join("archive");
+        fs::create_dir_all(&dir).unwrap();
+        let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
+        let photo = dir.join("photo.arw");
+        fs::write(&photo, b"synthetic frame").unwrap();
+        let root = image.mount.join("collected");
+        let before = tree(&image.mount);
+
+        for configured in [Some(root.as_path()), None] {
+            let c = candidate(&db, run, &photo);
+            let err = crate::apply(&db, run, &[c], configured).unwrap_err();
+            assert!(crate::is_no_exclusive_rename(&err), "{err:#}");
+            assert_eq!(fs::read(&photo).unwrap(), b"synthetic frame");
+            assert_eq!(journal_rows(&db), 0);
+            assert_eq!(tree(&image.mount), before, "{configured:?}: том изменён");
+        }
+    }
+
     /// APFS and HFS+ report the capability; the same apply goes through.
     #[test]
     fn apfs_and_hfs_take_the_move() {
@@ -616,3 +642,6 @@ mod exfat {
         }
     }
 }
+
+#[path = "refusal_tests.rs"]
+mod refusal_tests;
