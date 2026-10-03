@@ -2666,6 +2666,7 @@ version = "0.4.4"
 dependencies = [
  "anyhow",
  "libc",
+ "objc2",
  "pc-api",
  "pc-core",
  "pc-db",

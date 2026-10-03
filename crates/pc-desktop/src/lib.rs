@@ -29,10 +29,13 @@
 mod binding;
 mod bootstrap;
 mod error;
+pub mod geometry;
+pub mod instance;
 mod namespace;
 mod native;
 mod relocate;
 mod resolve;
+mod sidecar;
 mod window;
 
 pub use binding::DataGuard;
