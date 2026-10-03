@@ -1354,7 +1354,8 @@ Linux): публикация `thumbs/` и `photo-cleanup.db` из staging и п�
    Choose a folder on another volume». На exFAT он стоит рядом с
    `NoPrivateFolders`; FAT32 по признаку тоже его получает, хотя вызов там
    срабатывает (том и так отклонён за noowners). Linux такого запроса не
-   имеет, Windows копирование не выполняет — там решает шаг 2.
+   имеет, Windows копирование не выполняет; проба шага 2 там — пустая
+   заглушка (`probe_exclusive_rename` для `cfg(not(unix))`), до неё дело не доходит.
 2. **Проба до первой записи, которую пришлось бы убирать**: после допуска
    цели и создания её недостающих каталогов, но до `.writer-lock`,
    резерваций и staging, в цели создаётся свежий приватный
@@ -1378,8 +1379,12 @@ Linux): публикация `thumbs/` и `photo-cleanup.db` из staging и п�
    `LeftoverPartial` с путями и ничего не меняет (fail closed).
 
 UI: `no_exclusive_rename`, как `no_private_folders`, запрещает копирование,
-но не переключение на уже лежащую там базу (`switch_to_existing` пишет
-только bootstrap и ничего на томе не переименовывает).
+но не переключение на уже лежащую там базу. `switch_to_existing` ничего на
+томе не публикует и не переименовывает, но не «только bootstrap»: под
+writer lock целевой базы он создаёт/открывает `photo-cleanup.db.writer-lock`
+(на ExFAT macOS при этом может появиться AppleDouble-спутник `._*`) и
+проверяет базу (`looks_like_ours`), затем пишет bootstrap
+(`relocate.rs`, `switch_to_existing`).
 
 Регрессии: `relocate::rename_tests` (Unix) —
 `a_volume_that_cannot_rename_without_replacing_is_refused_without_leftovers`
@@ -1875,8 +1880,8 @@ objc2 из ветки) и в списке модулей `pc-desktop/src/lib.rs`
 Rust-гейты на итоговом дереве: fmt, clippy `-D warnings`, workspace
 `--locked` 495 passed, 0 failed, 1 ignored subprocess fixture; locked build
 CLI/desktop. Web не менялся, `dist` совпадает с main и пересобирается
-байт в байт; Playwright 86/86 (Node 22.23.3 — Node 24 на машине нет, это
-не CI-окружение). Прежний предварительный результат аудитора 68 passed /
+байт в байт; Playwright 86/86 (в том прогоне стоял Node 22.23.3, не CI-окружение
+Node 24; позднее web проверен на Node 24 — el-146id). Прежний предварительный результат аудитора 68 passed /
 1 failed / 13 not run (el-5j5sk, на `8e188e4`) **не объяснён**: упавший
 тест не назван, лог и trace не сохранены. Повторные прогоны 82/82 на том же
 дереве и 86/86 позже показывают только, что падение там не повторилось; они
