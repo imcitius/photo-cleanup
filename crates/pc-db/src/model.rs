@@ -185,10 +185,106 @@ pub struct NewJournalEntry<'a> {
 }
 
 /// One file's journey inside an operation.
+///
+/// Read strictly: a key this version does not know is evidence it cannot
+/// read, and the whole record is then refused rather than read as a row
+/// without evidence (el-1y8uo B2; see [`JournalEntry::manifest_unreadable`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Moved {
     pub src: String,
     pub dst: String,
+    /// Which object this is, written before the first rename while it was
+    /// certainly the file the operation meant (el-usdqi, el-5vue3). Every
+    /// recovery — undo, its retry, the reconciliation of an interrupted run,
+    /// the web's preview of either — asks it before treating a file at
+    /// either path as this one. Absent in rows written before; such a row
+    /// proves nothing about what is at home, and is not trusted to.
+    ///
+    /// A development build of el-usdqi wrote a bare `ident` string here.
+    /// Such a record is not read as a row without evidence: it is evidence
+    /// in a form this version does not understand, and fails closed like
+    /// any other (el-1y8uo B2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<pc_core::proof::Proof>,
+}
+
+impl Moved {
+    pub fn new(src: impl Into<String>, dst: impl Into<String>) -> Self {
+        Self {
+            src: src.into(),
+            dst: dst.into(),
+            proof: None,
+        }
+    }
+}
+
+/// One event in the history of a journal entry. Appended, never replaced:
+/// a retry adds to what the entry says, it does not erase it (el-5vue3 R3/D6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalEvent {
+    pub id: i64,
+    pub journal_id: i64,
+    pub at: i64,
+    /// `forward`, `undo`, `reconcile`, `purge`, `note`.
+    pub phase: String,
+    /// `done`, `refused`, `partial`, `recovered`, `note`.
+    pub kind: String,
+    /// The words, as shown.
+    pub text: String,
+    /// Structured detail (paths, causes, what moved), as JSON.
+    pub data: Option<String>,
+}
+
+/// One typed outcome to append to an entry's history (el-1y8uo B6): what
+/// happened, in which phase, and in structured form — whether or not there
+/// are any words for a person. `text` may be empty; the readable note then
+/// stays as it was, the event is written all the same.
+#[derive(Debug, Clone, Copy)]
+pub struct Event<'a> {
+    /// `forward`, `undo`, `reconcile`, `adopt`, `purge`, `abandon`.
+    pub phase: &'a str,
+    /// `done`, `partial`, `refused`, `begun`.
+    pub kind: &'a str,
+    /// The words, as shown; may be empty.
+    pub text: &'a str,
+    /// What this outcome actually moved.
+    pub moved: &'a [Moved],
+    /// `(path, why)` for every file it did not move.
+    pub refused: &'a [(String, String)],
+    /// The error that ended it, if one did.
+    pub error: Option<&'a str>,
+}
+
+impl<'a> Event<'a> {
+    pub fn new(phase: &'a str, kind: &'a str) -> Self {
+        Self {
+            phase,
+            kind,
+            text: "",
+            moved: &[],
+            refused: &[],
+            error: None,
+        }
+    }
+
+    fn data(&self, status: JournalStatus) -> String {
+        serde_json::json!({
+            "status": status.as_str(),
+            "moved": self
+                .moved
+                .iter()
+                .map(|m| serde_json::json!({"src": m.src, "dst": m.dst}))
+                .collect::<Vec<_>>(),
+            "refused": self
+                .refused
+                .iter()
+                .map(|(path, why)| serde_json::json!({"path": path, "why": why}))
+                .collect::<Vec<_>>(),
+            "error": self.error,
+        })
+        .to_string()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +300,12 @@ pub struct JournalEntry {
     pub target_id: Option<i64>,
     /// What actually moved, when the operation wrote it down.
     pub manifest: Vec<Moved>,
+    /// The stored list, exactly as written, when it is there but this
+    /// version cannot read it — a later version's evidence, or damage.
+    /// `manifest` is then empty, and that emptiness must not be taken for a
+    /// row from before lists were kept: every recovery and purge refuses
+    /// such a row and leaves the record as it is (el-1y8uo B2).
+    pub manifest_unreadable: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -437,20 +539,118 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Replace the planned list with what the operation really managed to
-    /// move, before it is finished.
-    pub fn journal_set_manifest(&self, id: i64, moved: &[Moved]) -> Result<()> {
+    /// Write down the list an undo works from, without touching the count
+    /// of files the operation moved: a directory moved whole is one entry in
+    /// the list and many files in the count.
+    pub fn journal_record_manifest(&self, id: i64, moved: &[Moved]) -> Result<()> {
         self.conn.execute(
-            "UPDATE journal SET manifest=?1, file_count=?2 WHERE id=?3",
-            params![manifest_json(moved), moved.len() as i64, id],
+            "UPDATE journal SET manifest=?1 WHERE id=?2",
+            params![manifest_json(moved), id],
         )?;
         Ok(())
     }
 
+    /// What the journal says about an entry so far: the note an older
+    /// version wrote, followed by every event since, in order.
+    pub fn journal_note(&self, id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT note FROM journal WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    /// Set the status of an entry and, if given, add `note` to its history.
+    ///
+    /// It used to replace the note: a retried undo or reconciliation
+    /// overwrote what the first attempt had written down (el-5vue3 R3/D6).
+    /// Now nothing already written is ever replaced — the note is appended
+    /// as an event, and the readable note grows by it.
+    ///
+    /// For rows written outside an operation — test fixtures, imports. Every
+    /// operation of the tool closes its rows with [`Db::journal_close`],
+    /// which always records a typed outcome (el-1y8uo B6).
     pub fn journal_finish(&self, id: i64, status: JournalStatus, note: Option<&str>) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE journal SET status=?1 WHERE id=?2",
+            params![status.as_str(), id],
+        )?;
+        if let Some(note) = note {
+            append_event(&tx, id, "note", "note", note, None)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Set the status of an entry and append the typed outcome that set it,
+    /// in one transaction: no state without its event, no event without its
+    /// state (el-1y8uo B3/B6). `undone` and `purged` carry their time.
+    pub fn journal_close(&self, id: i64, status: JournalStatus, ev: &Event<'_>) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE journal SET status=?1,
+                    undone_at = CASE WHEN ?1 = 'undone' THEN ?2 ELSE undone_at END,
+                    purged_at = CASE WHEN ?1 = 'purged' THEN ?2 ELSE purged_at END
+              WHERE id=?3",
+            params![status.as_str(), pc_core::time::now_unix(), id],
+        )?;
+        append_event(&tx, id, ev.phase, ev.kind, ev.text, Some(&ev.data(status)))?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Add one event to an entry's history: kept in `journal_events`, and
+    /// appended to the readable note in the same transaction.
+    pub fn journal_event(
+        &self,
+        id: i64,
+        phase: &str,
+        kind: &str,
+        text: &str,
+        data: Option<&str>,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        append_event(&tx, id, phase, kind, text, data)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// An entry's events, oldest first.
+    pub fn journal_events(&self, id: i64) -> Result<Vec<JournalEvent>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, journal_id, at, phase, kind, text, data FROM journal_events
+              WHERE journal_id = ?1 ORDER BY id",
+        )?;
+        let rows = st
+            .query_map([id], |r| {
+                Ok(JournalEvent {
+                    id: r.get(0)?,
+                    journal_id: r.get(1)?,
+                    at: r.get(2)?,
+                    phase: r.get(3)?,
+                    kind: r.get(4)?,
+                    text: r.get(5)?,
+                    data: r.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// What an operation actually moved, before it is finished: the list,
+    /// the number of files, and their bytes — not what it planned (el-5vue3
+    /// D7). A directory moved whole is one entry and `file_count` files.
+    pub fn journal_finalize(
+        &self,
+        id: i64,
+        moved: &[Moved],
+        file_count: i64,
+        size: i64,
+    ) -> Result<()> {
         self.conn.execute(
-            "UPDATE journal SET status=?1, note=?2 WHERE id=?3",
-            params![status.as_str(), note, id],
+            "UPDATE journal SET manifest=?1, file_count=?2, size=?3 WHERE id=?4",
+            params![manifest_json(moved), file_count, size, id],
         )?;
         Ok(())
     }
@@ -480,6 +680,15 @@ impl Db {
         let rows = st
             .query_map(p, |r| {
                 let status: String = r.get("status")?;
+                let raw: Option<String> = r.get("manifest")?;
+                let (manifest, manifest_unreadable) = match raw {
+                    None => (Vec::new(), None),
+                    Some(j) if j.trim().is_empty() => (Vec::new(), None),
+                    Some(j) => match serde_json::from_str::<Vec<Moved>>(&j) {
+                        Ok(m) => (m, None),
+                        Err(_) => (Vec::new(), Some(j)),
+                    },
+                };
                 Ok(JournalEntry {
                     id: r.get("id")?,
                     op: r.get("op")?,
@@ -490,10 +699,8 @@ impl Db {
                     status: JournalStatus::parse(&status),
                     applied_at: r.get("applied_at")?,
                     target_id: r.get("target_id")?,
-                    manifest: r
-                        .get::<_, Option<String>>("manifest")?
-                        .and_then(|j| serde_json::from_str(&j).ok())
-                        .unwrap_or_default(),
+                    manifest,
+                    manifest_unreadable,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -600,8 +807,14 @@ impl Db {
                     ours.insert(dst);
                 }
                 if let Some(json) = r.get::<_, Option<String>>(1)? {
-                    if let Ok(moved) = serde_json::from_str::<Vec<Moved>>(&json) {
-                        ours.extend(moved.into_iter().map(|m| m.dst));
+                    // Only the paths, read leniently: a list whose evidence
+                    // this version cannot read still claims what it moved.
+                    if let Ok(serde_json::Value::Array(moved)) = serde_json::from_str(&json) {
+                        ours.extend(
+                            moved
+                                .iter()
+                                .filter_map(|m| m.get("dst")?.as_str().map(String::from)),
+                        );
                     }
                 }
             }
@@ -650,6 +863,33 @@ fn claimed(ours: &std::collections::HashSet<String>, path: &str) -> bool {
         }
     }
     false
+}
+
+fn append_event(
+    conn: &rusqlite::Connection,
+    id: i64,
+    phase: &str,
+    kind: &str,
+    text: &str,
+    data: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO journal_events(journal_id, at, phase, kind, text, data)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, pc_core::time::now_unix(), phase, kind, text, data],
+    )?;
+    // The readable note grows; what it said before stays its beginning. An
+    // event without words leaves it as it is.
+    if text.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE journal SET note = CASE WHEN note IS NULL OR note = '' THEN ?1
+                                        ELSE note || ' | ' || ?1 END
+          WHERE id = ?2",
+        params![text, id],
+    )?;
+    Ok(())
 }
 
 /// A manifest is stored as JSON, and an empty one as nothing at all: a row

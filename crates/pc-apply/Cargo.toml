@@ -17,6 +17,10 @@ anyhow.workspace = true
 rusqlite.workspace = true
 tracing.workspace = true
 
+[features]
+# Test-only seams at the move boundary (see `race`), for other crates' tests.
+test-seams = []
+
 [dev-dependencies]
 image.workspace = true
 tempfile.workspace = true

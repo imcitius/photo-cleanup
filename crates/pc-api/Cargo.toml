@@ -27,4 +27,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+pc-apply = { workspace = true, features = ["test-seams"] }
 tower = { version = "0.5", features = ["util"] }

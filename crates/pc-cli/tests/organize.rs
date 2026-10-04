@@ -185,8 +185,8 @@ fn applying_moves_the_files_the_sidecars_and_the_index() {
     let report = pc_apply::organize(&w.db, run_id, &plan.moves).unwrap();
 
     assert_eq!(report.refused.len(), 0, "отказы: {:?}", report.refused);
-    assert_eq!(report.moved as usize, plan.moves.len());
-    assert_eq!(report.sidecars, 1, "xmp не поехал со своим кадром");
+    assert_eq!(report.done.frames as usize, plan.moves.len());
+    assert_eq!(report.done.companions, 1, "xmp не поехал со своим кадром");
 
     for m in &plan.moves {
         assert!(Path::new(&m.dst).is_file(), "нет файла {}", m.dst);
@@ -208,10 +208,11 @@ fn applying_moves_the_files_the_sidecars_and_the_index() {
     let side = Path::new(&owner.dst).with_extension("xmp");
     assert!(side.is_file(), "сайдкар потерялся: {}", side.display());
 
-    // Directories the move emptied are not left behind as husks.
+    // Directories the move emptied stay where they are: nothing is ever
+    // removed (el-1y8uo B1, user decision 2026-10-04).
     assert!(
-        !w.root.join("камера-2").exists(),
-        "опустевший каталог остался"
+        w.root.join("камера-2").is_dir(),
+        "опустевший каталог удалён"
     );
 }
 
@@ -230,7 +231,7 @@ fn undo_puts_every_file_back_where_it_was() {
     let (back, failed) = pc_apply::undo_run(&w.db, run_id).unwrap();
 
     assert!(failed.is_empty(), "откат не удался: {failed:?}");
-    assert_eq!(back as usize, plan.moves.len());
+    assert_eq!(back.entries_back as usize, plan.moves.len());
     for (id, src) in &before {
         assert!(Path::new(src).is_file(), "файл не вернулся: {src}");
         let row = w.db.file(*id).unwrap().unwrap();

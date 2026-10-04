@@ -1,6 +1,7 @@
 //! Carrying out a reorganisation.
 //!
-//! Every file moves by `rename(2)` within one filesystem, with both paths in
+//! Every file moves by `rename(2)` within one filesystem, never replacing
+//! what is at the destination (el-usdqi), with both paths in
 //! the journal before the call and the index updated after it. Nothing is
 //! copied, nothing is deleted, and the whole run can be walked backwards —
 //! which is the only reason it is safe to rearrange an archive at all.
@@ -12,22 +13,20 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::files::companions;
+use crate::files::{companion_plan, evidence, moved_bytes};
+use crate::outcome::left_pending;
 use crate::rename_with_parents;
-
-/// `YYYY/событие`: the depth of the tree this tool builds, and therefore how
-/// far up an undo may tidy behind itself. The root above that is the user's.
-pub(crate) const UNDO_LEVELS: usize = 2;
+use crate::{Route, Tally};
 
 #[derive(Debug, Default)]
 pub struct OrganizeReport {
-    pub moved: u64,
-    pub bytes: u64,
-    pub sidecars: u64,
-    pub pruned_dirs: u64,
-    /// Service files carried into quarantine out of directories the run
-    /// emptied. Not deleted: quarantined, and undone with the run.
-    pub litter: u64,
+    /// What actually moved: photographs, the sidecars that followed them,
+    /// and service files carried into quarantine out of folders the run
+    /// emptied (not deleted: quarantined, and undone with the run).
+    pub done: Tally,
+    /// Every file not moved, every sidecar left behind — `(path, why)`.
+    /// Folders the run emptied are not in it: they are simply left where
+    /// they are (el-1y8uo B1, nothing is ever removed).
     pub refused: Vec<(String, String)>,
 }
 
@@ -69,6 +68,11 @@ fn unchanged(path: &Path, size: i64, mtime: i64) -> bool {
 pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> {
     let mut report = OrganizeReport::default();
     let mut source_dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    let route = Route::Organize { run_id };
+    // A volume that cannot move without replacing stops the run before its
+    // first move.
+    crate::check_organize(moves)?;
+    let roots: BTreeSet<PathBuf> = db.all_run_roots()?.into_iter().map(PathBuf::from).collect();
 
     for m in moves {
         let src = Path::new(&m.src);
@@ -92,7 +96,9 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
             ));
             continue;
         }
-        if dst.exists() {
+        // An early answer only; the move itself refuses to replace anything.
+        // `symlink_metadata` also sees a dangling link, which `exists` does not.
+        if fs::symlink_metadata(dst).is_ok() {
             report.refused.push((
                 m.src.clone(),
                 pc_core::tf!("цель занята: {0}", "destination taken: {0}", m.dst),
@@ -102,51 +108,64 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
 
         // Where the photograph and each of its sidecars land is settled
         // before the first rename: a collision may have renamed the file, and
-        // the sidecars carry the new stem with it.
-        let old_stem = src
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(stem_of)
-            .unwrap_or_default()
-            .to_string();
-        let new_stem = stem_of(m.name()).to_string();
+        // the sidecars carry the new stem with it. So is the evidence of
+        // which file each one is, for any later recovery.
+        let frame_proof = match evidence(src) {
+            Ok(p) => p,
+            Err(e) => {
+                report.refused.push((m.src.clone(), format!("{e:#}")));
+                continue;
+            }
+        };
         let mut planned = vec![pc_db::Moved {
             src: m.src.clone(),
             dst: m.dst.clone(),
+            proof: frame_proof,
         }];
-        let mut bytes = m.size;
-        for side in companions(src) {
-            let Some(name) = side.file_name().and_then(|s| s.to_str()) else {
+        for side in companion_plan(src, dst) {
+            let Ok(proof) = evidence(&side.src) else {
                 continue;
             };
-            let target = dst.with_file_name(sidecar_name(name, &old_stem, &new_stem));
-            bytes += side.metadata().map(|md| md.len()).unwrap_or(0) as i64;
             planned.push(pc_db::Moved {
-                src: side.to_string_lossy().into_owned(),
-                dst: target.to_string_lossy().into_owned(),
+                src: side.src.to_string_lossy().into_owned(),
+                dst: side.dst.to_string_lossy().into_owned(),
+                proof,
             });
         }
 
-        let jid = db.journal_begin(&pc_db::NewJournalEntry {
+        // Nothing of this file has moved yet; earlier files may have. A
+        // journal that refuses the row stops the run with their receipt
+        // (el-1y8uo B3).
+        let jid = match db.journal_begin(&pc_db::NewJournalEntry {
             run_id,
             op: "organize",
             target_id: Some(m.file_id),
             src: &m.src,
             dst: Some(&m.dst),
-            size: bytes,
+            size: moved_bytes(&planned) as i64,
             file_count: planned.len() as i64,
             manifest: &planned,
-        })?;
+        }) {
+            Ok(jid) => jid,
+            Err(e) => return Err(stopped(e, &report, run_id)),
+        };
 
         match rename_with_parents(src, dst) {
             Ok(()) => {
-                let (carried, failed) = crate::carry(&planned[1..]);
-                let moved_with = carried.len() as u64;
-                report.sidecars += moved_with;
-                report.refused.extend(failed.iter().cloned());
-                let done: Vec<pc_db::Moved> =
+                if let Some(parent) = src.parent() {
+                    source_dirs.insert(parent.to_path_buf());
+                }
+                let (carried, failed, stop) = crate::carry(&planned[1..]);
+                let done_list: Vec<pc_db::Moved> =
                     std::iter::once(planned[0].clone()).chain(carried).collect();
-                db.journal_set_manifest(jid, &done)?;
+                let moved_with = done_list.len() as u64 - 1;
+                report.refused.extend(failed.iter().cloned());
+                report.done.add(&Tally {
+                    frames: 1,
+                    companions: moved_with,
+                    bytes: moved_bytes(&done_list),
+                    ..Default::default()
+                });
 
                 let note = match (&m.renamed_from, moved_with) {
                     (Some(old), 0) => {
@@ -173,31 +192,76 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
                         pc_core::tf!("не перенеслось: {0}", "not moved: {0}", crate::listed(f))
                     )),
                 };
-                db.journal_finish(jid, JournalStatus::Done, note.as_deref())?;
-
-                let name = m.name().to_string();
-                db.set_file_path(m.file_id, &m.dst, &name)
-                    .with_context(|| {
-                        pc_core::tf!(
-                            "файл перенесён, но индекс не обновлён: {0}",
-                            "the file moved but the index did not follow: {0}",
-                            m.dst
-                        )
-                    })?;
-
-                if let Some(parent) = src.parent() {
-                    source_dirs.insert(parent.to_path_buf());
+                let mut closed = false;
+                let persisted = (|| -> Result<()> {
+                    db.journal_finalize(
+                        jid,
+                        &done_list,
+                        done_list.len() as i64,
+                        moved_bytes(&done_list) as i64,
+                    )?;
+                    let kind = if failed.is_empty() { "done" } else { "partial" };
+                    db.journal_close(
+                        jid,
+                        JournalStatus::Done,
+                        &pc_db::Event {
+                            text: note.as_deref().unwrap_or_default(),
+                            moved: &done_list,
+                            refused: &failed,
+                            error: stop.as_ref().map(|e| e.to_string()).as_deref(),
+                            ..pc_db::Event::new("forward", kind)
+                        },
+                    )?;
+                    closed = true;
+                    let name = m.name().to_string();
+                    db.set_file_path(m.file_id, &m.dst, &name)
+                        .with_context(|| {
+                            pc_core::tf!(
+                                "файл перенесён, но индекс не обновлён: {0}",
+                                "the file moved but the index did not follow: {0}",
+                                m.dst
+                            )
+                        })?;
+                    Ok(())
+                })();
+                if let Err(e) = persisted {
+                    let e = stopped(e, &report, run_id);
+                    return Err(if closed {
+                        e
+                    } else {
+                        left_pending(e, jid, route)
+                    });
                 }
-                report.moved += 1;
-                report.bytes += m.size as u64;
+                if let Some(e) = stop {
+                    // The file moved and is journaled; its sidecar met a
+                    // volume that cannot move without replacing. Nothing
+                    // more moves — no litter sweep either.
+                    return Err(stopped(e, &report, run_id));
+                }
             }
             Err(e) => {
-                db.journal_finish(jid, JournalStatus::Failed, Some(&e.to_string()))?;
+                let shown = e.to_string();
+                if let Err(pe) = db.journal_close(
+                    jid,
+                    JournalStatus::Failed,
+                    &pc_db::Event {
+                        text: &shown,
+                        error: Some(&shown),
+                        ..pc_db::Event::new("forward", "refused")
+                    },
+                ) {
+                    let pe = pe.context(shown);
+                    return Err(left_pending(stopped(pe, &report, run_id), jid, route));
+                }
+                if crate::is_no_exclusive_rename(&e) {
+                    // The volume, not this file: nothing more moves.
+                    return Err(stopped(e, &report, run_id));
+                }
                 // One failed rename is a fact about one file; a storm of them
                 // means the destination is wrong, and continuing would spread
                 // the mess across the archive.
                 report.refused.push((m.src.clone(), e.to_string()));
-                if report.refused.len() > 50 && report.moved == 0 {
+                if report.refused.len() > 50 && report.done.frames == 0 {
                     bail!(
                         "{}",
                         pc_core::tr!(
@@ -210,10 +274,26 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
         }
     }
 
-    let roots: BTreeSet<PathBuf> = db.all_run_roots()?.into_iter().map(PathBuf::from).collect();
-    sweep_litter(db, run_id, &source_dirs, &roots, &mut report)?;
-    report.pruned_dirs = prune_empty(&source_dirs, &roots, usize::MAX);
+    let mut pending = Vec::new();
+    if let Err(e) = sweep_litter(db, run_id, &source_dirs, &roots, &mut report, &mut pending) {
+        let mut e = stopped(e, &report, run_id);
+        for id in pending {
+            e = left_pending(e, id, route);
+        }
+        return Err(e);
+    }
     Ok(report)
+}
+
+/// A reorganisation stops at `e`, and says what it had moved by then:
+/// photographs, sidecars and service files alike.
+fn stopped(e: anyhow::Error, report: &OrganizeReport, run_id: i64) -> anyhow::Error {
+    let refused = report
+        .refused
+        .iter()
+        .map(|(p, why)| format!("{p} — {why}"))
+        .collect();
+    crate::stop_run(e, &report.done, crate::Route::Organize { run_id }, refused)
 }
 
 /// Service files the system leaves behind: Finder's note about a folder, and
@@ -224,24 +304,37 @@ fn is_litter(name: &str) -> bool {
 
 /// Carry the service files out of the directories the run emptied.
 ///
-/// Such a directory cannot be removed while they are in it, and they are not
-/// ours to delete: an AppleDouble can hold a resource fork, and this tool
-/// deletes nothing. So they move into quarantine beside the directory, with a
-/// journal entry of the same run — the husk can go, and `organize undo` brings
-/// them back with everything else.
+/// They are not ours to delete: an AppleDouble can hold a resource fork, and
+/// this tool deletes nothing. So they move into quarantine beside the
+/// directory, with a journal entry of the same run, and `organize undo`
+/// brings them back with everything else. The emptied directory itself
+/// stays where it is (el-1y8uo B1): nothing is ever removed.
 fn sweep_litter(
     db: &Db,
     run_id: i64,
     dirs: &BTreeSet<PathBuf>,
     keep: &BTreeSet<PathBuf>,
     report: &mut OrganizeReport,
+    pending: &mut Vec<i64>,
 ) -> Result<()> {
     for dir in dirs {
         if keep.contains(dir) {
             continue;
         }
         let Ok(rd) = fs::read_dir(dir) else { continue };
-        let entries: Vec<_> = rd.flatten().collect();
+        // An entry that cannot be read means the folder's contents are not
+        // known: nothing is swept out of a folder seen only in part.
+        let Ok(entries) = rd.collect::<std::io::Result<Vec<_>>>() else {
+            report.refused.push((
+                dir.display().to_string(),
+                pc_core::tr!(
+                    "содержимое каталога прочитано не полностью; служебные файлы не тронуты",
+                    "the folder could not be read in full; its service files were left alone"
+                )
+                .into(),
+            ));
+            continue;
+        };
         // Only a directory left with nothing but service files, and only its
         // own files — a subdirectory means the reorganisation is not done here.
         let swept = !entries.is_empty()
@@ -259,7 +352,8 @@ fn sweep_litter(
             let src = e.path();
             let dst = home.join(e.file_name());
             let src_s = src.to_string_lossy().into_owned();
-            if dst.exists() {
+            // An early answer; the move itself never replaces anything.
+            if fs::symlink_metadata(&dst).is_ok() {
                 report.refused.push((
                     src_s,
                     pc_core::tf!("цель занята: {0}", "destination taken: {0}", dst.display()),
@@ -267,34 +361,72 @@ fn sweep_litter(
                 continue;
             }
             let dst_s = dst.to_string_lossy().into_owned();
-            let size = e.metadata().map(|m| m.len()).unwrap_or(0) as i64;
+            let proof = match evidence(&src) {
+                Ok(p) => p,
+                Err(err) => {
+                    report.refused.push((src_s, format!("{err:#}")));
+                    continue;
+                }
+            };
+            let size = proof.as_ref().and_then(|p| p.size).unwrap_or(0);
+            let manifest = [pc_db::Moved {
+                src: src_s.clone(),
+                dst: dst_s.clone(),
+                proof,
+            }];
             let jid = db.journal_begin(&pc_db::NewJournalEntry {
                 run_id,
                 op: "organize",
                 target_id: None,
                 src: &src_s,
                 dst: Some(&dst_s),
-                size,
+                size: size as i64,
                 file_count: 1,
-                manifest: &[pc_db::Moved {
-                    src: src_s.clone(),
-                    dst: dst_s.clone(),
-                }],
+                manifest: &manifest,
             })?;
             match rename_with_parents(&src, &dst) {
                 Ok(()) => {
-                    db.journal_finish(
+                    // Counted as soon as it moved: a journal that then
+                    // refuses does not make the move not have happened
+                    // (el-1y8uo B3).
+                    report.done.litter += 1;
+                    report.done.bytes += size;
+                    let closed = db.journal_close(
                         jid,
                         JournalStatus::Done,
-                        Some(pc_core::tr!(
-                            "служебный файл из опустевшего каталога",
-                            "a service file from an emptied directory"
-                        )),
-                    )?;
-                    report.litter += 1;
+                        &pc_db::Event {
+                            text: pc_core::tr!(
+                                "служебный файл из опустевшего каталога",
+                                "a service file from an emptied directory"
+                            ),
+                            moved: &manifest,
+                            ..pc_db::Event::new("forward", "done")
+                        },
+                    );
+                    if let Err(e) = closed {
+                        pending.push(jid);
+                        return Err(e);
+                    }
                 }
                 Err(err) => {
-                    db.journal_finish(jid, JournalStatus::Failed, Some(&err.to_string()))?;
+                    let shown = err.to_string();
+                    let closed = db.journal_close(
+                        jid,
+                        JournalStatus::Failed,
+                        &pc_db::Event {
+                            text: &shown,
+                            error: Some(&shown),
+                            ..pc_db::Event::new("forward", "refused")
+                        },
+                    );
+                    if let Err(e) = closed {
+                        pending.push(jid);
+                        return Err(e.context(shown));
+                    }
+                    if crate::is_no_exclusive_rename(&err) {
+                        // The volume: no further service file is tried.
+                        return Err(err);
+                    }
                     report.refused.push((src_s, err.to_string()));
                 }
             }
@@ -303,44 +435,10 @@ fn sweep_litter(
     Ok(())
 }
 
-/// Remove directories the reorganisation emptied, deepest first.
-///
-/// `remove_dir` refuses a directory that still holds anything, so this can
-/// only ever take away husks — a directory with a forgotten `.DS_Store` in it
-/// stays, and its service files go to quarantine in `sweep_litter` first. It stops at the mount point and at the roots
-/// the archive was scanned from: an empty `foto/` is still where the archive
-/// lives, and finding it gone would be alarming even though nothing was lost.
-pub(crate) fn prune_empty(
-    dirs: &BTreeSet<PathBuf>,
-    keep: &BTreeSet<PathBuf>,
-    levels: usize,
-) -> u64 {
-    let mut map = pc_core::DiskMap::new();
-    let mut pruned = 0;
-    let mut ordered: Vec<&PathBuf> = dirs.iter().collect();
-    ordered.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-
-    for dir in ordered {
-        let mount = map.resolve(dir).map(|d| d.mount).unwrap_or_default();
-        let mut cur = dir.clone();
-        let mut climbed = 0;
-        while climbed < levels && cur != mount && !keep.contains(&cur) && cur.parent().is_some() {
-            if fs::remove_dir(&cur).is_err() {
-                break;
-            }
-            pruned += 1;
-            climbed += 1;
-            match cur.parent() {
-                Some(p) => cur = p.to_path_buf(),
-                None => break,
-            }
-        }
-    }
-    pruned
-}
-
-/// Walk one reorganisation run backwards, newest move first.
-pub fn undo_run(db: &Db, run_id: i64) -> Result<(u64, Vec<String>)> {
+/// Walk one reorganisation run backwards, newest move first. What came
+/// back is counted from what each undo actually did — entries walked back
+/// whole, entries walked back in part, and files.
+pub fn undo_run(db: &Db, run_id: i64) -> Result<(Tally, Vec<String>)> {
     let entries = db.journal_by_run_op(run_id, "organize")?;
     if entries.is_empty() {
         bail!(
@@ -352,12 +450,23 @@ pub fn undo_run(db: &Db, run_id: i64) -> Result<(u64, Vec<String>)> {
             )
         );
     }
-    let mut back = 0;
+    let mut back = Tally::default();
     let mut failed = Vec::new();
     for e in entries {
         match crate::undo(db, e.id) {
-            Ok(()) => back += 1,
-            Err(err) => failed.push(format!("{} — {err}", e.src)),
+            Ok(t) => back.add(&t),
+            // The volume cannot move without replacing: every later entry
+            // would meet it too, so the walk stops here, saying how far it
+            // got. Its own entry stays `done`, with the reason on it.
+            Err(err) if crate::is_no_exclusive_rename(&err) => {
+                return Err(crate::stop_run(err, &back, crate::Route::Restore, failed));
+            }
+            Err(err) => {
+                if let Some(part) = crate::stopped_run(&err) {
+                    back.add(&part.done);
+                }
+                failed.push(format!("{} — {err:#}", e.src));
+            }
         }
     }
     Ok((back, failed))
@@ -413,7 +522,7 @@ mod tests {
             }],
         )
         .unwrap();
-        assert_eq!(report.moved, 1, "{:?}", report.refused);
+        assert_eq!(report.done.frames, 1, "{:?}", report.refused);
 
         db.reset_index().unwrap();
         let stranger = root.join("stranger.jpg");
@@ -466,10 +575,10 @@ mod tests {
         let mut report = OrganizeReport::default();
         let dirs: BTreeSet<PathBuf> = [dir.clone()].into_iter().collect();
         let keep: BTreeSet<PathBuf> = [root.clone()].into_iter().collect();
-        sweep_litter(&db, run, &dirs, &keep, &mut report).unwrap();
-        assert_eq!(report.litter, 2, "{:?}", report.refused);
-        assert_eq!(prune_empty(&dirs, &keep, usize::MAX), 1);
-        assert!(!dir.exists(), "опустевший каталог должен уйти");
+        sweep_litter(&db, run, &dirs, &keep, &mut report, &mut Vec::new()).unwrap();
+        assert_eq!(report.done.litter, 2, "{:?}", report.refused);
+        // The emptied folder stays: nothing is ever removed (el-1y8uo B1).
+        assert!(dir.is_dir());
 
         let home = root.join(pc_core::QUARANTINE_DIR).join("2019");
         assert_eq!(
@@ -501,46 +610,18 @@ mod tests {
         let run = db.start_run(&[], "test").unwrap();
         let mut report = OrganizeReport::default();
         let dirs: BTreeSet<PathBuf> = [dir.clone()].into_iter().collect();
-        sweep_litter(&db, run, &dirs, &BTreeSet::new(), &mut report).unwrap();
-        assert_eq!(report.litter, 0);
-        assert_eq!(prune_empty(&dirs, &BTreeSet::new(), usize::MAX), 0);
+        sweep_litter(
+            &db,
+            run,
+            &dirs,
+            &BTreeSet::new(),
+            &mut report,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(report.done.litter, 0);
         assert!(dir.join(".DS_Store").exists());
         assert!(dir.join("notes.txt").exists());
-    }
-
-    #[test]
-    fn a_scanned_root_is_never_taken_away_even_when_it_empties() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("foto");
-        let inner = root.join("сброс");
-        fs::create_dir_all(&inner).unwrap();
-
-        let keep: BTreeSet<PathBuf> = [root.clone()].into_iter().collect();
-        let dirs: BTreeSet<PathBuf> = [inner.clone()].into_iter().collect();
-        assert_eq!(prune_empty(&dirs, &keep, usize::MAX), 1);
-        assert!(!inner.exists(), "опустевший подкаталог должен уйти");
-        assert!(root.is_dir(), "корень архива остаётся на месте");
-    }
-
-    #[test]
-    fn undo_cleans_up_only_what_the_reorganisation_built() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dest = tmp.path().join("Архив");
-        let event = dest.join("2019/2019-07-14");
-        fs::create_dir_all(&event).unwrap();
-
-        // Two levels is exactly the tree this tool creates: the year and the
-        // event inside it. The root above them is the user's.
-        let pruned = prune_empty(
-            &[event].into_iter().collect(),
-            &BTreeSet::new(),
-            UNDO_LEVELS,
-        );
-        assert_eq!(pruned, 2);
-        assert!(
-            dest.is_dir(),
-            "корень нового дерева не наш, чтобы его убирать"
-        );
     }
 
     #[test]

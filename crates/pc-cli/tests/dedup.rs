@@ -244,7 +244,7 @@ fn applying_moves_the_copies_and_leaves_everything_else_alone() {
 
     let report = pc_apply::apply(&w.db, run, &p.candidates, Some(&w.quarantine)).unwrap();
     assert!(report.refused.is_empty(), "{:?}", report.refused);
-    assert_eq!(report.totals.files, p.candidates.len() as u64);
+    assert_eq!(report.done.frames, p.candidates.len() as u64);
 
     // The photograph itself is still there, in every role that was kept.
     for keep in [
@@ -305,7 +305,7 @@ fn a_file_edited_since_the_scan_is_refused_at_the_last_moment() {
         Some(&w.quarantine),
     )
     .unwrap();
-    assert_eq!(report.totals.files, 0, "перенесён изменившийся файл");
+    assert_eq!(report.done.frames, 0, "перенесён изменившийся файл");
     assert!(
         report.refused[0].1.contains("pixels"),
         "{:?}",
@@ -335,7 +335,7 @@ fn the_keeper_disappearing_stops_the_move() {
         Some(&w.quarantine),
     )
     .unwrap();
-    assert_eq!(report.totals.files, 0);
+    assert_eq!(report.done.frames, 0);
     assert!(
         Path::new(&victim.path).exists(),
         "снимок удалён без запасного"

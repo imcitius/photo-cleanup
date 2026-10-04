@@ -212,43 +212,16 @@ mod platform {
         Ok(volume(&st, acl))
     }
 
-    /// `ATTR_VOL_CAPABILITIES` as `getattrlist` returns it: a length, then
-    /// the attribute.
-    #[repr(C, packed(4))]
-    struct Capabilities {
-        length: u32,
-        caps: libc::vol_capabilities_attr_t,
-    }
-
     /// `Ok(Err(reason))`: the volume is known not to (or does not say it
-    /// can) rename without replacing.
+    /// can) rename without replacing. The query itself lives in pc-core,
+    /// shared with pc-apply's moves (el-usdqi).
     pub(crate) fn exclusive_rename(path: &Path) -> io::Result<Result<(), String>> {
-        let c = CString::new(path.as_os_str().as_bytes())?;
-        // SAFETY: plain data; zero is a valid value for every field.
-        let mut list: libc::attrlist = unsafe { std::mem::zeroed() };
-        list.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
-        list.volattr = libc::ATTR_VOL_INFO | libc::ATTR_VOL_CAPABILITIES;
-        let mut out: Capabilities = unsafe { std::mem::zeroed() };
-        // SAFETY: `c` is NUL-terminated; `out` is writable for its size.
-        let rc = unsafe {
-            libc::getattrlist(
-                c.as_ptr(),
-                (&mut list as *mut libc::attrlist).cast(),
-                (&mut out as *mut Capabilities).cast(),
-                std::mem::size_of::<Capabilities>(),
-                0,
-            )
+        use pc_core::disk::ExclusiveRename;
+        let valid = match pc_core::disk::exclusive_rename(path)? {
+            ExclusiveRename::Supported | ExclusiveRename::NoQuery => return Ok(Ok(())),
+            ExclusiveRename::Absent => true,
+            ExclusiveRename::Unreported => false,
         };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let caps = out.caps;
-        let i = libc::VOL_CAPABILITIES_INTERFACES;
-        let bit = libc::VOL_CAP_INT_RENAME_EXCL;
-        let (valid, set) = (caps.valid[i] & bit != 0, caps.capabilities[i] & bit != 0);
-        if valid && set {
-            return Ok(Ok(()));
-        }
         let name = probe_path(path).map_or_else(|_| path.display().to_string(), |v| v.describe());
         Ok(Err(if valid {
             pc_core::tf!(

@@ -1,9 +1,12 @@
 //! Shared types and helpers.
 
+#[cfg(unix)]
+pub mod anchored;
 pub mod bytes;
 pub mod disk;
 pub mod lang;
 pub mod lock;
+pub mod proof;
 pub mod storage;
 pub mod thumbstore;
 pub mod time;
@@ -657,60 +660,4 @@ mod plural_tests {
 
 pub mod work;
 
-/// What a gathered quarantine says about itself.
-///
-/// Read from `QUARANTINE_LAYOUT` beside the data. Missing or unreadable means
-/// "this is not a gathered quarantine, or nothing recorded it" — and then the
-/// way home is not guessed.
-pub mod quarantine_layout {
-    use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
-
-    /// Where each disk label the gathered quarantine uses was mounted.
-    pub type Disks = BTreeMap<String, String>;
-
-    fn file(root: &Path) -> PathBuf {
-        root.join(super::QUARANTINE_LAYOUT)
-    }
-
-    pub fn read(root: &Path) -> Disks {
-        std::fs::read_to_string(file(root))
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
-    }
-
-    /// Record that this label stood for this mount point.
-    ///
-    /// Written before the first file of a disk lands and left alone
-    /// afterwards, so the note is there for anything that arrives later — and
-    /// so a reader finds it whatever order the moves happened in.
-    pub fn note(root: &Path, label: &str, mount: &Path) -> std::io::Result<()> {
-        let mut disks = read(root);
-        let mount = mount.display().to_string();
-        if disks.get(label).map(String::as_str) == Some(mount.as_str()) {
-            return Ok(());
-        }
-        disks.insert(label.to_string(), mount);
-        std::fs::create_dir_all(root)?;
-        let body = serde_json::to_string_pretty(&disks)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(file(root), body)
-    }
-
-    /// The path a file under a gathered quarantine came from.
-    ///
-    /// `rest` is what lies below the gathered root: `<label>/<path from that
-    /// disk's mount>`. Without a note for that label there is no answer, and
-    /// inventing one is worse than saying so.
-    pub fn origin(disks: &Disks, rest: &Path) -> Option<PathBuf> {
-        let mut parts = rest.components();
-        let label = parts.next()?.as_os_str().to_str()?;
-        let mount = disks.get(label)?;
-        let tail = parts.as_path();
-        if tail.as_os_str().is_empty() {
-            return None;
-        }
-        Some(Path::new(mount).join(tail))
-    }
-}
+pub mod quarantine_layout;

@@ -892,21 +892,30 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     );
                     continue;
                 }
-                if FsPath::new(&e.src).exists() {
-                    add_refusal(
-                        e.src.clone(),
-                        pc_core::tr!(
-                            "Исходный путь занят, перезапись запрещена",
-                            "The original path is taken; overwriting is refused"
-                        )
-                        .into(),
-                    );
+                // The same reading of the entry as the undo itself, from
+                // the same function (el-5vue3 D9): a frame a first undo
+                // brought back is recognised by its evidence and the retry
+                // is offered; a stranger at its name is refused, here and
+                // on the command line alike.
+                let looks = pc_apply::undo_preview(&e)?;
+                let frame = looks.iter().find(|i| i.src == e.src);
+                if let Some(why) = frame.and_then(pc_apply::Item::why) {
+                    add_refusal(e.src.clone(), why);
                     continue;
                 }
-                let mut item = json!({"journal_id":e.id,"path":e.dst,"dst":e.src,"size":e.size,"file_count":e.file_count});
-                if let Some(rest) = manifest_companions(&e, |m| json!(m.src)) {
-                    item["companions"] = rest;
+                let mut rest = Vec::new();
+                for i in looks.iter().filter(|i| i.src != e.src) {
+                    match i.why() {
+                        Some(why) => add_refusal(i.src.clone(), why),
+                        None if i.standing == pc_apply::Standing::Moved => {
+                            let size = std::fs::metadata(&i.dst).map(|m| m.len()).unwrap_or(0);
+                            rest.push(json!({"path": i.dst, "dst": i.src, "size": size}));
+                        }
+                        None => {}
+                    }
                 }
+                let mut item = json!({"journal_id":e.id,"path":e.dst,"dst":e.src,"size":e.size,"file_count":e.file_count});
+                item["companions"] = json!(rest);
                 items.push(item);
                 actions.push(Action::Undo(e));
             }
@@ -924,12 +933,7 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             // Nothing is carried anywhere while one file of the operation is
             // unaccounted for: a half-reconciled entry is the state this is
             // meant to get the archive out of.
-            let clear = read.iter().all(|i| {
-                !matches!(
-                    i.standing,
-                    pc_apply::Standing::Both | pc_apply::Standing::Gone
-                )
-            });
+            let clear = read.iter().all(|i| i.why().is_none());
             for item in read {
                 match item.standing {
                     pc_apply::Standing::Moved => items.push(
@@ -952,6 +956,7 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                         )
                         .into(),
                     ),
+                    pc_apply::Standing::Doubt(ref why) => add_refusal(item.src.clone(), why.clone()),
                 }
             }
             if clear {
@@ -989,9 +994,12 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
         }
     }
     // Companions move with a photograph, so they belong in the reviewed
-    // count, byte total and destinations too. Refuse occupied sidecar paths
-    // before moving the photograph, not after a partially successful rename.
-    let mut blocked = std::collections::HashSet::new();
+    // count, byte total and destinations too. Where each goes, and what
+    // happens when its place is taken, is pc-apply's policy, the same one
+    // the command line runs (el-5vue3 D9): the photograph still moves, the
+    // sidecar stays where it is and is reported. The preview says so in
+    // advance, as a warning, instead of refusing the photograph.
+    let mut warnings = Vec::new();
     for item in &mut items {
         // An item that brought its own list has it from the journal, which
         // knows what actually moved; the disk beside the file does not.
@@ -1003,44 +1011,40 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
         if !FsPath::new(src).is_file() {
             continue;
         }
-        let companions = pc_apply::companions(FsPath::new(src));
+        let purge = r.kind == "derived-purge";
         let mut listed = Vec::new();
         let mut extra = 0;
-        for side in companions {
-            let target = companion_destination(FsPath::new(src), FsPath::new(dst), &side);
-            if r.kind != "derived-purge" && target.exists() {
-                blocked.insert(src.to_string());
-                add_refusal(
-                    src.into(),
-                    pc_core::tf!(
-                        "Путь спутника занят: {0}",
-                        "The companion path is taken: {0}",
-                        target.display()
-                    ),
-                );
+        for side in pc_apply::companion_plan(FsPath::new(src), FsPath::new(dst)) {
+            if side.taken && !purge {
+                warnings.push(json!({"path": side.src, "why": pc_core::tf!(
+                    "Путь спутника занят: {0} — снимок будет перенесён, спутник останется на месте",
+                    "The companion path is taken: {0} — the photograph will move, the companion stays where it is",
+                    side.dst.display()
+                )}));
+                continue;
             }
-            let size = std::fs::metadata(&side)
-                .with_context(|| {
-                    pc_core::tf!("не прочитать {0}", "cannot read {0}", side.display())
-                })?
-                .len();
-            extra += size;
-            listed.push(json!({"path":side,"dst":if r.kind=="derived-purge" {json!("Окончательное удаление")} else {json!(target)},"size":size}));
+            extra += side.size;
+            listed.push(json!({"path":side.src,"dst":if purge {json!("Окончательное удаление")} else {json!(side.dst)},"size":side.size}));
         }
         item["file_count"] = json!(item["file_count"].as_u64().unwrap_or(1) + listed.len() as u64);
         item["size"] = json!(item["size"].as_u64().unwrap_or(0) + extra);
         item["companions"] = json!(listed);
     }
-    if !blocked.is_empty() {
-        items.retain(|i| !blocked.contains(i["path"].as_str().unwrap_or("")));
-        actions.retain(|a| {
-            let src = match a {
-                Action::Undo(e) | Action::Reconcile(e) => e.dst.as_deref().unwrap_or(&e.src),
-                _ => a.path(),
-            };
-            !blocked.contains(src)
-        });
+    // A volume that cannot move without replacing refuses the whole
+    // operation before its first move: the same answer, from the same
+    // pc-apply functions, as the command line (el-usdqi).
+    let (mut copies, mut bundles, mut moves) = (Vec::new(), Vec::new(), Vec::new());
+    for a in &actions {
+        match a {
+            Action::Copy(c) => copies.push(c.clone()),
+            Action::Bundle(b) => bundles.push(b.clone()),
+            Action::Move(m) => moves.push(m.clone()),
+            _ => {}
+        }
     }
+    pc_apply::check_candidates(db, &copies, root.as_deref())?;
+    pc_apply::check_bundles(&bundles, root.as_deref())?;
+    pc_apply::check_organize(&moves)?;
     // A refused file deserves the same inspection as a candidate. Metadata
     // is read from the index; previewing never opens an arbitrary client path.
     if r.kind == "plan-apply" {
@@ -1059,12 +1063,48 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
         .map(|x| x["file_count"].as_i64().unwrap_or(1))
         .sum();
     let bytes: i64 = items.iter().map(|x| x["size"].as_i64().unwrap_or(0)).sum();
-    let mut out = json!({"kind":r.kind,"params":r.params,"items":items,"refusals":refusals,"total_files":count,"total_bytes":bytes});
+    warnings.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    let mut out = json!({"kind":r.kind,"params":r.params,"items":items,"refusals":refusals,"warnings":warnings,"total_files":count,"total_bytes":bytes});
     out["token"] = json!(blake3::hash(out.to_string().as_bytes())
         .to_hex()
         .to_string());
     Ok((out, actions))
 }
+/// How the moves of a job stopped at `a` are walked back.
+pub fn route_of(a: &Action, run_id: i64) -> pc_apply::Route {
+    match a {
+        Action::Copy(_) | Action::Bundle(_) => pc_apply::Route::Quarantine,
+        Action::Move(_) => pc_apply::Route::Organize { run_id },
+        _ => pc_apply::Route::Restore,
+    }
+}
+
+/// What one carried-out action did, as pc-apply reports it — the web counts
+/// nothing of its own (el-5vue3 R4/D7).
+#[derive(Debug, Default)]
+pub struct ActionResult {
+    /// What actually moved or came back.
+    pub done: pc_apply::Tally,
+    /// The action was refused as a whole, and why: the run goes on.
+    pub refused: Option<String>,
+    /// It went through, and part of it did not: a sidecar left behind, a
+    /// folder left in place. `(path, why)`.
+    pub warnings: Vec<(String, String)>,
+}
+
+impl ActionResult {
+    fn refused(why: impl Into<String>, done: pc_apply::Tally) -> Self {
+        Self {
+            done,
+            refused: Some(why.into()),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+/// Carry out one reviewed action. A refusal of this one item is an `Ok`
+/// with `refused` set, and the run goes on; an `Err` stops the run, as the
+/// same error stops the command line.
 pub fn apply_action(
     st: &AppState,
     db: &Db,
@@ -1072,66 +1112,115 @@ pub fn apply_action(
     a: &Action,
     r: &Request,
     control: &pc_core::work::Control,
-) -> Result<()> {
+) -> Result<ActionResult> {
     let root = quarantine_root(st, db)?;
-    match a {
+    // Undoing, recovering and adopting refuse per entry, as `organize undo`
+    // does on the command line: what one entry managed before its refusal
+    // still counts, and the next entry is tried. A volume refusal stops.
+    let per_entry = |res: Result<pc_apply::Tally>| -> Result<ActionResult> {
+        match res {
+            Ok(done) => Ok(ActionResult {
+                done,
+                ..Default::default()
+            }),
+            Err(e) if pc_apply::is_no_exclusive_rename(&e) => Err(e),
+            Err(e) => {
+                let done = pc_apply::stopped_run(&e)
+                    .map(|s| s.done.clone())
+                    .unwrap_or_default();
+                Ok(ActionResult::refused(format!("{e:#}"), done))
+            }
+        }
+    };
+    Ok(match a {
         Action::Copy(c) => {
-            let (out, why) = pc_apply::files::quarantine_file(db, run, c, root.as_deref())?;
-            if out == pc_apply::FileOutcome::Refused {
-                bail!("{why}");
+            let filed = pc_apply::files::quarantine_file(db, run, c, root.as_deref())?;
+            if filed.outcome == pc_apply::FileOutcome::Refused {
+                return Ok(ActionResult::refused(filed.why, filed.done));
+            }
+            let warnings = if filed.why.is_empty() {
+                Vec::new()
+            } else {
+                vec![(c.path.clone(), filed.why)]
+            };
+            ActionResult {
+                done: filed.done,
+                refused: None,
+                warnings,
             }
         }
-        Action::Bundle(b) => {
-            if matches!(
-                pc_apply::quarantine(db, run, b, root.as_deref())?,
-                pc_apply::Outcome::Skipped
-            ) {
-                bail!(
-                    "{}",
-                    pc_core::tf!(
-                        "Изменился с момента описи: {0}",
-                        "Changed since the inventory: {0}",
-                        b.path
-                    )
-                );
+        Action::Bundle(b) => match pc_apply::quarantine(db, run, b, root.as_deref()) {
+            Ok(pc_apply::Outcome::Moved) => ActionResult {
+                done: pc_apply::Tally::bundle(b),
+                ..Default::default()
+            },
+            Ok(pc_apply::Outcome::Skipped) => ActionResult::refused(
+                pc_core::tf!(
+                    "Изменился с момента описи: {0}",
+                    "Changed since the inventory: {0}",
+                    b.path
+                ),
+                Default::default(),
+            ),
+            // As `derived clean` on the command line: one bundle's refusal
+            // is noted and the next is tried; a stop is a stop.
+            Err(e)
+                if pc_apply::is_no_exclusive_rename(&e) || pc_apply::stopped_run(&e).is_some() =>
+            {
+                return Err(e)
             }
-        }
+            Err(e) => ActionResult::refused(format!("{e:#}"), Default::default()),
+        },
         Action::Move(m) => {
             if !flag(&r.params, "allow_lightroom") && db.lightroom_protected()?.contains_key(&m.src)
             {
-                bail!(
-                    "{}",
+                return Ok(ActionResult::refused(
                     pc_core::tf!(
                         "Файл защищён каталогом Lightroom: {0}",
                         "Protected by a Lightroom catalogue: {0}",
                         m.src
-                    )
-                );
+                    ),
+                    Default::default(),
+                ));
             }
             let report = pc_apply::organize(db, run, std::slice::from_ref(m))?;
-            if let Some((path, why)) = report.refused.first() {
-                bail!("{path}: {why}");
+            if report.done.frames == 0 {
+                let why = report
+                    .refused
+                    .first()
+                    .map(|(path, why)| format!("{path}: {why}"))
+                    .unwrap_or_default();
+                return Ok(ActionResult::refused(why, report.done));
+            }
+            ActionResult {
+                done: report.done,
+                refused: None,
+                warnings: report.refused,
             }
         }
-        Action::Undo(e) => pc_apply::undo(db, e.id)?,
-        Action::Reconcile(e) => {
-            pc_apply::reconcile_undo(db, e.id)?;
+        Action::Undo(e) => per_entry(pc_apply::undo(db, e.id))?,
+        Action::Reconcile(e) => per_entry(pc_apply::reconcile_undo(db, e.id).map(|r| r.done))?,
+        Action::Purge(e) => {
+            pc_apply::purge_entry_controlled(db, e.id, control)?;
+            ActionResult::default()
         }
-        Action::Purge(e) => pc_apply::purge_entry_controlled(db, e.id, control)?,
         Action::Adopt(f) => {
             let dst = pc_core::quarantine_origin_of(&f.path).context(pc_core::tr!(
                 "Непонятно, откуда этот файл",
                 "There is no telling where this came from"
             ))?;
-            pc_apply::adopt_orphan(db, run, &f.path, &dst)?;
-            db.forget_quarantine_found(&f.path)?;
+            let done = per_entry(pc_apply::adopt_orphan(db, run, &f.path, &dst))?;
+            if done.refused.is_none() {
+                db.forget_quarantine_found(&f.path)?;
+            }
+            done
         }
         Action::Abandon(f) => {
             pc_apply::abandon_orphan(db, run, &f.path, control)?;
             db.forget_quarantine_found(&f.path)?;
+            ActionResult::default()
         }
-    }
-    Ok(())
+    })
 }
 pub async fn preview(State(st): State<Arc<AppState>>, Json(r): Json<Request>) -> Response {
     respond((|| {
@@ -1664,28 +1753,6 @@ fn manifest_companions(
             json!({"path": m.dst, "dst": dst_of(m), "size": size})
         })
         .collect::<Vec<_>>()))
-}
-
-fn companion_destination(src: &FsPath, dst: &FsPath, side: &FsPath) -> PathBuf {
-    let stem = |p: &FsPath| {
-        p.file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned()
-    };
-    let old = stem(src);
-    let new = stem(dst);
-    let name = side.file_name().unwrap_or_default().to_string_lossy();
-    let renamed = if old == new {
-        name.into_owned()
-    } else if let Some(rest) = name.strip_prefix(&old) {
-        format!("{new}{rest}")
-    } else if let Some(rest) = name.strip_prefix("._").and_then(|n| n.strip_prefix(&old)) {
-        format!("._{new}{rest}")
-    } else {
-        name.into_owned()
-    };
-    dst.with_file_name(renamed)
 }
 
 // --- the archive as a tree -------------------------------------------------

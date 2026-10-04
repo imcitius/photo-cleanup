@@ -168,3 +168,68 @@ fn an_open_catalogue_between_scan_and_clean_stops_the_command_line_too() {
         "отказ не объяснён: {said}"
     );
 }
+
+/// B3 (el-1y8uo), the command-line half of
+/// `pc-api::recovery_tests::a_database_failure_after_a_move_keeps_the_receipt_in_the_job`:
+/// the journal refuses the second photograph's row after the first has
+/// moved. The command fails, and prints the receipt of the move that did
+/// happen — the same summary the web's job carries.
+#[test]
+fn a_database_failure_after_a_move_prints_the_receipt() {
+    let cli = Cli::new();
+    let one = cli.photo("one.jpg", 40);
+    cli.photo("two.jpg", 200);
+    cli.run(&[
+        "index",
+        "--root",
+        cli.archive.to_str().unwrap(),
+        "--min-size",
+        "0",
+    ]);
+    let dest = cli.archive.join("new");
+    std::fs::create_dir(&dest).unwrap();
+    {
+        let db = pc_db::Db::open(&cli.db).unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_second BEFORE INSERT ON journal \
+                 WHEN (SELECT count(*) FROM journal WHERE op='organize') >= 1 \
+                 BEGIN SELECT RAISE(FAIL,'review second journal failure'); END;",
+            )
+            .unwrap();
+    }
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup"))
+        .arg("--db")
+        .arg(&cli.db)
+        .args(["organize", "apply", "--root"])
+        .arg(&dest)
+        .args(["--allow-duplicates", "--yes"])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{text}");
+    let moved: Vec<PathBuf> = walkdir::WalkDir::new(&dest)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+        .collect();
+    assert_eq!(moved.len(), 1, "{moved:?}\n{text}");
+    let size = std::fs::metadata(&moved[0]).unwrap().len();
+    let receipt = pc_apply::Tally {
+        frames: 1,
+        bytes: size,
+        ..Default::default()
+    }
+    .summary();
+    assert!(
+        text.contains(&format!("Moved before the stop: {receipt}")),
+        "the command line lost the receipt the web keeps: {text}"
+    );
+    assert!(text.contains("review second journal failure"), "{text}");
+    let _ = one;
+}

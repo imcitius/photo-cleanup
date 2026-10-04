@@ -396,19 +396,56 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
                 )
             })
             .collect();
+        // What has actually moved so far, as pc-apply reports it, so a run
+        // that stops tells the web exactly what it tells the command line.
+        // `control.advance` is processed work; this is moved work.
+        let mut done = pc_apply::Tally::default();
+        let mut refused: Vec<String> = Vec::new();
+        let moved_note = |done: &pc_apply::Tally| {
+            control.progress.lock().unwrap().note = if done.is_empty() {
+                String::new()
+            } else {
+                pc_core::tf!("Выполнено: {0}", "Done: {0}", done.summary())
+            };
+        };
         for action in actions {
-            control.current(action.source_path())?;
+            if let Err(e) = control.current(action.source_path()) {
+                moved_note(&done);
+                return Err(e);
+            }
             let bytes = reviewed_bytes
                 .get(action.source_path())
                 .copied()
                 .unwrap_or(action.size());
-            if let Err(e) = service::apply_action(st, &db, run, &action, req, control) {
-                if e.is::<pc_core::work::Cancelled>() {
+            match service::apply_action(st, &db, run, &action, req, control) {
+                Ok(result) => {
+                    done.add(&result.done);
+                    for (path, why) in &result.warnings {
+                        control.refuse(path, why);
+                    }
+                    if let Some(why) = result.refused {
+                        control.refuse(action.path(), &why);
+                        refused.push(format!("{} — {why}", action.path()));
+                    }
+                }
+                Err(e) => {
+                    moved_note(&done);
+                    if e.is::<pc_core::work::Cancelled>() {
+                        return Err(e);
+                    }
+                    // Whatever stopped it — the volume, or an error after
+                    // something had moved — nothing more moves, as on the
+                    // command line, and the error says what had: this
+                    // action's own share is already in it, the earlier ones
+                    // are added here, once.
+                    let e = pc_apply::stop_run(e, &done, service::route_of(&action, run), refused);
+                    control.refuse(action.path(), &format!("{e:#}"));
+                    db.finish_run(run)?;
                     return Err(e);
                 }
-                control.refuse(action.path(), &format!("{e:#}"));
             }
             control.advance(bytes, None);
+            moved_note(&done);
             db.conn.execute(
                 "UPDATE jobs SET progress=?1 WHERE id=?2",
                 rusqlite::params![json!(*control.progress.lock().unwrap()).to_string(), id],

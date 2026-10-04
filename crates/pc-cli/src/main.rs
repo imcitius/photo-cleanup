@@ -437,8 +437,8 @@ fn main() -> Result<()> {
         Command::Derived(DerivedCmd::Clean(a)) => cmd_clean(&db, a),
         Command::Derived(DerivedCmd::Purge(a)) => cmd_purge(&db, a),
         Command::Derived(DerivedCmd::Undo(a)) => {
-            pc_apply::undo(&db, a.journal)?;
-            println!("Entry {} rolled back.", a.journal);
+            let back = pc_apply::undo(&db, a.journal).inspect_err(print_stop)?;
+            println!("Entry {} rolled back: {}.", a.journal, back.summary());
             Ok(())
         }
         Command::Families(FamiliesCmd::Build(a)) => {
@@ -863,9 +863,10 @@ fn cmd_clean(db: &Db, a: CleanArgs) -> Result<()> {
     }
 
     let run_id = db.latest_run()?.context("no runs yet; run scan first")?;
-    let totals = pc_apply::quarantine_many(db, run_id, &selected, a.quarantine.as_deref())?;
+    let totals = pc_apply::quarantine_many(db, run_id, &selected, a.quarantine.as_deref())
+        .inspect_err(print_stop)?;
 
-    println!("\nMoved: {}", totals.summary());
+    println!("\nMoved: {}", totals.done.summary());
     for s in &totals.skipped {
         println!("  skipped: {s}");
     }
@@ -1034,8 +1035,9 @@ fn cmd_plan(
     // rather than assumed.
     println!("\nCarrying out the plan above, computed just now.");
     println!("Checking every file before it moves…");
-    let report = pc_apply::apply(db, run_id, &plan.candidates, quarantine)?;
-    println!("Moved: {}", report.totals.summary());
+    let report =
+        pc_apply::apply(db, run_id, &plan.candidates, quarantine).inspect_err(print_stop)?;
+    println!("Moved: {}", report.done.summary());
     for (path, why) in &report.refused {
         println!("  refused: {path} — {why}");
     }
@@ -1045,6 +1047,31 @@ fn cmd_plan(
          To reclaim it: photo-cleanup derived purge --older-than 7d --yes"
     );
     Ok(())
+}
+
+/// A run stopped by a volume that cannot move without replacing: what it
+/// had already done is printed as the summary of a finished run would be,
+/// before the error ends the command with a non-zero status. Some moves
+/// may have gone through; they stay done, journaled and undoable — except
+/// entries the database could not complete, which are named as pending.
+fn print_stop(e: &anyhow::Error) {
+    let Some(stop) = pc_apply::stopped_run(e) else {
+        return;
+    };
+    let what = match stop.route {
+        pc_apply::Route::Restore => "Back",
+        _ => "Moved",
+    };
+    println!("\nStopped. {what} before the stop: {}", stop.done.summary());
+    for line in stop.refused.iter().take(10) {
+        println!("  refused: {line}");
+    }
+    if stop.refused.len() > 10 {
+        println!("  … and {} more", stop.refused.len() - 10);
+    }
+    for id in &stop.pending {
+        println!("  pending: journal entry #{id} could not be completed — reconcile it");
+    }
 }
 
 /// Reorganisation runs after deduplication, never before it: laying copies
@@ -1158,28 +1185,14 @@ fn cmd_organize(db: &Db, a: &OrganizeArgs, execute: bool) -> Result<()> {
     }
 
     let run_id = db.latest_run()?.context("no runs yet; run scan first")?;
-    let report = pc_apply::organize(db, run_id, &plan.moves)?;
+    let report = pc_apply::organize(db, run_id, &plan.moves).inspect_err(print_stop)?;
 
-    println!(
-        "\nMoved: {}, {}{}{}",
-        pc_core::count_en(report.moved as i64, "file", "files"),
-        fmt_bytes(report.bytes),
-        if report.sidecars > 0 {
-            format!(", companions {}", report.sidecars)
-        } else {
-            String::new()
-        },
-        if report.pruned_dirs > 0 {
-            format!(", emptied directories removed {}", report.pruned_dirs)
-        } else {
-            String::new()
-        }
-    );
-    if report.litter > 0 {
+    println!("\nMoved: {}", report.done.summary());
+    if report.done.litter > 0 {
         println!(
             "Service files ({}) from emptied directories went to quarantine; \
              they come back with the undo.",
-            report.litter
+            report.done.litter
         );
     }
     for (path, why) in report.refused.iter().take(10) {
@@ -1235,8 +1248,8 @@ fn cmd_organize_undo(db: &Db, a: &OrganizeUndoArgs) -> Result<()> {
         println!("Add --yes to carry it out.");
         return Ok(());
     }
-    let (back, failed) = pc_apply::undo_run(db, run_id)?;
-    println!("Restored: {back}.");
+    let (back, failed) = pc_apply::undo_run(db, run_id).inspect_err(print_stop)?;
+    println!("Restored: {}.", back.summary());
     for f in failed.iter().take(10) {
         println!("  failed: {f}");
     }

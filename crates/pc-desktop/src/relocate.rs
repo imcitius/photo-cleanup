@@ -2178,7 +2178,8 @@ mod at {
     }
 
     /// Rename `from` in `from_dir` to `to` in `to_dir`, failing if `to`
-    /// exists. Other Unix systems have no such call: refuse.
+    /// exists ([`pc_core::disk::rename_no_replace_at`]). Other Unix systems
+    /// have no such call: refuse.
     pub(super) fn rename_no_replace(
         from_dir: &fs::File,
         from: &CStr,
@@ -2190,25 +2191,8 @@ mod at {
             // What `renameatx_np(RENAME_EXCL)` returns on exFAT (el-21zyg).
             return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
         }
-        let (a, b) = (from_dir.as_raw_fd(), to_dir.as_raw_fd());
-        // SAFETY: open descriptors and NUL-terminated names.
-        #[cfg(target_os = "macos")]
-        return check(unsafe {
-            libc::renameatx_np(a, from.as_ptr(), b, to.as_ptr(), libc::RENAME_EXCL)
-        });
-        // SAFETY: as above.
-        #[cfg(target_os = "linux")]
-        return check(unsafe {
-            libc::renameat2(a, from.as_ptr(), b, to.as_ptr(), libc::RENAME_NOREPLACE)
-        });
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            let _ = (a, b, from, to);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "exclusive rename is unavailable",
-            ))
-        }
+        // The one implementation, shared with pc-apply's moves (el-usdqi).
+        pc_core::disk::rename_no_replace_at(from_dir, from, to_dir, to)
     }
 
     /// `unlinkat`: a file, or (`directory`) an empty directory.

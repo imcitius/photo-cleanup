@@ -435,6 +435,24 @@ const MIGRATIONS: &[&str] = &[
         operation INTEGER NOT NULL REFERENCES review_history(id)
     );
     "#,
+    // 020 — история записи журнала только дополняется (el-usdqi, el-5vue3 R3/D6).
+    //
+    // Повтор отката или сверки переписывал `note` целиком: первая причина
+    // отказа, записанная раньше, исчезала. Теперь каждая попытка — отдельное
+    // событие; `note` остаётся читаемым изложением и только растёт. Старые
+    // строки не трогаются: их `note` — начало истории.
+    r#"
+    CREATE TABLE journal_events(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        journal_id INTEGER NOT NULL REFERENCES journal(id),
+        at INTEGER NOT NULL,
+        phase TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        text TEXT NOT NULL,
+        data TEXT
+    );
+    CREATE INDEX journal_events_by_entry ON journal_events(journal_id, id);
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

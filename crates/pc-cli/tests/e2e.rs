@@ -204,7 +204,7 @@ fn quarantine_moves_only_what_is_allowed_and_undo_restores_it() {
 
     let totals =
         pc_apply::quarantine_many(&fx.db, run_id, &removable, Some(&fx.quarantine)).unwrap();
-    assert_eq!(totals.bundles, 3);
+    assert_eq!(totals.done.bundles, 3);
     assert!(totals.skipped.is_empty(), "{:?}", totals.skipped);
 
     // Gone from the archive, present in quarantine.
