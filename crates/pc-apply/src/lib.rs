@@ -21,19 +21,27 @@ compile_error!(
      release (optimised, no debug assertions) build"
 );
 
+mod bound;
 pub mod files;
+mod located;
 pub mod organize;
 pub mod outcome;
 pub mod recovery;
+mod roots;
+mod unit;
 
 pub use files::{
     apply, companion_plan, companions, same_picture, ApplyReport, Companion, FileOutcome, Filed,
 };
 pub use organize::{organize, undo_run, OrganizeReport};
 pub use outcome::{
-    is_no_exclusive_rename, stop_run, stopped_run, Halted, NoExclusiveRename, Route, Stopped, Tally,
+    is_folder_moved, is_no_exclusive_rename, is_run_stop, stop_run, stopped_run, FolderMoved,
+    Halted, NoExclusiveRename, Placed, Role, Route, Stopped, Tally, Whereabouts,
 };
-pub use recovery::{reconcile, reconcile_undo, undo, undo_preview, Item, Reconciled, Standing};
+pub use recovery::{
+    reconcile, reconcile_undo, undo, undo_offered, undo_preview, Item, Reconciled, Standing,
+};
+pub use roots::RunRoots;
 
 use anyhow::{bail, Context, Result};
 use pc_core::{fmt_bytes, Disk};
@@ -428,53 +436,82 @@ pub fn check_organize(moves: &[pc_organize::Move]) -> Result<()> {
     check_all(moves.iter().map(|m| Path::new(&m.dst)))
 }
 
-/// The one move of this crate: create the parents, then rename `src` to
-/// `dst` **without replacing** anything at `dst` — not a file another
-/// program created a moment ago, not a dangling symlink `exists()` cannot
-/// see (el-usdqi). Apply, every undo, organize and orphan adoption go
-/// through here; there is no other `rename` of a photograph.
-pub(crate) fn rename_with_parents(src: &Path, dst: &Path) -> Result<()> {
-    check_exclusive_rename(dst)?;
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "не создать каталог карантина {} — если файловая система смонтирована \
-                 в корень или недоступна на запись, задайте --quarantine <путь на том же диске>",
-                parent.display()
-            )
-        })?;
-    }
-    #[cfg(any(test, feature = "test-seams"))]
-    let raced = race::fire(src, dst);
-    #[cfg(not(any(test, feature = "test-seams")))]
-    let raced = Ok(());
-    match raced.and_then(|()| pc_core::disk::rename_no_replace(src, dst)) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+/// Tests only: one bound move of one object, outside any operation — the
+/// boundary every unit's member goes through ([`unit::move_unit`]).
+#[cfg(test)]
+pub(crate) fn rename_with_parents(
+    src: &Path,
+    dst: &Path,
+    expect: Option<&pc_core::proof::Proof>,
+) -> Result<bound::Arrived> {
+    bound::rename_bound(&bound::Held::bind(src, expect)?, dst, &[])
+}
+
+/// Tests only: the moment after an operation's last rename and before its
+/// journal record ([`race::Syscall::BeforeRecord`]).
+#[cfg(any(test, feature = "test-seams"))]
+pub(crate) fn before_record(m: &pc_db::Moved) {
+    let _ = race::fire_syscall(
+        race::Syscall::BeforeRecord,
+        Path::new(&m.src),
+        Path::new(&m.dst),
+    );
+}
+
+#[cfg(not(any(test, feature = "test-seams")))]
+#[inline(always)]
+pub(crate) fn before_record(_: &pc_db::Moved) {}
+
+/// Close a refused operation's row: its words, and every object it touched
+/// with its proven place (el-lvtmk R5).
+pub(crate) fn close_refused(
+    db: &Db,
+    jid: i64,
+    phase: &str,
+    shown: &str,
+    told: &located::Told,
+) -> Result<()> {
+    db.journal_close(
+        jid,
+        JournalStatus::Failed,
+        &pc_db::Event {
+            text: shown,
+            error: Some(shown),
+            located: &told.located,
+            ..pc_db::Event::new(phase, "refused")
+        },
+    )
+}
+
+/// What a refused rename says.
+pub(crate) fn rename_error(e: std::io::Error, src: &Path, dst: &Path) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::AlreadyExists {
+        anyhow::anyhow!(
             "{}",
             pc_core::tf!(
                 "цель уже существует и не будет заменена: {0}",
                 "the destination already exists and is not replaced: {0}",
                 dst.display()
             )
-        ),
-        Err(e) if pc_core::disk::lacks_exclusive_rename(&e) => {
-            Err(NoExclusiveRename::new(dst.to_path_buf(), e.to_string()).into())
-        }
-        Err(e) => Err(anyhow::Error::new(e).context(pc_core::tf!(
+        )
+    } else if pc_core::disk::lacks_exclusive_rename(&e) {
+        NoExclusiveRename::new(dst.to_path_buf(), e.to_string()).into()
+    } else {
+        anyhow::Error::new(e).context(pc_core::tf!(
             "не переместить {0} -> {1} (перенос обязан быть в пределах одного диска)",
             "cannot move {0} -> {1} (a move has to stay within one disk)",
             src.display(),
             dst.display()
-        ))),
+        ))
     }
 }
 
 /// Tests only: what happens between the last look at a destination and the
 /// move itself — another program creating a file there, or (with an `Err`)
 /// the move being refused the way a volume refuses a call it lacks. Every
-/// move of this crate passes through [`rename_with_parents`], so a test on
-/// any of its consumers can stage the race deterministically.
+/// move of this crate passes through one bound rename (`bound::rename_bound`,
+/// reached only through [`unit::move_unit`]), so a test on any of its
+/// consumers can stage the race deterministically.
 ///
 /// Compiled into this crate's own tests, and into the tests of a crate that
 /// enables the `test-seams` feature (pc-api, whose jobs run on another
@@ -540,6 +577,92 @@ pub mod race {
         }
     }
 
+    /// Moments of a bound move that no check can cover (el-3wizg).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Syscall {
+        /// After the last comparison, right before `renameat`.
+        Before,
+        /// Right after `renameat`, before what arrived is compared.
+        After,
+        /// Right after a compensating return, before anything is located.
+        AfterReturn,
+        /// Before an operation records what it moved (`src` and `dst` of
+        /// its first item): after its last rename, before the journal.
+        BeforeRecord,
+    }
+
+    type SyscallHook = Box<dyn FnMut(Syscall, &Path, &Path) -> io::Result<()>>;
+
+    thread_local! {
+        static SYSCALL: RefCell<Option<SyscallHook>> = const { RefCell::new(None) };
+    }
+
+    /// While the guard lives, `hook(moment, src, dst)` runs on this thread
+    /// at both [`Syscall`] moments of every bound move; an `Err` at
+    /// `Before` is the move's error, at `After` it is ignored.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn at_rename(
+        hook: impl FnMut(Syscall, &Path, &Path) -> io::Result<()> + 'static,
+    ) -> SyscallGuard {
+        SYSCALL.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+        SyscallGuard
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) struct SyscallGuard;
+
+    impl Drop for SyscallGuard {
+        fn drop(&mut self) {
+            SYSCALL.with(|h| *h.borrow_mut() = None);
+        }
+    }
+
+    type SharedSyscall = Box<dyn FnMut(Syscall, &Path, &Path) -> io::Result<()> + Send>;
+
+    /// [`Syscall`] hooks for moves on any thread, each for sources whose
+    /// path contains its marker (pc-api, whose jobs run on another thread).
+    static UNDER_SYSCALL: Mutex<Vec<(u64, String, SharedSyscall)>> = Mutex::new(Vec::new());
+
+    /// While the guard lives, `hook(moment, src, dst)` runs at every
+    /// [`Syscall`] moment of every bound move, on any thread, whose source
+    /// path contains `marker`.
+    pub fn at_rename_under(
+        marker: &str,
+        hook: impl FnMut(Syscall, &Path, &Path) -> io::Result<()> + Send + 'static,
+    ) -> SyscallSharedGuard {
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        UNDER_SYSCALL
+            .lock()
+            .unwrap()
+            .push((id, marker.to_string(), Box::new(hook)));
+        SyscallSharedGuard(id)
+    }
+
+    pub struct SyscallSharedGuard(u64);
+
+    impl Drop for SyscallSharedGuard {
+        fn drop(&mut self) {
+            UNDER_SYSCALL
+                .lock()
+                .unwrap()
+                .retain(|(id, ..)| *id != self.0);
+        }
+    }
+
+    pub(crate) fn fire_syscall(at: Syscall, src: &Path, dst: &Path) -> io::Result<()> {
+        SYSCALL.with(|h| match h.borrow_mut().as_mut() {
+            Some(hook) => hook(at, src, dst),
+            None => Ok(()),
+        })?;
+        let shown = src.to_string_lossy();
+        for (_, marker, hook) in UNDER_SYSCALL.lock().unwrap().iter_mut() {
+            if shown.contains(marker.as_str()) {
+                hook(at, src, dst)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn fire(src: &Path, dst: &Path) -> io::Result<()> {
         HOOK.with(|h| match h.borrow_mut().as_mut() {
             Some(hook) => hook(src, dst),
@@ -557,6 +680,9 @@ pub mod race {
 
 #[cfg(test)]
 mod race_tests;
+
+#[cfg(all(test, unix))]
+mod binding_tests;
 
 /// The catalogue's own answer, asked at the moment of the move.
 ///
@@ -654,61 +780,62 @@ pub fn quarantine(
         manifest: &manifest,
     })?;
 
-    match rename_with_parents(Path::new(&b.path), &dst) {
-        Ok(()) => {
-            let closed = db.journal_close(
-                jid,
-                JournalStatus::Done,
-                &pc_db::Event {
-                    moved: &manifest,
-                    ..pc_db::Event::new("forward", "done")
-                },
-            );
-            if let Err(e) = closed {
-                let e = e.context(pc_core::tf!(
-                    "{0} перенесён, но журнал не дописан: запись {1} осталась незавершённой — сверьте её",
-                    "{0} moved, but the journal was not completed: entry {1} is left pending — reconcile it",
-                    b.path,
-                    jid
-                ));
-                let e = stop_run(e, &Tally::bundle(b), Route::Quarantine, Vec::new());
-                return Err(outcome::left_pending(e, jid, Route::Quarantine));
-            }
-            if let Err(e) = db.set_bundle_state(b.id, BundleState::Quarantined) {
-                let e = e.context(pc_core::tf!(
-                    "{0} перенесён и записан в журнал, но индекс не обновлён",
-                    "{0} moved and is in the journal, but the index did not follow",
-                    b.path
-                ));
-                return Err(stop_run(
-                    e,
-                    &Tally::bundle(b),
-                    Route::Quarantine,
-                    Vec::new(),
-                ));
-            }
-            Ok(Outcome::Moved)
+    // One member: the bundle is one object (a folder of previews, or one
+    // file), moved through the same unit as everything else.
+    let unit = unit::move_unit(
+        &[unit::Member::forward(&manifest[0])],
+        located::Way::Forward,
+        None,
+        &[],
+    );
+    let unit::Unit::Moved(arrived) = unit else {
+        let r = unit::close_forward(db, jid, "forward", Route::Quarantine, unit)?;
+        if let Some(stop) = r.stop {
+            return Err(outcome::with_placed(
+                stop.into(),
+                r.placed,
+                Route::Quarantine,
+            ));
         }
-        Err(e) => {
-            let shown = e.to_string();
-            if let Err(pe) = db.journal_close(
-                jid,
-                JournalStatus::Failed,
-                &pc_db::Event {
-                    text: &shown,
-                    error: Some(&shown),
-                    ..pc_db::Event::new("forward", "refused")
-                },
-            ) {
-                return Err(outcome::left_pending(
-                    pe.context(shown),
-                    jid,
-                    Route::Quarantine,
-                ));
-            }
-            Err(e)
-        }
+        return Err(outcome::with_placed(
+            anyhow::anyhow!("{}", r.why),
+            r.placed,
+            Route::Quarantine,
+        ));
+    };
+    let closed = db.journal_close(
+        jid,
+        JournalStatus::Done,
+        &pc_db::Event {
+            moved: &manifest,
+            ..pc_db::Event::new("forward", "done")
+        },
+    );
+    drop(arrived);
+    if let Err(e) = closed {
+        let e = e.context(pc_core::tf!(
+            "{0} перенесён, но журнал не дописан: запись {1} осталась незавершённой — сверьте её",
+            "{0} moved, but the journal was not completed: entry {1} is left pending — reconcile it",
+            b.path,
+            jid
+        ));
+        let e = stop_run(e, &Tally::bundle(b), Route::Quarantine, Vec::new());
+        return Err(outcome::left_pending(e, jid, Route::Quarantine));
     }
+    if let Err(e) = db.set_bundle_state(b.id, BundleState::Quarantined) {
+        let e = e.context(pc_core::tf!(
+            "{0} перенесён и записан в журнал, но индекс не обновлён",
+            "{0} moved and is in the journal, but the index did not follow",
+            b.path
+        ));
+        return Err(stop_run(
+            e,
+            &Tally::bundle(b),
+            Route::Quarantine,
+            Vec::new(),
+        ));
+    }
+    Ok(Outcome::Moved)
 }
 
 /// What a quarantine of bundles did.
@@ -736,7 +863,7 @@ pub fn quarantine_many(
                 "{0} — changed since the scan",
                 b.path
             )),
-            Err(e) if is_no_exclusive_rename(&e) || stopped_run(&e).is_some() => {
+            Err(e) if is_run_stop(&e) || stopped_run(&e).is_some() => {
                 let refused = t.skipped.clone();
                 return Err(stop_run(e, &t.done, Route::Quarantine, refused));
             }
@@ -744,57 +871,6 @@ pub fn quarantine_many(
         }
     }
     Ok(t)
-}
-
-/// Move the rest of an operation's files and say which of them made it.
-///
-/// A sidecar that refuses to move is a fact worth keeping: it stays out of
-/// the manifest, so an undo is not surprised by a file that never left, and
-/// the journal note names it. A refusal by the volume is more than that: no
-/// further move onto it is tried, the sidecars not reached are named too,
-/// and the refusal comes back so the caller stops its run (el-23goa B3).
-pub(crate) fn carry(
-    rest: &[pc_db::Moved],
-) -> (
-    Vec<pc_db::Moved>,
-    Vec<(String, String)>,
-    Option<anyhow::Error>,
-) {
-    let mut moved = Vec::new();
-    let mut failed = Vec::new();
-    let mut todo = rest.iter();
-    for m in todo.by_ref() {
-        match rename_with_parents(Path::new(&m.src), Path::new(&m.dst)) {
-            Ok(()) => moved.push(m.clone()),
-            Err(e) if is_no_exclusive_rename(&e) => {
-                failed.push((m.src.clone(), e.to_string()));
-                for left in todo {
-                    failed.push((left.src.clone(), not_tried()));
-                }
-                return (moved, failed, Some(e));
-            }
-            Err(e) => failed.push((m.src.clone(), e.to_string())),
-        }
-    }
-    (moved, failed, None)
-}
-
-/// Why a file the run never reached did not move.
-pub(crate) fn not_tried() -> String {
-    pc_core::tr!(
-        "не перенесён: прогон остановлен отказом тома",
-        "not moved: the run stopped at the volume's refusal"
-    )
-    .to_string()
-}
-
-/// `path — why; path — why`, for a journal note.
-pub(crate) fn listed(failed: &[(String, String)]) -> String {
-    failed
-        .iter()
-        .map(|(p, why)| format!("{p} — {why}"))
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 /// Carry a file the journal never claimed back out of quarantine.
@@ -831,45 +907,38 @@ pub fn adopt_orphan(db: &Db, run_id: i64, src: &str, dst: &str) -> Result<Tally>
         file_count: 1,
         manifest: &manifest,
     })?;
-    match rename_with_parents(Path::new(src), Path::new(dst)) {
-        Ok(()) => {
-            let done = Tally {
-                files_back: 1,
-                ..Default::default()
-            };
-            if let Err(e) = db.journal_close(
-                jid,
-                JournalStatus::Done,
-                &pc_db::Event {
-                    moved: &manifest,
-                    ..pc_db::Event::new("adopt", "done")
-                },
-            ) {
-                let e = stop_run(e, &done, Route::Restore, Vec::new());
-                return Err(outcome::left_pending(e, jid, Route::Restore));
-            }
-            Ok(done)
-        }
-        Err(e) => {
-            let shown = e.to_string();
-            if let Err(pe) = db.journal_close(
-                jid,
-                JournalStatus::Failed,
-                &pc_db::Event {
-                    text: &shown,
-                    error: Some(&shown),
-                    ..pc_db::Event::new("adopt", "refused")
-                },
-            ) {
-                return Err(outcome::left_pending(
-                    pe.context(shown),
-                    jid,
-                    Route::Restore,
-                ));
-            }
-            Err(e)
-        }
+    let unit = unit::move_unit(
+        &[unit::Member::forward(&manifest[0])],
+        located::Way::Forward,
+        None,
+        &[],
+    );
+    let unit::Unit::Moved(arrived) = unit else {
+        let r = unit::close_forward(db, jid, "adopt", Route::Restore, unit)?;
+        let e = match r.stop {
+            Some(stop) => stop.into(),
+            None => anyhow::anyhow!("{}", r.why),
+        };
+        return Err(outcome::with_placed(e, r.placed, Route::Restore));
+    };
+    let done = Tally {
+        files_back: 1,
+        ..Default::default()
+    };
+    let closed = db.journal_close(
+        jid,
+        JournalStatus::Done,
+        &pc_db::Event {
+            moved: &manifest,
+            ..pc_db::Event::new("adopt", "done")
+        },
+    );
+    drop(arrived);
+    if let Err(e) = closed {
+        let e = stop_run(e, &done, Route::Restore, Vec::new());
+        return Err(outcome::left_pending(e, jid, Route::Restore));
     }
+    Ok(done)
 }
 
 /// Delete a file the journal never claimed. There is nothing to move it back
@@ -957,6 +1026,27 @@ pub fn purge_entry_controlled(db: &Db, id: i64, control: &pc_core::work::Control
     // A list this version cannot read says nothing about which files beside
     // the entry are its own; deleting by name would guess (el-1y8uo B2).
     recovery::readable(&e)?;
+    // An entry with an object found away from its record, or whose place
+    // could not be proven, is not deleted by its recorded paths: those may
+    // name something else by now (el-lvtmk D6b). Deleting by proof is the
+    // separate task el-3s9kp; until then such an entry is refused whole.
+    if !e.located.is_empty() {
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "запись {0}: место перенесённого не подтверждено по записанным путям ({1}); \
+                 окончательное удаление по путям отказано, ничего не удалено",
+                "entry {0}: what it moved is not proven to be at its recorded paths ({1}); \
+                 permanent deletion by those paths is refused, nothing was deleted",
+                id,
+                e.located
+                    .iter()
+                    .map(|l| format!("{} — {}", l.src, l.at.shown()))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        );
+    }
     let dst = e.dst.as_deref().context(pc_core::tr!(
         "в записи нет пути назначения",
         "the entry has no destination path"
@@ -1145,13 +1235,12 @@ mod undo_tests {
     }
 
     #[test]
-    fn an_undo_that_could_not_finish_says_so_and_can_be_asked_again() {
-        // Half an undo is not an undo. The photograph came home and its
-        // sidecar could not follow, because something was already sitting
-        // where it belonged — and the entry was marked undone anyway. That
-        // closed the only door back: the entry stopped being offered, and a
-        // file holding a photograph's edits sat in quarantine with nothing
-        // left pointing at it.
+    fn an_undo_that_cannot_finish_moves_nothing_and_can_be_asked_again() {
+        // Half an undo is not an undo. The photograph used to come home while
+        // its sidecar could not follow — something already sat where it
+        // belonged. Now the frame and its companions are one unit (user
+        // decision (c)): nothing moves while one of them cannot, the entry
+        // stays open with the reason, and asking again brings all of it.
         let tmp = tempfile::tempdir().unwrap();
         let db = Db::open(&tmp.path().join("pc.db")).unwrap();
         let run = db.start_run(&[], "test").unwrap();
@@ -1161,7 +1250,8 @@ mod undo_tests {
 
         let refused = undo(&db, id).unwrap_err();
 
-        assert!(src.exists(), "снимок не вернулся");
+        assert!(!src.exists(), "половина отката");
+        assert!(dst.exists());
         assert!(dst.with_extension("xmp").exists(), "чужой файл затёрт");
         assert_eq!(fs::read(&occupied).unwrap(), b"newer edits");
         assert!(format!("{refused:#}").contains("xmp"), "{refused:#}");
@@ -1172,12 +1262,10 @@ mod undo_tests {
             "частичный откат объявлен завершённым"
         );
 
-        // And asking again carries on rather than starting over: the
-        // photograph is already home and must not be moved a second time.
         fs::remove_file(&occupied).unwrap();
         undo(&db, id).unwrap();
-        assert!(src.exists());
-        assert!(occupied.exists(), "спутник не вернулся со второй попытки");
+        assert_eq!(fs::read(&src).unwrap(), b"photo");
+        assert_eq!(fs::read(&occupied).unwrap(), b"the edits that went with it");
         assert_eq!(
             db.journal_entry(id).unwrap().unwrap().status,
             JournalStatus::Undone

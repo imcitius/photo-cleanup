@@ -408,6 +408,9 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
                 pc_core::tf!("Выполнено: {0}", "Done: {0}", done.summary())
             };
         };
+        // The run's folders, held from its start: one moved while the run
+        // goes on stops it, as on the command line (el-lvtmk D2).
+        let roots = pc_apply::RunRoots::hold(&db, actions.iter().map(|a| a.source_path()))?;
         for action in actions {
             if let Err(e) = control.current(action.source_path()) {
                 moved_note(&done);
@@ -417,7 +420,11 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
                 .get(action.source_path())
                 .copied()
                 .unwrap_or(action.size());
-            match service::apply_action(st, &db, run, &action, req, control) {
+            let result = roots
+                .check()
+                .map_err(anyhow::Error::from)
+                .and_then(|()| service::apply_action(st, &db, run, &action, req, control));
+            match result {
                 Ok(result) => {
                     done.add(&result.done);
                     for (path, why) in &result.warnings {

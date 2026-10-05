@@ -318,10 +318,11 @@ fn retry_after_crash_uses_persisted_object_evidence() {
     }
 }
 
-/// The frame came home, its sidecar did not. Then the file at home was
-/// rewritten in place: same device and inode, different object state —
-/// what an inode handed out again looks like to `dev:ino`. The retry does
-/// not accept it as the frame the undo brought back.
+/// An undo refused while a sidecar's home was taken leaves the frame held
+/// with its sidecar (user decision (c)). Then the held frame is rewritten
+/// in place: same device and inode, different object state — what an
+/// inode handed out again looks like to `dev:ino`. The retry does not
+/// accept it as the frame the operation moved.
 #[test]
 fn identity_reuse_is_not_silently_accepted() {
     let a = archive();
@@ -331,13 +332,15 @@ fn identity_reuse_is_not_silently_accepted() {
     let c = candidate(&a.db, a.run, &photo);
     crate::apply(&a.db, a.run, &[c], None).unwrap();
     let id = last_journal_id(&a.db);
+    let held = a.quarantine.join("frame.arw");
     fs::write(photo.with_extension("xmp"), b"foreign edits").unwrap();
     assert!(crate::undo(&a.db, id).is_err());
-    assert_eq!(fs::read(&photo).unwrap(), b"our frame");
+    assert!(fs::symlink_metadata(&photo).is_err(), "half undo");
+    assert_eq!(fs::read(&held).unwrap(), b"our frame");
 
     // Same inode, other content and size.
     std::thread::sleep(std::time::Duration::from_millis(20));
-    fs::write(&photo, b"a different photograph entirely").unwrap();
+    fs::write(&held, b"a different photograph entirely").unwrap();
     fs::remove_file(photo.with_extension("xmp")).unwrap();
 
     assert!(
@@ -345,6 +348,7 @@ fn identity_reuse_is_not_silently_accepted() {
         "continuity taken on dev:ino"
     );
     assert_eq!(journal_row(&a.db, id).0, "done");
+    assert!(fs::symlink_metadata(&photo).is_err());
     assert!(
         a.quarantine.join("frame.xmp").exists(),
         "sidecar left with an unproved frame"
@@ -480,10 +484,11 @@ fn a_note_write_failure_is_reported_with_the_original_refusal() {
 
 // --------------------------------------------------------- D7 / R4 -------
 
-/// D7. The frame (9 bytes) moved, its sidecar (15) did not: quarantine
-/// holds 9 bytes, and that is what the journal and the totals say.
+/// D7. The sidecar's place in quarantine is taken: the frame (9 bytes)
+/// does not move without it (user decision (c)), and nothing is counted as
+/// held.
 #[test]
-fn a_refused_sidecar_does_not_inflate_quarantine_bytes() {
+fn a_refused_sidecar_keeps_its_frame_and_nothing_is_counted() {
     let a = archive();
     let home = a.dir.join("frame.arw");
     fs::write(&home, b"our frame").unwrap();
@@ -495,8 +500,13 @@ fn a_refused_sidecar_does_not_inflate_quarantine_bytes() {
     crate::apply(&a.db, a.run, &[c], None).unwrap();
 
     let t = crate::quarantined_totals(&a.db).unwrap();
-    assert_eq!(t.bytes, 9, "{}", t.summary());
-    assert_eq!(t.files, 1, "{}", t.summary());
+    assert_eq!(t.bytes, 0, "{}", t.summary());
+    assert_eq!(t.files, 0, "{}", t.summary());
+    assert_eq!(fs::read(&home).unwrap(), b"our frame");
+    assert_eq!(
+        fs::read(a.quarantine.join("frame.xmp")).unwrap(),
+        b"foreign edits"
+    );
 }
 
 /// A reorganisation stopped in its litter sweep: the frame, its sidecar

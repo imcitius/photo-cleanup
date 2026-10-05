@@ -39,7 +39,7 @@ pub struct Read1 {
     pub bytes_read: u64,
 }
 
-fn read_at(f: &mut File, off: u64, len: usize) -> Result<Vec<u8>> {
+fn read_at<F: Read + Seek>(f: &mut F, off: u64, len: usize) -> Result<Vec<u8>> {
     f.seek(SeekFrom::Start(off))?;
     let mut buf = vec![0u8; len];
     let mut got = 0;
@@ -62,9 +62,14 @@ fn partial(size: u64, head: &[u8], tail: &[u8]) -> [u8; 32] {
 }
 
 pub fn read_for_probe(path: &Path, size: u64) -> Result<Read1> {
-    let mut f = File::open(path)?;
+    read_for_probe_from(&mut File::open(path)?, size)
+}
+
+/// [`read_for_probe`] of a file already open — the one a move is bound to,
+/// so that what is read is the object that will move (el-3wizg).
+pub fn read_for_probe_from<F: Read + Seek>(f: &mut F, size: u64) -> Result<Read1> {
     let head_len = (size as usize).min(HEAD_BYTES);
-    let head = read_at(&mut f, 0, head_len)?;
+    let head = read_at(f, 0, head_len)?;
     let mut bytes_read = head.len() as u64;
 
     let container = sniff::sniff(&head);
@@ -83,7 +88,7 @@ pub fn read_for_probe(path: &Path, size: u64) -> Result<Read1> {
                 continue;
             }
             let want = len.min(size - off) as usize;
-            let bytes = read_at(&mut f, off, want)?;
+            let bytes = read_at(f, off, want)?;
             bytes_read += bytes.len() as u64;
             // Byte length only orders the candidates; pixels decide.
             if let Some(e) = tiff::accept_preview(&bytes) {
@@ -111,7 +116,7 @@ pub fn read_for_probe(path: &Path, size: u64) -> Result<Read1> {
                 )
             );
         }
-        let all = read_at(&mut f, 0, size as usize)?;
+        let all = read_at(f, 0, size as usize)?;
         bytes_read += all.len().saturating_sub(head_len) as u64;
         (all, true)
     };
@@ -121,7 +126,7 @@ pub fn read_for_probe(path: &Path, size: u64) -> Result<Read1> {
         head[from..].to_vec()
     } else {
         let off = size.saturating_sub(EDGE as u64);
-        let t = read_at(&mut f, off, EDGE)?;
+        let t = read_at(f, off, EDGE)?;
         bytes_read += t.len() as u64;
         t
     };

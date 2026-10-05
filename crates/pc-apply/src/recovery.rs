@@ -27,7 +27,9 @@ use pc_db::{BundleState, Db, JournalEntry, JournalStatus, Moved};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::{files, organize, rename_with_parents, stop_run, Route, Tally};
+use crate::located::Way;
+use crate::unit::{move_unit, Member, Unit};
+use crate::{files, organize, stop_run, Route, Tally};
 
 /// Where one file of an entry is, against its evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,13 +52,26 @@ pub enum Standing {
 #[derive(Debug, Clone)]
 pub struct Item {
     pub src: String,
+    /// Where it is looked for: the recorded destination, or the place the
+    /// journal last proved or saw it at (el-lvtmk R5).
     pub dst: String,
     pub standing: Standing,
+    /// What the journal last recorded about its place, in words, when it
+    /// recorded anything beyond the manifest.
+    pub located: Option<String>,
 }
 
 impl Item {
     /// Why this one keeps the entry open, in words that name both paths.
     pub fn why(&self) -> Option<String> {
+        let base = self.why_here()?;
+        Some(match &self.located {
+            Some(l) => format!("{base}; {l}"),
+            None => base,
+        })
+    }
+
+    fn why_here(&self) -> Option<String> {
         Some(match &self.standing {
             Standing::Home | Standing::Moved => return None,
             Standing::Both => pc_core::tf!(
@@ -205,24 +220,106 @@ fn list_of(entry: &JournalEntry) -> Result<Vec<Moved>> {
     Ok(list)
 }
 
+/// One item of an entry: as recorded, and where recovery looks for it.
+///
+/// The record is never rewritten. Where the operation later found the
+/// object away from its recorded place — its folder moved under it, a
+/// return that could not finish — a `located` event says where it was
+/// proven or last seen (el-lvtmk R5), and recovery looks there instead of at
+/// the recorded `dst`. Whatever is found there is still this entry's only on
+/// its evidence ([`classify`]); the overlay is a place to look, never a
+/// reason to act.
+#[derive(Debug, Clone)]
+struct Pair {
+    rec: Moved,
+    look: Moved,
+    note: Option<String>,
+    /// The object the operation last found is its own, changed since its
+    /// check, and was kept where this says (user decision (c), point 4).
+    changed: Option<String>,
+}
+
+fn pair_of(entry: &JournalEntry, rec: Moved) -> Pair {
+    let l = entry.overlay_of(&rec);
+    let mut look = rec.clone();
+    if let Some(p) = l.and_then(|l| l.overlay()) {
+        look.dst = p.to_string_lossy().into_owned();
+    }
+    let note = l.map(|l| {
+        pc_core::tf!(
+            "по последней записи журнала: {0}",
+            "as the journal last recorded it: {0}",
+            l.at.shown()
+        )
+    });
+    let changed = l
+        .filter(|l| l.held && l.role == "changed")
+        .map(|l| l.at.shown());
+    Pair {
+        rec,
+        look,
+        note,
+        changed,
+    }
+}
+
+fn item_of(p: &Pair) -> Item {
+    // A photograph that changed after its check and stayed with the tool is
+    // never brought back by recovery: its evidence no longer says it is the
+    // one that left, and a newer evidence is not a reason to act. It is told
+    // where it is, for a person to settle (user decision (c), point 4).
+    let standing = match &p.changed {
+        Some(at) => Standing::Doubt(pc_core::tf!(
+            "{0} — изменился после проверки и остался у инструмента; он не возвращается \
+             автоматически, верните его вручную: {1}",
+            "{0} — it changed after its check and stayed with the tool; it is not brought back \
+             automatically, recover it by hand: {1}",
+            p.rec.src,
+            at
+        )),
+        None => classify(&p.look),
+    };
+    Item {
+        src: p.look.src.clone(),
+        dst: p.look.dst.clone(),
+        standing,
+        located: p.note.clone(),
+    }
+}
+
 /// What an undo of `entry` would find, file by file. Reads only: the web's
 /// preview and the undo itself ask this same question.
 pub fn undo_preview(entry: &JournalEntry) -> Result<Vec<Item>> {
     Ok(list_of(entry)?
-        .iter()
-        .map(|m| Item {
-            src: m.src.clone(),
-            dst: m.dst.clone(),
-            standing: classify(m),
-        })
+        .into_iter()
+        .map(|m| item_of(&pair_of(entry, m)))
         .collect())
 }
 
-/// Add `text` to the entry's history. If the journal cannot take it, the
-/// caller's error says so as well — a refusal is never reported as written
-/// down when it was not.
+/// Whether an undo of `entry` is offered: a finished operation that has not
+/// been walked back. A refused one moved nothing that stayed moved, and an
+/// unfinished one is reconciled instead (user decision (c)).
+pub fn undo_offered(entry: &JournalEntry) -> bool {
+    entry.status == JournalStatus::Done
+}
+
+/// Add `text` to the entry's history, with the places of what it concerns.
+/// If the journal cannot take it, the caller's error says so as well — a
+/// refusal is never reported as written down when it was not.
 fn told(db: &Db, id: i64, phase: &str, kind: &str, text: &str, e: anyhow::Error) -> anyhow::Error {
-    match db.journal_event(id, phase, kind, text, None) {
+    told_located(db, id, phase, kind, text, e, &[])
+}
+
+fn told_located(
+    db: &Db,
+    id: i64,
+    phase: &str,
+    kind: &str,
+    text: &str,
+    e: anyhow::Error,
+    located: &[pc_db::Located],
+) -> anyhow::Error {
+    match db.journal_event_located(id, phase, kind, text, located) {
         Ok(()) => e,
         Err(pe) => e.context(pc_core::tf!(
             "журнал не принял запись об этом ({0}); запись {1} не дополнена",
@@ -233,11 +330,126 @@ fn told(db: &Db, id: i64, phase: &str, kind: &str, text: &str, e: anyhow::Error)
     }
 }
 
+/// Every item of an entry with where it is — said whenever the entry is
+/// refused, so that a person sees all of it, not only the part that failed.
+fn listing(items: &[Item]) -> String {
+    items
+        .iter()
+        .map(|i| match i.why() {
+            Some(why) => why,
+            None => match (&i.standing, &i.located) {
+                (Standing::Home, _) => pc_core::tf!(
+                    "{0} — на своём месте (проверено)",
+                    "{0} — at its place (verified)",
+                    i.src
+                ),
+                (_, Some(l)) => format!("{} — {l}", i.src),
+                _ => pc_core::tf!(
+                    "{0} — в {1} (проверено по записанным сведениям)",
+                    "{0} — at {1} (verified by its recorded evidence)",
+                    i.src,
+                    i.dst
+                ),
+            },
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Walk an entry's items back as one unit (user decision (c)): only when
+/// every item is proven — at home, or held with its home free — and then
+/// all of them or none. Refused, the entry stays open with the reason and
+/// every item's place added to its history; if the unit could not even be
+/// put back where it was, the places proven after the last rename are
+/// recorded and the run stops.
+fn walk_back(
+    db: &Db,
+    id: i64,
+    phase: &str,
+    pairs: &[Pair],
+) -> Result<(Vec<crate::bound::Arrived>, Vec<Moved>)> {
+    let items: Vec<Item> = pairs.iter().map(item_of).collect();
+    if items.iter().any(|i| i.why().is_some()) {
+        let why = pc_core::tf!(
+            "{0}: ничего не перенесено — кадр со спутниками возвращается только целиком, а не \
+             всё доказано: {1}",
+            "{0}: nothing was moved — the frame and its companions come back only together, \
+             and not all of them are proven: {1}",
+            phase,
+            listing(&items)
+        );
+        return Err(told(
+            db,
+            id,
+            phase,
+            "refused",
+            &why,
+            anyhow::anyhow!("{why}"),
+        ));
+    }
+    let moving: Vec<&Pair> = pairs
+        .iter()
+        .zip(&items)
+        .filter(|(_, i)| i.standing == Standing::Moved)
+        .map(|(p, _)| p)
+        .collect();
+    if moving.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let members: Vec<Member> = moving
+        .iter()
+        .map(|p| Member::back(&p.rec, &p.look))
+        .collect();
+    let pb = match move_unit(&members, Way::Back, None, &[]) {
+        Unit::Moved(arrived) => {
+            return Ok((arrived, moving.iter().map(|p| p.rec.clone()).collect()))
+        }
+        Unit::Refused(e) => {
+            let why = pc_core::tf!(
+                "{0}: ничего не перенесено — {1}; где что: {2}",
+                "{0}: nothing was moved — {1}; where things are: {2}",
+                phase,
+                e,
+                listing(&items)
+            );
+            let stop = crate::is_no_exclusive_rename(&e);
+            let e = told(db, id, phase, "refused", &why, e);
+            return Err(if stop { e } else { e.context(why) });
+        }
+        Unit::PutBack(pb) => pb,
+    };
+    let why = format!("{phase}: {}", pb.why());
+    let kind = if pb.kept { "kept" } else { "refused" };
+    let located = pb.told.located.clone();
+    let placed = pb.told.placed.clone();
+    let stops = pb.stops();
+    let folder = pb.told.folder_moved && !pb.kept;
+    let e = if crate::is_no_exclusive_rename(&pb.error) {
+        pb.error
+    } else if folder {
+        crate::FolderMoved {
+            reason: why.clone(),
+        }
+        .into()
+    } else {
+        anyhow::anyhow!("{why}")
+    };
+    let e = told_located(db, id, phase, kind, &why, e, &located);
+    let e = crate::outcome::with_placed(e, placed, Route::Restore);
+    Err(if stops {
+        stop_run(e, &Tally::default(), Route::Restore, Vec::new())
+    } else {
+        e
+    })
+}
+
+/// Walk a finished entry back: every file it moved, by its evidence, as one
+/// unit.
 pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
     let entry = db.journal_entry(journal_id)?.with_context(|| {
         pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
     })?;
-    if entry.status != JournalStatus::Done {
+    if !undo_offered(&entry) {
         bail!(
             "{}",
             pc_core::tf!(
@@ -259,110 +471,17 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
             return Err(told(db, journal_id, "undo", "refused", &why, e));
         }
     };
-
-    let mut done = Tally::default();
-    let mut came: Vec<Moved> = Vec::new();
-    // The photograph first: if it cannot come back, nothing should move.
-    let frame = list
-        .iter()
-        .find(|m| m.src == entry.src)
-        .cloned()
-        .unwrap_or_else(|| Moved::new(entry.src.clone(), dst.clone()));
-    let item = Item {
-        src: frame.src.clone(),
-        dst: frame.dst.clone(),
-        standing: classify(&frame),
-    };
-    if matches!(item.standing, Standing::Moved | Standing::Home) {
-        // A row written without evidence: the files held at its own
-        // recorded quarantine paths are what it has. Their evidence is taken
-        // now, before they move, and written down — so a retry tells the one
-        // this undo brings home from a stranger that later takes its name.
-        // Only once the photograph is free to come back: a row refused here
-        // stays exactly as it was.
+    let pairs: Vec<Pair> = list.iter().map(|m| pair_of(&entry, m.clone())).collect();
+    if pairs.iter().map(item_of).all(|i| i.why().is_none()) {
         adopt_held_evidence(db, journal_id, &mut list)?;
     }
-    match &item.standing {
-        Standing::Moved => {
-            if let Err(e) = rename_with_parents(Path::new(&frame.dst), Path::new(&frame.src)) {
-                let why = pc_core::tf!(
-                    "откат: не вернулось {0} — {1}",
-                    "undo: did not come back — {0} — {1}",
-                    frame.dst,
-                    e
-                );
-                return Err(told(db, journal_id, "undo", "refused", &why, e));
-            }
-            done.files_back += 1;
-            came.push(frame.clone());
-        }
-        Standing::Home => {}
-        _ => {
-            let why = pc_core::tf!(
-                "откат: снимок остаётся в карантине — {0}",
-                "undo: the photograph stays in quarantine — {0}",
-                item.why().unwrap_or_default()
-            );
-            return Err(told(
-                db,
-                journal_id,
-                "undo",
-                "refused",
-                &why,
-                anyhow::anyhow!("{why}"),
-            ));
-        }
-    }
+    let pairs: Vec<Pair> = list.into_iter().map(|m| pair_of(&entry, m)).collect();
+    let (arrived, came) = walk_back(db, journal_id, "undo", &pairs)?;
+    let mut done = Tally {
+        files_back: came.len() as u64,
+        ..Default::default()
+    };
 
-    let mut failed: Vec<String> = Vec::new();
-    let mut stop: Option<anyhow::Error> = None;
-    let mut rest = list.iter().filter(|m| m.src != entry.src);
-    for m in rest.by_ref() {
-        let item = Item {
-            src: m.src.clone(),
-            dst: m.dst.clone(),
-            standing: classify(m),
-        };
-        match &item.standing {
-            Standing::Home => continue,
-            Standing::Moved => {}
-            _ => {
-                failed.push(item.why().unwrap_or_default());
-                continue;
-            }
-        }
-        match rename_with_parents(Path::new(&m.dst), Path::new(&m.src)) {
-            Ok(()) => {
-                done.files_back += 1;
-                came.push(m.clone());
-            }
-            Err(e) if crate::is_no_exclusive_rename(&e) => {
-                // The volume: nothing more is tried on it.
-                failed.push(format!("{} — {e}", m.dst));
-                stop = Some(e);
-                break;
-            }
-            Err(e) => failed.push(format!("{} — {e}", m.dst)),
-        }
-    }
-    if stop.is_some() {
-        for left in rest {
-            failed.push(format!("{} — {}", left.dst, crate::not_tried()));
-        }
-    }
-
-    // What did come back, the index should say is back: the photograph is in
-    // the archive whether or not its sidecar managed to follow.
-    //
-    // Which row this concerns is decided by path, not by the id the entry was
-    // written with. After a reset those ids belong to other files, and an
-    // entry from an older database would otherwise reach into the new index
-    // and change a stranger.
-    //
-    // Files are already back by now: a database that refuses any of what
-    // follows does not undo that. The caller hears what came back, typed,
-    // and that the journal did not record it (el-1y8uo B3); the entry keeps
-    // its state, and asking again finishes it by the same evidence.
     let unrecorded = |e: anyhow::Error, done: &Tally| -> anyhow::Error {
         let e = e.context(pc_core::tf!(
             "файлы вернулись, но журнал не записал откат записи {0}; повторный откат завершит его",
@@ -383,8 +502,6 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
                     db.set_file_state(id, "present")?;
                 }
             }
-            // The reorganisation moved the file, so the index knows it by
-            // where it was moved to.
             "organize" => {
                 if let Some(id) = db.file_id_at(&dst)? {
                     db.set_file_path(id, &entry.src, &name_of(Path::new(&entry.src)))?;
@@ -395,27 +512,8 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
         Ok(())
     })();
     if let Err(e) = indexed {
-        if !failed.is_empty() {
-            done.entries_partial += 1;
-        }
         return Err(unrecorded(e, &done));
     }
-    if !failed.is_empty() {
-        // Half an undo is not an undo. Marking the entry `undone` would close
-        // the only door back to what stayed behind. It stays `done`, the
-        // reason is added to its history, and asking again carries on from
-        // where this stopped.
-        let why = pc_core::tf!(
-            "откат: не вернулось {0}",
-            "undo: did not come back — {0}",
-            failed.join("; ")
-        );
-        done.entries_partial += 1;
-        let e = stop.unwrap_or_else(|| anyhow::anyhow!("{why}"));
-        let e = told(db, journal_id, "undo", "partial", &why, e);
-        return Err(stop_run(e, &done, Route::Restore, Vec::new()));
-    }
-    // The state and the event that says why, together or not at all.
     let closed = db.journal_close(
         journal_id,
         JournalStatus::Undone,
@@ -425,6 +523,7 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
             ..pc_db::Event::new("undo", "done")
         },
     );
+    drop(arrived);
     if let Err(e) = closed {
         return Err(unrecorded(e, &done));
     }
@@ -464,14 +563,9 @@ pub fn reconcile(db: &Db, journal_id: i64) -> Result<Vec<Item>> {
             )
         );
     }
-    let list = pending_list(&entry)?;
-    Ok(list
-        .iter()
-        .map(|m| Item {
-            src: m.src.clone(),
-            dst: m.dst.clone(),
-            standing: classify(m),
-        })
+    Ok(pending_list(&entry)?
+        .into_iter()
+        .map(|m| item_of(&pair_of(&entry, m)))
         .collect())
 }
 
@@ -493,8 +587,7 @@ fn pending_list(entry: &JournalEntry) -> Result<Vec<Moved>> {
 /// A row written without evidence, about to be walked back: the files held
 /// at its own recorded quarantine paths are what it has. Their evidence is
 /// taken now and written down *before* anything moves (el-1y8uo B4), so a
-/// retry after a partial return recognises what came home by proof — never
-/// by its name. Rows that recorded evidence are left exactly as they are.
+/// retry recognises what is home by proof — never by its name. Rows that recorded evidence are left exactly as they are.
 fn adopt_held_evidence(db: &Db, journal_id: i64, list: &mut [Moved]) -> Result<()> {
     let mut adopted = false;
     for m in list.iter_mut() {
@@ -531,71 +624,34 @@ pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
         }
     }
     let items = reconcile(db, journal_id)?;
-    let unclear: Vec<String> = items.iter().filter_map(Item::why).collect();
-    if !unclear.is_empty() {
+    if items.iter().any(|i| i.why().is_some()) {
         let why = pc_core::tf!(
-            "сверка: ничего не перенесено — {0}",
-            "reconcile: nothing was moved — {0}",
-            unclear.join("; ")
+            "сверка: ничего не перенесено — кадр со спутниками возвращается только целиком, а \
+             не всё доказано: {0}",
+            "reconcile: nothing was moved — the frame and its companions come back only \
+             together, and not all of them are proven: {0}",
+            listing(&items)
         );
         let e = anyhow::anyhow!("{why}");
         return Err(told(db, journal_id, "reconcile", "refused", &why, e));
     }
-    {
+    // The evidence each move back is bound to (el-3wizg): as journaled, or
+    // as just taken from the file at its recorded quarantine path.
+    let (entry, pairs) = {
         let entry = db.journal_entry(journal_id)?.with_context(|| {
             pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
         })?;
         let mut list = pending_list(&entry)?;
         adopt_held_evidence(db, journal_id, &mut list)?;
-    }
-    let back: Vec<&Item> = items
-        .iter()
-        .filter(|i| i.standing == Standing::Moved)
-        .collect();
-    let mut done = Tally::default();
-    let mut came: Vec<&str> = Vec::new();
-    let mut at: Option<&Item> = None;
-    let carried = crate::check_all(back.iter().map(|i| Path::new(&i.src))).and_then(|()| {
-        for item in &back {
-            at = Some(item);
-            rename_with_parents(Path::new(&item.dst), Path::new(&item.src))?;
-            came.push(&item.src);
-            done.files_back += 1;
-        }
-        Ok(())
-    });
-    if let Err(e) = carried {
-        let mut why = match at {
-            Some(i) => pc_core::tf!(
-                "сверка: не вернулось {0} — {1}",
-                "reconcile: did not come back — {0} — {1}",
-                i.src,
-                e
-            ),
-            None => pc_core::tf!("сверка: отказ — {0}", "reconcile: refused — {0}", e),
-        };
-        if !came.is_empty() {
-            why.push_str(&pc_core::tf!(
-                "; уже вернулось: {0}",
-                "; already back: {0}",
-                came.join(", ")
-            ));
-            done.entries_partial += 1;
-        }
-        let e = told(db, journal_id, "reconcile", "partial", &why, e);
-        return Err(stop_run(e, &done, Route::Restore, Vec::new()));
-    }
-    // Files are back by now; a database that refuses what follows does not
-    // undo that (el-1y8uo B3). The entry stays pending with its evidence, and
-    // reconciling it again finds them at home by proof and closes it.
-    let returned: Vec<Moved> = back
-        .iter()
-        .map(|i| Moved::new(i.src.clone(), i.dst.clone()))
-        .collect();
+        let pairs: Vec<Pair> = list.into_iter().map(|m| pair_of(&entry, m)).collect();
+        (entry, pairs)
+    };
+    let (arrived, returned) = walk_back(db, journal_id, "reconcile", &pairs)?;
+    let mut done = Tally {
+        files_back: returned.len() as u64,
+        ..Default::default()
+    };
     let recorded = (|| -> Result<()> {
-        let entry = db.journal_entry(journal_id)?.with_context(|| {
-            pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
-        })?;
         if entry.op == "quarantine-file" {
             if let Some(id) = db.file_id_at(&entry.src)? {
                 db.set_file_state(id, "present")?;
@@ -605,8 +661,6 @@ pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
                 db.set_bundle_state(id, BundleState::Present)?;
             }
         }
-        // Nothing of this operation is left in quarantine, which is what
-        // `undone` says. It never finished, and the history keeps that fact.
         db.journal_close(
             journal_id,
             JournalStatus::Undone,
@@ -620,6 +674,7 @@ pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
             },
         )
     })();
+    drop(arrived);
     if let Err(e) = recorded {
         let e = e.context(pc_core::tf!(
             "файлы вернулись, но журнал не записал сверку записи {0}; она остаётся незавершённой, повторная сверка закроет её",

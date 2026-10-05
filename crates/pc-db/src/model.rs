@@ -219,6 +219,46 @@ impl Moved {
     }
 }
 
+/// Where one object of an entry was found, proven or not, after the
+/// operation's last rename of it (el-3wizg, diagnosis el-lvtmk R5).
+///
+/// Appended to an event, never written over the manifest: the manifest says
+/// what the operation meant and recorded before it moved anything; this says
+/// where an object actually ended up when that differs from the record or
+/// could not be proven. Recovery reads the latest one per item over the
+/// manifest ([`JournalEntry::located`]) and still decides ownership only by
+/// the evidence ([`Moved::proof`]) — a path here is a place to look, never a
+/// reason to act.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Located {
+    /// The manifest item this concerns, as recorded.
+    pub src: String,
+    pub dst: String,
+    /// `checked` (the object the operation verified), `changed` (that
+    /// object, altered since its check) or `stranger` (another object that
+    /// took its name). Only the first two are ever recovered.
+    pub role: String,
+    /// The object is on the operation's side of the move: where `dst` was
+    /// meant to be, not back at `src`. Only such an object is overlaid on
+    /// `dst` for recovery.
+    pub held: bool,
+    pub at: pc_core::whereabouts::Whereabouts,
+    /// The evidence of the object found, when it could be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<pc_core::proof::Proof>,
+}
+
+impl Located {
+    /// Recovery may look for this item here: the operation's own object,
+    /// on its side, at a path proven or last seen.
+    pub fn overlay(&self) -> Option<&std::path::Path> {
+        (self.held && matches!(self.role.as_str(), "checked" | "changed"))
+            .then(|| self.at.hint())
+            .flatten()
+    }
+}
+
 /// One event in the history of a journal entry. Appended, never replaced:
 /// a retry adds to what the entry says, it does not erase it (el-5vue3 R3/D6).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,6 +294,9 @@ pub struct Event<'a> {
     pub refused: &'a [(String, String)],
     /// The error that ended it, if one did.
     pub error: Option<&'a str>,
+    /// Objects found away from their record, or whose place could not be
+    /// proven; see [`Located`].
+    pub located: &'a [Located],
 }
 
 impl<'a> Event<'a> {
@@ -265,11 +308,12 @@ impl<'a> Event<'a> {
             moved: &[],
             refused: &[],
             error: None,
+            located: &[],
         }
     }
 
     fn data(&self, status: JournalStatus) -> String {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "status": status.as_str(),
             "moved": self
                 .moved
@@ -282,8 +326,11 @@ impl<'a> Event<'a> {
                 .map(|(path, why)| serde_json::json!({"path": path, "why": why}))
                 .collect::<Vec<_>>(),
             "error": self.error,
-        })
-        .to_string()
+        });
+        if !self.located.is_empty() {
+            v["located"] = serde_json::json!(self.located);
+        }
+        v.to_string()
     }
 }
 
@@ -306,6 +353,19 @@ pub struct JournalEntry {
     /// row from before lists were kept: every recovery and purge refuses
     /// such a row and leaves the record as it is (el-1y8uo B2).
     pub manifest_unreadable: Option<String>,
+    /// Every [`Located`] its events carry, oldest first. The latest one per
+    /// manifest item is the one that counts.
+    pub located: Vec<Located>,
+}
+
+impl JournalEntry {
+    /// The latest place recovery may look for the item `m` of this entry.
+    pub fn overlay_of(&self, m: &Moved) -> Option<&Located> {
+        self.located
+            .iter()
+            .rev()
+            .find(|l| l.src == m.src && l.dst == m.dst && l.role != "stranger")
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -616,6 +676,21 @@ impl Db {
         Ok(())
     }
 
+    /// [`Db::journal_event`] with the places of what it concerns
+    /// ([`Located`]), read back into [`JournalEntry::located`].
+    pub fn journal_event_located(
+        &self,
+        id: i64,
+        phase: &str,
+        kind: &str,
+        text: &str,
+        located: &[Located],
+    ) -> Result<()> {
+        let data =
+            (!located.is_empty()).then(|| serde_json::json!({ "located": located }).to_string());
+        self.journal_event(id, phase, kind, text, data.as_deref())
+    }
+
     /// An entry's events, oldest first.
     pub fn journal_events(&self, id: i64) -> Result<Vec<JournalEvent>> {
         let mut st = self.conn.prepare(
@@ -701,9 +776,23 @@ impl Db {
                     target_id: r.get("target_id")?,
                     manifest,
                     manifest_unreadable,
+                    located: Vec::new(),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut rows = rows;
+        let mut st = self.conn.prepare_cached(
+            "SELECT data FROM journal_events
+              WHERE journal_id = ?1 AND instr(data, '\"located\"') > 0 ORDER BY id",
+        )?;
+        for row in &mut rows {
+            let datas = st
+                .query_map([row.id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for d in datas {
+                row.located.extend(located_of(&d)?);
+            }
+        }
         Ok(rows)
     }
 
@@ -735,6 +824,24 @@ impl Db {
                 &[],
             ),
         }
+    }
+
+    /// Finished entries with an object of their own found away from its
+    /// recorded place, or whose place could not be proven (el-lvtmk R6):
+    /// what `status` lists and undo can still act on. A refused entry never
+    /// keeps anything of its own (user decision (c)); one that could not put
+    /// a photograph back stays pending and is listed with those.
+    pub fn journal_located(&self) -> Result<Vec<JournalEntry>> {
+        Ok(self
+            .journal_rows(
+                "SELECT * FROM journal WHERE status = 'done' AND id IN
+                   (SELECT journal_id FROM journal_events WHERE instr(data, '\"located\"') > 0)
+                 ORDER BY id",
+                &[],
+            )?
+            .into_iter()
+            .filter(|e| e.located.iter().any(|l| l.overlay().is_some()))
+            .collect())
     }
 
     pub fn journal_pending(&self) -> Result<Vec<JournalEntry>> {
@@ -863,6 +970,19 @@ fn claimed(ours: &std::collections::HashSet<String>, path: &str) -> bool {
         }
     }
     false
+}
+
+/// The `located` list of one event's data. A list this version cannot
+/// read is an error, not an empty list: an unread place would let purge or
+/// recovery act as if nothing had been found elsewhere (el-1y8uo B2).
+fn located_of(data: &str) -> Result<Vec<Located>> {
+    let v: serde_json::Value = serde_json::from_str(data)?;
+    match v.get("located") {
+        None => Ok(Vec::new()),
+        Some(l) => Ok(serde_json::from_value(l.clone()).map_err(|e| {
+            anyhow::anyhow!("a located record this version cannot read ({e}): {l}")
+        })?),
+    }
 }
 
 fn append_event(

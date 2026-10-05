@@ -14,6 +14,97 @@
 use pc_core::fmt_bytes;
 use std::path::PathBuf;
 
+pub use crate::bound::Role;
+pub use pc_core::whereabouts::Whereabouts;
+
+/// One object an operation moved, returned, kept or looked for, which is not
+/// simply where the record of a finished move says — with its place said
+/// only as far as proven after the last rename (el-3wizg, el-lvtmk R1).
+///
+/// The one typed answer to "where is it" for the command line and the web
+/// alike: both render [`Placed::shown`], nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placed {
+    /// The path the operation recorded for the object: where it was.
+    pub recorded: String,
+    pub role: Role,
+    /// In the operation's keeping — in quarantine, or at its new place —
+    /// rather than back where it came from. Such an object of role
+    /// `Checked`/`Changed` is what a recovery may bring back, by proof.
+    pub held: bool,
+    pub at: Whereabouts,
+}
+
+impl Placed {
+    /// In words: which object, and where it is, as proven.
+    pub fn shown(&self) -> String {
+        let who = match &self.role {
+            Role::Checked => pc_core::tr!("проверенный файл", "the checked file").to_string(),
+            Role::Changed { why } => pc_core::tf!(
+                "проверенный файл, изменённый после проверки ({0})",
+                "the checked file, changed since its check ({0})",
+                why
+            ),
+            Role::Stranger => pc_core::tr!(
+                "другой объект, занявший его имя",
+                "another object that took its name"
+            )
+            .to_string(),
+        };
+        let keeping = if self.held {
+            pc_core::tr!(" (у этой операции)", " (kept by this operation)")
+        } else {
+            ""
+        };
+        format!("{}{keeping}: {}", who, self.at.shown())
+    }
+
+    /// `(recorded path, words)`, as refusals are listed.
+    pub fn line(&self) -> (String, String) {
+        (self.recorded.clone(), self.shown())
+    }
+}
+
+/// A folder a run works in stopped leading to the folder it held: another
+/// program (a sync client, Finder) moved it while the run went on. One such
+/// folder means every further move of the run meets the same doubt, so the
+/// run stops at the first (director decision D2 of el-lvtmk) — after its
+/// own file was put back, or kept and named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderMoved {
+    /// What the move that met it says, in full.
+    pub reason: String,
+}
+
+impl std::fmt::Display for FolderMoved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}. {}",
+            self.reason,
+            pc_core::tr!(
+                "Прогон остановлен: папку, с которой он работает, переместили во время работы, и                  каждый следующий перенос встретил бы то же сомнение",
+                "The run stopped: a folder it works in was moved while it ran, and every further                  move would meet the same doubt"
+            )
+        )
+    }
+}
+
+impl std::error::Error for FolderMoved {}
+
+/// Whether `e` stops a run because a folder of it was moved.
+pub fn is_folder_moved(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<FolderMoved>().is_some()
+        || e.downcast_ref::<Halted>()
+            .is_some_and(|h| h.cause.downcast_ref::<FolderMoved>().is_some())
+}
+
+/// Whether `e` stops a run rather than refusing one item: the volume cannot
+/// move without replacing, or a folder of the run was moved.
+pub fn is_run_stop(e: &anyhow::Error) -> bool {
+    is_no_exclusive_rename(e) || is_folder_moved(e)
+}
+
 /// Work actually done. Planned quantities never enter it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Tally {
@@ -31,9 +122,8 @@ pub struct Tally {
     pub bytes: u64,
     /// Journal entries walked back completely.
     pub entries_back: u64,
-    /// Journal entries of which only part came back: still open, retryable.
-    pub entries_partial: u64,
-    /// Files brought back, in complete and partial entries alike.
+    /// Files brought back. An entry comes back whole or not at all (user
+    /// decision (c)), so there is no partly walked-back entry to count.
     pub files_back: u64,
 }
 
@@ -46,7 +136,6 @@ impl Tally {
         self.litter += o.litter;
         self.bytes += o.bytes;
         self.entries_back += o.entries_back;
-        self.entries_partial += o.entries_partial;
         self.files_back += o.files_back;
     }
 
@@ -123,17 +212,6 @@ impl Tally {
                 ["entry walked back", "entries walked back"],
             ));
         }
-        if self.entries_partial > 0 {
-            parts.push(pc_core::count(
-                self.entries_partial as i64,
-                [
-                    "запись отменена частично",
-                    "записи отменены частично",
-                    "записей отменено частично",
-                ],
-                ["entry walked back in part", "entries walked back in part"],
-            ));
-        }
         if self.files_back > 0 {
             parts.push(pc_core::count(
                 self.files_back as i64,
@@ -171,10 +249,31 @@ pub struct Stopped {
     /// touched (el-1y8uo B3): they stay `pending`, and what they moved is
     /// recovered by reconciling them, not by an ordinary undo.
     pub pending: Vec<i64>,
+    /// Objects not simply where the record says, with their proven place.
+    pub placed: Vec<Placed>,
 }
 
 impl Stopped {
     fn tail(&self) -> String {
+        let core = self.tail_core();
+        if self.placed.is_empty() {
+            return core;
+        }
+        format!(
+            "{core} {}",
+            pc_core::tf!(
+                "Где что находится: {0}.",
+                "Where things are: {0}.",
+                self.placed
+                    .iter()
+                    .map(|p| format!("{} — {}", p.recorded, p.shown()))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        )
+    }
+
+    fn tail_core(&self) -> String {
         let moved = self.done.summary();
         if !self.pending.is_empty() {
             let ids = self
@@ -346,6 +445,7 @@ pub fn stop_run(
                     route,
                     refused,
                     pending: Vec::new(),
+                    placed: Vec::new(),
                 })
             }
         }
@@ -370,6 +470,7 @@ pub fn stop_run(
             route,
             refused,
             pending: Vec::new(),
+            placed: Vec::new(),
         },
     }
     .into()
@@ -385,6 +486,7 @@ pub(crate) fn left_pending(mut e: anyhow::Error, id: i64, route: Route) -> anyho
             route,
             refused: Vec::new(),
             pending: Vec::new(),
+            placed: Vec::new(),
         })
     } else if let Some(h) = e.downcast_mut::<Halted>() {
         &mut h.run
@@ -396,6 +498,7 @@ pub(crate) fn left_pending(mut e: anyhow::Error, id: i64, route: Route) -> anyho
                 route,
                 refused: Vec::new(),
                 pending: vec![id],
+                placed: Vec::new(),
             },
         }
         .into();
@@ -404,6 +507,47 @@ pub(crate) fn left_pending(mut e: anyhow::Error, id: i64, route: Route) -> anyho
         run.pending.push(id);
     }
     e
+}
+
+/// `e` carries `placed`: the objects of the stopped or refused work and
+/// where they are. An error that carried no stop becomes one, with nothing
+/// done, so the places are said wherever the error goes.
+pub(crate) fn with_placed(
+    mut e: anyhow::Error,
+    placed: Vec<Placed>,
+    route: Route,
+) -> anyhow::Error {
+    if placed.is_empty() {
+        return e;
+    }
+    if let Some(n) = e.downcast_mut::<NoExclusiveRename>() {
+        n.run
+            .get_or_insert_with(|| Stopped {
+                done: Tally::default(),
+                route,
+                refused: Vec::new(),
+                pending: Vec::new(),
+                placed: Vec::new(),
+            })
+            .placed
+            .extend(placed);
+        return e;
+    }
+    if let Some(h) = e.downcast_mut::<Halted>() {
+        h.run.placed.extend(placed);
+        return e;
+    }
+    Halted {
+        cause: e,
+        run: Stopped {
+            done: Tally::default(),
+            route,
+            refused: Vec::new(),
+            pending: Vec::new(),
+            placed,
+        },
+    }
+    .into()
 }
 
 #[cfg(test)]

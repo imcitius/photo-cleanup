@@ -1041,6 +1041,10 @@ fn cmd_plan(
     for (path, why) in &report.refused {
         println!("  refused: {path} — {why}");
     }
+    print_placed(&report.placed);
+    if let Some(e) = report.stop_error() {
+        return Err(e);
+    }
     println!(
         "\nNo space has come back yet — the files are in quarantine.\n\
          To bring one back: photo-cleanup derived undo --journal <id>\n\
@@ -1071,6 +1075,16 @@ fn print_stop(e: &anyhow::Error) {
     }
     for id in &stop.pending {
         println!("  pending: journal entry #{id} could not be completed — reconcile it");
+    }
+    print_placed(&stop.placed);
+}
+
+/// Where each object not simply at its recorded place is, as proven — the
+/// same words the web shows for the same typed outcome.
+fn print_placed(placed: &[pc_apply::Placed]) {
+    for p in placed {
+        let (path, words) = p.line();
+        println!("  where: {path} — {words}");
     }
 }
 
@@ -1186,6 +1200,11 @@ fn cmd_organize(db: &Db, a: &OrganizeArgs, execute: bool) -> Result<()> {
 
     let run_id = db.latest_run()?.context("no runs yet; run scan first")?;
     let report = pc_apply::organize(db, run_id, &plan.moves).inspect_err(print_stop)?;
+    print_placed(&report.placed);
+    if let Some(e) = report.stop_error(run_id) {
+        print_stop(&e);
+        return Err(e);
+    }
 
     println!("\nMoved: {}", report.done.summary());
     if report.done.litter > 0 {
@@ -1315,17 +1334,52 @@ fn cmd_status(db: &Db) -> Result<()> {
 
     let q = pc_apply::quarantined_totals(db)?;
     println!("\nIn quarantine:           {}", q.summary());
+    // Objects an operation kept away from their recorded place — an undo
+    // whose folder moved under it — with the place the journal last proved
+    // or saw (el-lvtmk R6).
+    let away = db.journal_located()?;
+    if !away.is_empty() {
+        println!(
+            "\nKept away from their recorded place: {} journal entries — `photo-cleanup derived undo --journal <id>` brings each back by its evidence, whole or not at all.",
+            away.len()
+        );
+        for e in away.iter().take(10) {
+            for l in e.located.iter().filter(|l| l.overlay().is_some()) {
+                println!("  #{} {} — {}{}", e.id, l.src, l.at.shown(), manual(l));
+            }
+        }
+    }
     let pend = db.journal_pending()?;
     if !pend.is_empty() {
         println!(
-            "\nWARNING: {} unfinished journal entries — a run was interrupted.",
+            "\nWARNING: {} unfinished journal entries — a run was interrupted, or a photograph and its companions could not be put back whole. Reconcile them (the Journal page in the web interface).",
             pend.len()
         );
         for e in pend.iter().take(5) {
             println!("  #{} {} {}", e.id, e.op, e.src);
+            // Every member's place as last recorded, proven or not.
+            let mut last: Vec<&pc_db::Located> = Vec::new();
+            for l in e.located.iter().rev() {
+                if !last.iter().any(|k| k.src == l.src && k.dst == l.dst) {
+                    last.push(l);
+                }
+            }
+            for l in last.into_iter().rev() {
+                println!("      {} — {}{}", l.src, l.at.shown(), manual(l));
+            }
         }
     }
     Ok(())
+}
+
+/// A photograph that changed after its check and stayed with the tool is
+/// never recovered automatically (user decision (c), point 4).
+fn manual(l: &pc_db::Located) -> &'static str {
+    if l.held && l.role == "changed" {
+        " — changed after its check: recover it by hand"
+    } else {
+        ""
+    }
 }
 
 fn cmd_catalogs(db: &Db) -> Result<()> {

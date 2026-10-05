@@ -14,8 +14,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::files::{companion_plan, evidence, moved_bytes};
+use crate::located::Way;
 use crate::outcome::left_pending;
-use crate::rename_with_parents;
 use crate::{Route, Tally};
 
 #[derive(Debug, Default)]
@@ -28,6 +28,25 @@ pub struct OrganizeReport {
     /// Folders the run emptied are not in it: they are simply left where
     /// they are (el-1y8uo B1, nothing is ever removed).
     pub refused: Vec<(String, String)>,
+    /// Every object not simply where the record says, with its proven
+    /// place (el-lvtmk R1).
+    pub placed: Vec<crate::Placed>,
+    /// The run stopped early because a folder of it was moved
+    /// (el-lvtmk D2); the files after it are in `refused` as not tried.
+    pub stopped: Option<crate::FolderMoved>,
+}
+
+impl OrganizeReport {
+    /// The error that ends the run, if it stopped: what moved before it and
+    /// where everything is, typed.
+    pub fn stop_error(&self, run_id: i64) -> Option<anyhow::Error> {
+        let stop = self.stopped.clone()?;
+        Some(crate::outcome::with_placed(
+            stopped(stop.into(), self, run_id),
+            self.placed.clone(),
+            Route::Organize { run_id },
+        ))
+    }
 }
 
 pub(crate) fn stem_of(name: &str) -> &str {
@@ -74,7 +93,23 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
     crate::check_organize(moves)?;
     let roots: BTreeSet<PathBuf> = db.all_run_roots()?.into_iter().map(PathBuf::from).collect();
 
-    for m in moves {
+    let held = crate::RunRoots::hold(db, moves.iter().map(|m| m.src.as_str()))?;
+    let mut todo = moves.iter();
+    while let Some(m) = todo.next() {
+        if report.stopped.is_none() {
+            report.stopped = held.check().err();
+        }
+        if report.stopped.is_some() {
+            report
+                .refused
+                .push((m.src.clone(), crate::files::not_tried_folder()));
+            for left in todo.by_ref() {
+                report
+                    .refused
+                    .push((left.src.clone(), crate::files::not_tried_folder()));
+            }
+            break;
+        }
         let src = Path::new(&m.src);
         let dst = Path::new(&m.dst);
 
@@ -122,15 +157,56 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
             dst: m.dst.clone(),
             proof: frame_proof,
         }];
+        // Every sidecar goes with the photograph or none does (user decision
+        // (c)): one that cannot be proven, or whose new name is taken,
+        // refuses the photograph too, before anything moves.
+        let mut refusal = None;
         for side in companion_plan(src, dst) {
-            let Ok(proof) = evidence(&side.src) else {
-                continue;
+            let proof = match evidence(&side.src) {
+                Ok(Some(p)) if !side.taken => p,
+                Ok(Some(_)) => {
+                    refusal = Some(pc_core::tf!(
+                        "спутник {0}: цель занята: {1}",
+                        "companion {0}: destination taken: {1}",
+                        side.src.display(),
+                        side.dst.display()
+                    ));
+                    break;
+                }
+                Ok(None) => {
+                    refusal = Some(pc_core::tf!(
+                        "спутник {0}: эта система не умеет назвать объект файловой системы",
+                        "companion {0}: this system cannot name a file system object",
+                        side.src.display()
+                    ));
+                    break;
+                }
+                Err(e) => {
+                    refusal = Some(pc_core::tf!(
+                        "спутник {0}: {1}",
+                        "companion {0}: {1}",
+                        side.src.display(),
+                        format!("{e:#}")
+                    ));
+                    break;
+                }
             };
             planned.push(pc_db::Moved {
                 src: side.src.to_string_lossy().into_owned(),
                 dst: side.dst.to_string_lossy().into_owned(),
-                proof,
+                proof: Some(proof),
             });
+        }
+        if let Some(why) = refusal {
+            report.refused.push((
+                m.src.clone(),
+                pc_core::tf!(
+                    "{0}; кадр со спутниками не переносится, ничего не перенесено",
+                    "{0}; the frame and its companions are not moved, nothing moved",
+                    why
+                ),
+            ));
+            continue;
         }
 
         // Nothing of this file has moved yet; earlier files may have. A
@@ -150,130 +226,94 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
             Err(e) => return Err(stopped(e, &report, run_id)),
         };
 
-        match rename_with_parents(src, dst) {
-            Ok(()) => {
-                if let Some(parent) = src.parent() {
-                    source_dirs.insert(parent.to_path_buf());
-                }
-                let (carried, failed, stop) = crate::carry(&planned[1..]);
-                let done_list: Vec<pc_db::Moved> =
-                    std::iter::once(planned[0].clone()).chain(carried).collect();
-                let moved_with = done_list.len() as u64 - 1;
-                report.refused.extend(failed.iter().cloned());
-                report.done.add(&Tally {
-                    frames: 1,
-                    companions: moved_with,
-                    bytes: moved_bytes(&done_list),
-                    ..Default::default()
-                });
-
-                let note = match (&m.renamed_from, moved_with) {
-                    (Some(old), 0) => {
-                        Some(pc_core::tf!("переименован из {0}", "renamed from {0}", old))
-                    }
-                    (Some(old), n) => Some(pc_core::tf!(
-                        "переименован из {0}, спутников {1}",
-                        "renamed from {0}, {1} companions",
-                        old,
-                        n
-                    )),
-                    (None, 0) => None,
-                    (None, n) => Some(pc_core::tf!(
-                        "спутников перенесено: {0}",
-                        "companions moved: {0}",
-                        n
-                    )),
-                };
-                let note = match failed.as_slice() {
-                    [] => note,
-                    f => Some(format!(
-                        "{}{}",
-                        note.map(|n| format!("{n}; ")).unwrap_or_default(),
-                        pc_core::tf!("не перенеслось: {0}", "not moved: {0}", crate::listed(f))
-                    )),
-                };
-                let mut closed = false;
-                let persisted = (|| -> Result<()> {
-                    db.journal_finalize(
-                        jid,
-                        &done_list,
-                        done_list.len() as i64,
-                        moved_bytes(&done_list) as i64,
-                    )?;
-                    let kind = if failed.is_empty() { "done" } else { "partial" };
-                    db.journal_close(
-                        jid,
-                        JournalStatus::Done,
-                        &pc_db::Event {
-                            text: note.as_deref().unwrap_or_default(),
-                            moved: &done_list,
-                            refused: &failed,
-                            error: stop.as_ref().map(|e| e.to_string()).as_deref(),
-                            ..pc_db::Event::new("forward", kind)
-                        },
-                    )?;
-                    closed = true;
-                    let name = m.name().to_string();
-                    db.set_file_path(m.file_id, &m.dst, &name)
-                        .with_context(|| {
-                            pc_core::tf!(
-                                "файл перенесён, но индекс не обновлён: {0}",
-                                "the file moved but the index did not follow: {0}",
-                                m.dst
-                            )
-                        })?;
-                    Ok(())
-                })();
-                if let Err(e) = persisted {
-                    let e = stopped(e, &report, run_id);
-                    return Err(if closed {
-                        e
-                    } else {
-                        left_pending(e, jid, route)
-                    });
-                }
-                if let Some(e) = stop {
-                    // The file moved and is journaled; its sidecar met a
-                    // volume that cannot move without replacing. Nothing
-                    // more moves — no litter sweep either.
-                    return Err(stopped(e, &report, run_id));
-                }
+        let members: Vec<crate::unit::Member> =
+            planned.iter().map(crate::unit::Member::forward).collect();
+        let unit = crate::unit::move_unit(&members, Way::Forward, None, &[]);
+        let crate::unit::Unit::Moved(arrived) = unit else {
+            let r = match crate::unit::close_forward(db, jid, "forward", route, unit) {
+                Ok(r) => r,
+                Err(e) => return Err(stopped(e, &report, run_id)),
+            };
+            // One failed rename is a fact about one file; a storm of them
+            // means the destination is wrong, and continuing would spread
+            // the mess across the archive.
+            report.refused.push((m.src.clone(), r.why));
+            report.stopped = r.stop;
+            report.placed.extend(r.placed);
+            if report.refused.len() > 50 && report.done.frames == 0 {
+                bail!(
+                    "{}",
+                    pc_core::tr!(
+                        "слишком много отказов подряд, ничего не перенесено — остановка",
+                        "too many refusals in a row and nothing moved — stopping"
+                    )
+                );
             }
-            Err(e) => {
-                let shown = e.to_string();
-                if let Err(pe) = db.journal_close(
-                    jid,
-                    JournalStatus::Failed,
-                    &pc_db::Event {
-                        text: &shown,
-                        error: Some(&shown),
-                        ..pc_db::Event::new("forward", "refused")
-                    },
-                ) {
-                    let pe = pe.context(shown);
-                    return Err(left_pending(stopped(pe, &report, run_id), jid, route));
-                }
-                if crate::is_no_exclusive_rename(&e) {
-                    // The volume, not this file: nothing more moves.
-                    return Err(stopped(e, &report, run_id));
-                }
-                // One failed rename is a fact about one file; a storm of them
-                // means the destination is wrong, and continuing would spread
-                // the mess across the archive.
-                report.refused.push((m.src.clone(), e.to_string()));
-                if report.refused.len() > 50 && report.done.frames == 0 {
-                    bail!(
-                        "{}",
-                        pc_core::tr!(
-                            "слишком много отказов подряд, ничего не перенесено — остановка",
-                            "too many refusals in a row and nothing moved — stopping"
-                        )
-                    );
-                }
-            }
+            continue;
+        };
+        if let Some(parent) = src.parent() {
+            source_dirs.insert(parent.to_path_buf());
+        }
+        let moved_with = planned.len() as u64 - 1;
+        let done = Tally {
+            frames: 1,
+            companions: moved_with,
+            bytes: moved_bytes(&planned),
+            ..Default::default()
+        };
+        let note = match (&m.renamed_from, moved_with) {
+            (Some(old), 0) => pc_core::tf!("переименован из {0}", "renamed from {0}", old),
+            (Some(old), n) => pc_core::tf!(
+                "переименован из {0}, спутников {1}",
+                "renamed from {0}, {1} companions",
+                old,
+                n
+            ),
+            (None, 0) => String::new(),
+            (None, n) => pc_core::tf!("спутников перенесено: {0}", "companions moved: {0}", n),
+        };
+        let mut closed = false;
+        let persisted = (|| -> Result<()> {
+            db.journal_close(
+                jid,
+                JournalStatus::Done,
+                &pc_db::Event {
+                    text: &note,
+                    moved: &planned,
+                    ..pc_db::Event::new("forward", "done")
+                },
+            )?;
+            closed = true;
+            let name = m.name().to_string();
+            db.set_file_path(m.file_id, &m.dst, &name)
+                .with_context(|| {
+                    pc_core::tf!(
+                        "файл перенесён, но индекс не обновлён: {0}",
+                        "the file moved but the index did not follow: {0}",
+                        m.dst
+                    )
+                })?;
+            Ok(())
+        })();
+        drop(arrived);
+        // Counted as soon as it moved: a journal that then refuses does not
+        // make the move not have happened (el-1y8uo B3).
+        report.done.add(&done);
+        if let Err(e) = persisted {
+            let e = stopped(e, &report, run_id);
+            return Err(if closed {
+                e
+            } else {
+                left_pending(e, jid, route)
+            });
         }
     }
 
+    if report.stopped.is_some() {
+        // A folder of the run was moved: no folder is swept on the strength
+        // of paths read before that.
+        return Ok(report);
+    }
     let mut pending = Vec::new();
     if let Err(e) = sweep_litter(db, run_id, &source_dirs, &roots, &mut report, &mut pending) {
         let mut e = stopped(e, &report, run_id);
@@ -384,51 +424,56 @@ fn sweep_litter(
                 file_count: 1,
                 manifest: &manifest,
             })?;
-            match rename_with_parents(&src, &dst) {
-                Ok(()) => {
-                    // Counted as soon as it moved: a journal that then
-                    // refuses does not make the move not have happened
-                    // (el-1y8uo B3).
-                    report.done.litter += 1;
-                    report.done.bytes += size;
-                    let closed = db.journal_close(
-                        jid,
-                        JournalStatus::Done,
-                        &pc_db::Event {
-                            text: pc_core::tr!(
-                                "служебный файл из опустевшего каталога",
-                                "a service file from an emptied directory"
-                            ),
-                            moved: &manifest,
-                            ..pc_db::Event::new("forward", "done")
-                        },
-                    );
-                    if let Err(e) = closed {
-                        pending.push(jid);
+            let unit = crate::unit::move_unit(
+                &[crate::unit::Member::forward(&manifest[0])],
+                Way::Forward,
+                None,
+                &[],
+            );
+            let crate::unit::Unit::Moved(arrived) = unit else {
+                let r = match crate::unit::close_forward(
+                    db,
+                    jid,
+                    "forward",
+                    Route::Organize { run_id },
+                    unit,
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        if crate::stopped_run(&e).is_some_and(|s| s.pending.contains(&jid)) {
+                            pending.push(jid);
+                        }
                         return Err(e);
                     }
+                };
+                report.placed.extend(r.placed);
+                report.refused.push((src_s, r.why));
+                if let Some(stop) = r.stop {
+                    report.stopped = Some(stop);
+                    return Ok(());
                 }
-                Err(err) => {
-                    let shown = err.to_string();
-                    let closed = db.journal_close(
-                        jid,
-                        JournalStatus::Failed,
-                        &pc_db::Event {
-                            text: &shown,
-                            error: Some(&shown),
-                            ..pc_db::Event::new("forward", "refused")
-                        },
-                    );
-                    if let Err(e) = closed {
-                        pending.push(jid);
-                        return Err(e.context(shown));
-                    }
-                    if crate::is_no_exclusive_rename(&err) {
-                        // The volume: no further service file is tried.
-                        return Err(err);
-                    }
-                    report.refused.push((src_s, err.to_string()));
-                }
+                continue;
+            };
+            // Counted as soon as it moved: a journal that then refuses does
+            // not make the move not have happened (el-1y8uo B3).
+            report.done.litter += 1;
+            report.done.bytes += size;
+            let closed = db.journal_close(
+                jid,
+                JournalStatus::Done,
+                &pc_db::Event {
+                    text: pc_core::tr!(
+                        "служебный файл из опустевшего каталога",
+                        "a service file from an emptied directory"
+                    ),
+                    moved: &manifest,
+                    ..pc_db::Event::new("forward", "done")
+                },
+            );
+            drop(arrived);
+            if let Err(e) = closed {
+                pending.push(jid);
+                return Err(e);
             }
         }
     }
@@ -458,7 +503,8 @@ pub fn undo_run(db: &Db, run_id: i64) -> Result<(Tally, Vec<String>)> {
             // The volume cannot move without replacing: every later entry
             // would meet it too, so the walk stops here, saying how far it
             // got. Its own entry stays `done`, with the reason on it.
-            Err(err) if crate::is_no_exclusive_rename(&err) => {
+            // A folder of the run was moved: the same, for the same reason.
+            Err(err) if crate::is_run_stop(&err) => {
                 return Err(crate::stop_run(err, &back, crate::Route::Restore, failed));
             }
             Err(err) => {

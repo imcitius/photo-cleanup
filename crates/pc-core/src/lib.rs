@@ -11,6 +11,7 @@ pub mod storage;
 pub mod thumbstore;
 pub mod time;
 pub mod volume;
+pub mod whereabouts;
 
 pub use bytes::fmt_bytes;
 pub use disk::{dev_of_nearest_existing, Disk, DiskMap};

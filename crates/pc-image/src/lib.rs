@@ -11,7 +11,7 @@ pub mod tiff;
 
 pub use meta::{ImageMeta, Provenance};
 pub use metrics::Metrics;
-pub use read::{read_for_probe, Read1};
+pub use read::{read_for_probe, read_for_probe_from, Read1};
 pub use sniff::{sniff, Container};
 pub use thumb::{Thumbnail, GRAY_SIDE, THUMB_SIZE};
 

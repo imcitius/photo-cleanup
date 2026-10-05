@@ -63,9 +63,10 @@ async fn diagnosis_api_offers_identity_proven_partial_undo() {
     assert_eq!(std::fs::read(&home).unwrap(), b"our frame");
 }
 
-/// The same row read by both: where the frame at home is the one the undo
-/// brought back, both offer the retry; where it is someone else's file,
-/// both refuse, and nothing moves.
+/// The same row read by both. A refused first undo leaves the frame held
+/// with its sidecar (user decision (c)); where someone else's file takes the
+/// frame's name at home, both refuse and nothing moves; once it is gone,
+/// both offer the undo again.
 #[cfg(unix)]
 #[tokio::test]
 async fn cli_and_api_share_recovery_classification() {
@@ -78,8 +79,8 @@ async fn cli_and_api_share_recovery_classification() {
         assert!(pc_apply::undo(&db, id).is_err());
     }
     std::fs::remove_file(&side).unwrap();
+    assert!(std::fs::symlink_metadata(&home).is_err(), "half undo");
     // Someone else's file takes the frame's name at home.
-    std::fs::rename(&home, f.archive.join("frame-moved-by-user.arw")).unwrap();
     std::fs::write(&home, b"someone else's frame").unwrap();
 
     let (status, web) = f
@@ -98,23 +99,23 @@ async fn cli_and_api_share_recovery_classification() {
         assert!(pc_apply::undo(&db, id).is_err());
     }
     assert_eq!(std::fs::read(&home).unwrap(), b"someone else's frame");
+    assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
     assert_eq!(
         std::fs::read(held.with_extension("xmp")).unwrap(),
         b"our edits"
     );
 
-    // The frame returns to its place: both offer the retry again.
-    std::fs::remove_file(&home).unwrap();
-    std::fs::rename(f.archive.join("frame-moved-by-user.arw"), &home).unwrap();
+    // The name is free again: both offer the undo again.
+    std::fs::rename(&home, f.archive.join("someone-elses-frame.arw")).unwrap();
     let preview = f.preview("journal-undo", json!({"journal_id":id})).await;
     assert_eq!(preview["items"].as_array().unwrap().len(), 1, "{preview}");
 }
 
-/// A photograph whose sidecar's place in quarantine is taken: the command
-/// line moves the photograph and reports the sidecar left at home; the web
-/// does the same, and says so in the job, instead of refusing the frame.
+/// A photograph whose sidecar's place in quarantine is taken: the frame and
+/// its companions are one unit (user decision (c)), so on the web, as on the
+/// command line, neither moves, and the job says which sidecar held it.
 #[tokio::test]
-async fn a_successful_frame_with_a_refused_sidecar_keeps_its_receipt() {
+async fn a_frame_whose_sidecar_cannot_follow_stays_and_the_job_says_why() {
     let f = Fixture::new();
     let img = image::RgbImage::from_fn(200, 150, |x, y| {
         image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
@@ -149,8 +150,11 @@ async fn a_successful_frame_with_a_refused_sidecar_keeps_its_receipt() {
     assert_eq!(preview["items"].as_array().unwrap().len(), 1, "{preview}");
     let job = f.apply(&preview).await;
 
-    assert_eq!(job["state"], "done", "{job}");
-    assert!(dst.is_file(), "the photograph did not move");
+    assert!(
+        !dst.exists(),
+        "the photograph moved without its sidecar: {job}"
+    );
+    assert_eq!(std::fs::read(&photo).unwrap(), encoded);
     assert_eq!(std::fs::read(&side).unwrap(), b"my edits");
     assert_eq!(std::fs::read(&taken).unwrap(), b"someone else's edits");
     let said = job["progress"].to_string();
@@ -377,4 +381,102 @@ async fn a_database_failure_after_a_move_keeps_the_receipt_in_the_job() {
     let err = job["error"].as_str().unwrap();
     assert!(err.contains(&receipt), "{receipt} missing: {err}");
     assert!(err.contains("review second journal failure"), "{err}");
+}
+
+/// el-lvtmk §5 test 23. One photograph, reorganised on two equivalent
+/// fixtures — by the command line's engine in one call, by the web action
+/// by action. After the rename another program moves the destination folder
+/// aside and takes the photograph's old name, so the move cannot be put back
+/// and the photograph stays where it landed. Both stop the run, and both say
+/// where it is with the same typed value: the web's job carries every line
+/// the command line prints from `Placed`.
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_and_api_render_the_same_retained_outcome() {
+    fn retain_after_rename(marker: &str) -> pc_apply::race::SyscallSharedGuard {
+        let mut fired = false;
+        pc_apply::race::at_rename_under(marker, move |at, src, dst| {
+            if at == pc_apply::race::Syscall::After
+                && !fired
+                && src.file_name().is_some_and(|n| n == "frame.jpg")
+            {
+                fired = true;
+                let folder = dst.parent().unwrap();
+                let mut parked = folder.as_os_str().to_owned();
+                parked.push("-parked");
+                std::fs::rename(folder, &parked).unwrap();
+                std::fs::write(src, b"another program's file").unwrap();
+            }
+            Ok(())
+        })
+    }
+    fn normal(text: &str, root: &std::path::Path) -> String {
+        text.replace(&root.display().to_string(), "$ROOT")
+    }
+
+    // The command line's path.
+    let cli = Fixture::new();
+    let cli_marker = "retained-parity-cli";
+    frame_with_litter(&cli, cli_marker);
+    let cli_dest = cli.archive.join("new");
+    std::fs::create_dir(&cli_dest).unwrap();
+    let cli_report = {
+        let _race = retain_after_rename(cli_marker);
+        let db = cli.state.db.lock().unwrap();
+        let plan = pc_organize::compute(
+            &db,
+            &pc_organize::Options {
+                root: cli_dest.clone(),
+                gap_secs: 21600,
+                respect_lightroom: true,
+                skip_uncertain: false,
+            },
+        )
+        .unwrap();
+        let run = db.latest_run().unwrap().unwrap();
+        pc_apply::organize(&db, run, &plan.moves).unwrap_err()
+    };
+    // Kept by the operation: the run stops and its row stays open (user
+    // decision (c)); the stop carries every place, typed.
+    let stop = pc_apply::stopped_run(&cli_report).expect("typed stop");
+    assert_eq!(stop.pending.len(), 1, "{cli_report:#}");
+    let held: Vec<&pc_apply::Placed> = stop.placed.iter().filter(|p| p.held).collect();
+    assert_eq!(held.len(), 1, "{cli_report:#}");
+    assert!(held[0].at.at().is_some(), "{:?}", held[0]);
+    let cli_root = cli.archive.parent().unwrap().to_path_buf();
+    let lines: Vec<String> = stop
+        .placed
+        .iter()
+        .map(|p| {
+            let (path, words) = p.line();
+            normal(&format!("{path} — {words}"), &cli_root)
+        })
+        .collect();
+
+    // The web's path: preview, token, confirmation, job.
+    let api = Fixture::new();
+    let api_marker = "retained-parity-api";
+    frame_with_litter(&api, api_marker);
+    let api_dest = api.archive.join("new");
+    std::fs::create_dir(&api_dest).unwrap();
+    let plan = api
+        .preview(
+            "organize-apply",
+            json!({"root":api_dest,"allow_duplicates":true}),
+        )
+        .await;
+    let job = {
+        let _race = retain_after_rename(api_marker);
+        api.apply(&plan).await
+    };
+    assert_eq!(
+        job["state"], "failed",
+        "a moved folder stops the job: {job}"
+    );
+    let api_root = api.archive.parent().unwrap().to_path_buf();
+    let said = normal(&job.to_string().replace("\\\"", "\""), &api_root);
+    for line in &lines {
+        let line = line.replace(cli_marker, api_marker);
+        assert!(said.contains(&line), "web lacks «{line}»: {said}");
+    }
 }

@@ -142,6 +142,63 @@ impl Proof {
             _ => Verdict::Same,
         }
     }
+
+    /// [`Proof::check`] of an open file, and — where the evidence carries
+    /// one — its content hash, read through that same open file. A move
+    /// compares with this before and after its rename, so both sides of it
+    /// ask exactly the same question.
+    pub fn check_file(&self, file: &std::fs::File) -> Verdict {
+        let md = match file.metadata() {
+            Ok(md) => md,
+            Err(_) => return Verdict::Unprovable("it can no longer be read"),
+        };
+        match self.check(&md) {
+            Verdict::Same => {}
+            other => return other,
+        }
+        let Some(want) = &self.blake3 else {
+            return Verdict::Same;
+        };
+        match hash_of(file) {
+            Some(got) if got.eq_ignore_ascii_case(want) => Verdict::Same,
+            Some(_) => Verdict::Differs("its content changed"),
+            None => Verdict::Unprovable("its content can no longer be read"),
+        }
+    }
+
+    /// Short evidence for a refusal: what was checked, or what was found.
+    pub fn shown(&self) -> String {
+        format!(
+            "dev {} inode {}, size {}, mtime {} ns",
+            self.dev,
+            self.ino,
+            self.size.map_or("-".into(), |s| s.to_string()),
+            self.mtime_ns.map_or("-".into(), |t| t.to_string())
+        )
+    }
+}
+
+/// BLAKE3 of the whole file, read by offset so the descriptor's position
+/// (and whoever else reads through it) is not disturbed.
+#[cfg(unix)]
+fn hash_of(file: &std::fs::File) -> Option<String> {
+    use std::os::unix::fs::FileExt;
+    let mut h = blake3::Hasher::new();
+    let mut buf = vec![0u8; 1 << 16];
+    let mut at = 0u64;
+    loop {
+        let n = file.read_at(&mut buf, at).ok()?;
+        if n == 0 {
+            return Some(h.finalize().to_hex().to_string());
+        }
+        h.update(&buf[..n]);
+        at += n as u64;
+    }
+}
+
+#[cfg(not(unix))]
+fn hash_of(_: &std::fs::File) -> Option<String> {
+    None
 }
 
 #[cfg(all(test, unix))]
@@ -165,6 +222,21 @@ mod tests {
             p.check(&fs::symlink_metadata(&b).unwrap()),
             Verdict::Differs(_)
         ));
+    }
+
+    #[test]
+    fn a_journaled_hash_is_compared_through_the_open_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        fs::write(&a, b"frame").unwrap();
+        let f = fs::File::open(&a).unwrap();
+        let mut p = Proof::of(&f.metadata().unwrap()).unwrap();
+        assert_eq!(p.check_file(&f), Verdict::Same);
+        p.blake3 = Some(blake3::hash(b"frame").to_hex().to_string());
+        assert_eq!(p.check_file(&f), Verdict::Same);
+        // Same metadata, other content on record: the hash decides.
+        p.blake3 = Some(blake3::hash(b"other").to_hex().to_string());
+        assert!(matches!(p.check_file(&f), Verdict::Differs(_)));
     }
 
     #[test]

@@ -22,6 +22,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+pub use crate::whereabouts::Whereabouts;
+
 /// `(device, inode)` of an object, as `fstat`/`fstatat` report it.
 pub type Ident = (u64, u64);
 
@@ -187,6 +189,141 @@ impl Dir {
     pub fn sync(&self) -> io::Result<()> {
         self.fd.sync_all()
     }
+
+    /// Where the folder held is now, as the system names it from the
+    /// descriptor (`F_GETPATH` on macOS, `/proc/self/fd` on Linux); `None`
+    /// where the system does not say. Nothing is searched.
+    pub fn current_path(&self) -> Option<PathBuf> {
+        current_path(&self.fd)
+    }
+
+    /// The same folder, held by a second descriptor.
+    pub fn try_clone(&self) -> io::Result<Dir> {
+        Ok(Dir {
+            fd: self.fd.try_clone()?,
+            path: self.path.clone(),
+        })
+    }
+
+    /// `path` leads to this folder now (following links on the way, as the
+    /// user's own path would).
+    pub fn is_at(&self, path: &Path) -> bool {
+        match (std::fs::metadata(path), self.ident()) {
+            (Ok(now), Ok(held)) => ident_of(&now) == held,
+            _ => false,
+        }
+    }
+}
+
+/// Where an open file is now, as the system names it from the descriptor;
+/// `None` where it does not say. Unverified: see [`locate`].
+pub fn current_path_of(file: &File) -> Option<PathBuf> {
+    current_path(file)
+}
+
+/// Where the object `obj` is, proven (el-lvtmk §3.1).
+///
+/// `dir` is the folder held for it and `name` the name it was given there;
+/// `recorded` is the full path the caller would state. `Verified` needs all
+/// of: the name in the held folder bears `obj`; a path to that folder — the
+/// recorded one first, else the one the system names from the descriptor —
+/// leads to the held folder now; and that path joined with the name bears
+/// `obj`. If the object is not in the folder, the open file `file` (when
+/// there is one) says whether it still has a name at all (`Unlinked`) and
+/// where the system thinks it is, which is proven the same way.
+///
+/// Nothing is searched. Anything short of proof is `Uncertain`, with the
+/// last place seen, unverified.
+pub fn locate(
+    dir: &Dir,
+    name: &str,
+    obj: Ident,
+    recorded: Option<&Path>,
+    file: Option<&File>,
+) -> Whereabouts {
+    let bears = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| ident_of(&m) == obj);
+    if matches!(dir.stat_at(name), Ok((id, _)) if id == obj) {
+        let mut tried = Vec::new();
+        if let Some(r) = recorded {
+            if r.file_name().and_then(|n| n.to_str()) == Some(name) {
+                tried.push(r.to_path_buf());
+            }
+        }
+        tried.push(dir.join(name));
+        let now = dir.current_path().map(|p| p.join(name));
+        if let Some(p) = &now {
+            tried.push(p.clone());
+        }
+        for p in &tried {
+            let folder = p.parent().unwrap_or(Path::new("."));
+            if dir.is_at(folder) && bears(p) {
+                return Whereabouts::verified(p.clone());
+            }
+        }
+        return Whereabouts::uncertain(
+            now.or_else(|| Some(dir.join(name))),
+            crate::tr!(
+                "папку, где он лежит, нельзя назвать путём, который туда ведёт",
+                "the folder it is in cannot be named by a path that leads there"
+            ),
+        );
+    }
+    let Some(f) = file else {
+        return Whereabouts::uncertain(
+            None,
+            crate::tf!(
+                "под именем {0} в его папке его больше нет",
+                "it no longer bears the name {0} in its folder",
+                name
+            ),
+        );
+    };
+    match f.metadata() {
+        Ok(md) if ident_of(&md) == obj && std::os::unix::fs::MetadataExt::nlink(&md) == 0 => {
+            return Whereabouts::Unlinked
+        }
+        _ => {}
+    }
+    match current_path(f) {
+        Some(p) if bears(&p) => Whereabouts::verified(p),
+        Some(p) => Whereabouts::uncertain(
+            Some(p),
+            crate::tr!(
+                "система называет это место, но под этим именем уже не он",
+                "the system names this place, but the name no longer bears it"
+            ),
+        ),
+        None => Whereabouts::uncertain(
+            None,
+            crate::tr!(
+                "его нет в его папке, а система не говорит, где он",
+                "it is not in its folder, and the system does not say where it is"
+            ),
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn current_path(file: &File) -> Option<PathBuf> {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most MAXPATHLEN bytes into `buf`.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0)?;
+    Some(std::ffi::OsStr::from_bytes(&buf[..end]).into())
+}
+
+#[cfg(target_os = "linux")]
+fn current_path(file: &File) -> Option<PathBuf> {
+    let path = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()?;
+    // A removed folder is shown with this suffix; it has no place then.
+    (!path.to_string_lossy().ends_with(" (deleted)")).then_some(path)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn current_path(_: &File) -> Option<PathBuf> {
+    None
 }
 
 /// Tests only: what another program does at a boundary of this module.

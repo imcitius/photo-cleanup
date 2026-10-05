@@ -399,7 +399,9 @@ fn every_forward_outcome_has_a_structured_event() {
         "{ev:?}"
     );
 
-    // Partial: the frame moves, its sidecar meets a stranger.
+    // No partial outcome any more (user decision (c)): the frame moves, its
+    // sidecar meets a stranger, and the frame is put back — a refusal,
+    // with where the frame was proven to be.
     let a = archive();
     let src = a.dir.join("frame.arw");
     fs::write(&src, b"frame one").unwrap();
@@ -417,7 +419,9 @@ fn every_forward_outcome_has_a_structured_event() {
     let ev = a.db.journal_events(id).unwrap();
     assert!(
         ev.iter()
-            .any(|e| e.phase == "forward" && e.kind == "partial" && e.data.is_some()),
+            .any(|e| e.phase == "forward" && e.kind == "refused" && e.data.is_some()),
         "{ev:?}"
     );
+    assert!(!ev.iter().any(|e| e.kind == "partial"), "{ev:?}");
+    assert_eq!(fs::read(&src).unwrap(), b"frame one");
 }

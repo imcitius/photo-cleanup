@@ -881,7 +881,7 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 db.journal_by_run_op(num(&r.params, "run_id", 0), "organize")?
             };
             for e in entries {
-                if e.status != pc_db::JournalStatus::Done {
+                if !pc_apply::undo_offered(&e) {
                     add_refusal(
                         e.src.clone(),
                         pc_core::tr!(
@@ -898,20 +898,24 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 // is offered; a stranger at its name is refused, here and
                 // on the command line alike.
                 let looks = pc_apply::undo_preview(&e)?;
-                let frame = looks.iter().find(|i| i.src == e.src);
-                if let Some(why) = frame.and_then(pc_apply::Item::why) {
-                    add_refusal(e.src.clone(), why);
+                // The frame and its companions come back together or not at
+                // all (user decision (c)): one doubt refuses the entry, as
+                // the undo itself does.
+                let doubts: Vec<(String, String)> = looks
+                    .iter()
+                    .filter_map(|i| i.why().map(|w| (i.src.clone(), w)))
+                    .collect();
+                if !doubts.is_empty() {
+                    for (src, why) in doubts {
+                        add_refusal(src, why);
+                    }
                     continue;
                 }
                 let mut rest = Vec::new();
                 for i in looks.iter().filter(|i| i.src != e.src) {
-                    match i.why() {
-                        Some(why) => add_refusal(i.src.clone(), why),
-                        None if i.standing == pc_apply::Standing::Moved => {
-                            let size = std::fs::metadata(&i.dst).map(|m| m.len()).unwrap_or(0);
-                            rest.push(json!({"path": i.dst, "dst": i.src, "size": size}));
-                        }
-                        None => {}
+                    if i.standing == pc_apply::Standing::Moved {
+                        let size = std::fs::metadata(&i.dst).map(|m| m.len()).unwrap_or(0);
+                        rest.push(json!({"path": i.dst, "dst": i.src, "size": size}));
                     }
                 }
                 let mut item = json!({"journal_id":e.id,"path":e.dst,"dst":e.src,"size":e.size,"file_count":e.file_count});
@@ -1123,7 +1127,7 @@ pub fn apply_action(
                 done,
                 ..Default::default()
             }),
-            Err(e) if pc_apply::is_no_exclusive_rename(&e) => Err(e),
+            Err(e) if pc_apply::is_run_stop(&e) => Err(e),
             Err(e) => {
                 let done = pc_apply::stopped_run(&e)
                     .map(|s| s.done.clone())
@@ -1135,14 +1139,27 @@ pub fn apply_action(
     Ok(match a {
         Action::Copy(c) => {
             let filed = pc_apply::files::quarantine_file(db, run, c, root.as_deref())?;
-            if filed.outcome == pc_apply::FileOutcome::Refused {
-                return Ok(ActionResult::refused(filed.why, filed.done));
+            // A folder of the run was moved: the run stops, as on the
+            // command line, with the same typed outcome (el-lvtmk D2).
+            if let Some(e) = filed.stop_error() {
+                return Err(e);
             }
-            let warnings = if filed.why.is_empty() {
+            // Where each object is, as proven: the same lines the command
+            // line prints for the same typed outcome.
+            let placed: Vec<(String, String)> =
+                filed.placed.iter().map(pc_apply::Placed::line).collect();
+            if filed.outcome == pc_apply::FileOutcome::Refused {
+                return Ok(ActionResult {
+                    warnings: placed,
+                    ..ActionResult::refused(filed.why, filed.done)
+                });
+            }
+            let mut warnings = if filed.why.is_empty() {
                 Vec::new()
             } else {
                 vec![(c.path.clone(), filed.why)]
             };
+            warnings.extend(placed);
             ActionResult {
                 done: filed.done,
                 refused: None,
@@ -1184,18 +1201,28 @@ pub fn apply_action(
                 ));
             }
             let report = pc_apply::organize(db, run, std::slice::from_ref(m))?;
+            if let Some(e) = report.stop_error(run) {
+                return Err(e);
+            }
+            let placed: Vec<(String, String)> =
+                report.placed.iter().map(pc_apply::Placed::line).collect();
             if report.done.frames == 0 {
                 let why = report
                     .refused
                     .first()
                     .map(|(path, why)| format!("{path}: {why}"))
                     .unwrap_or_default();
-                return Ok(ActionResult::refused(why, report.done));
+                return Ok(ActionResult {
+                    warnings: placed,
+                    ..ActionResult::refused(why, report.done)
+                });
             }
+            let mut warnings = report.refused;
+            warnings.extend(placed);
             ActionResult {
                 done: report.done,
                 refused: None,
-                warnings: report.refused,
+                warnings,
             }
         }
         Action::Undo(e) => per_entry(pc_apply::undo(db, e.id))?,

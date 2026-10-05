@@ -11,7 +11,7 @@ use pc_family::plan::Candidate;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::{rename_with_parents, Tally};
+use crate::Tally;
 
 /// Files that belong to a photograph and must travel with it.
 ///
@@ -99,11 +99,19 @@ pub fn companion_plan(src: &Path, dst: &Path) -> Vec<Companion> {
 /// index recorded. The index may be hours old; this is the last moment before
 /// something becomes hard to undo, and it is the moment worth paying for.
 pub fn same_picture(a: &Path, b: &Path) -> Result<bool> {
-    let read = |p: &Path| -> Result<(pc_image::Probe, bool)> {
-        let size = fs::metadata(p)
-            .with_context(|| pc_core::tf!("нет файла {0}", "no such file: {0}", p.display()))?
-            .len();
-        let r = pc_image::read_for_probe(p, size)?;
+    let open = |p: &Path| {
+        fs::File::open(p)
+            .with_context(|| pc_core::tf!("нет файла {0}", "no such file: {0}", p.display()))
+    };
+    same_picture_in((a, &open(a)?), (b, &open(b)?))
+}
+
+/// [`same_picture`] of two files already open: the ones a move is bound to
+/// (el-3wizg), so what is compared is what moves. The paths only name them.
+pub(crate) fn same_picture_in(a: (&Path, &fs::File), b: (&Path, &fs::File)) -> Result<bool> {
+    let read = |(p, f): (&Path, &fs::File)| -> Result<(pc_image::Probe, bool)> {
+        let size = f.metadata()?.len();
+        let r = pc_image::read_for_probe_from(&mut &*f, size)?;
         let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let probe = pc_image::probe_parts(p, &r.head, r.preview.as_deref(), name)?;
         let from_preview = matches!(probe.source, pc_image::PixelSource::EmbeddedPreview { .. });
@@ -118,24 +126,26 @@ pub fn same_picture(a: &Path, b: &Path) -> Result<bool> {
     // to match — read in full, which costs a read of two files at the one
     // moment where the cost is obviously worth paying.
     if a_preview || b_preview {
-        return same_bytes(a, b);
+        return same_bytes(a.1, b.1);
     }
     Ok(pa.content_hash == pb.content_hash)
 }
 
 /// Whole files, compared as they are. Sizes first, because a difference there
 /// is free to find and ends the question.
-fn same_bytes(a: &Path, b: &Path) -> Result<bool> {
-    use std::io::Read;
-    let (ma, mb) = (fs::metadata(a)?, fs::metadata(b)?);
+fn same_bytes(a: &fs::File, b: &fs::File) -> Result<bool> {
+    use std::io::{Seek, SeekFrom};
+    let (ma, mb) = (a.metadata()?, b.metadata()?);
     if ma.len() != mb.len() {
         return Ok(false);
     }
-    let (mut fa, mut fb) = (fs::File::open(a)?, fs::File::open(b)?);
+    let (mut fa, mut fb) = (a, b);
+    fa.seek(SeekFrom::Start(0))?;
+    fb.seek(SeekFrom::Start(0))?;
     let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
     loop {
-        let read_a = fa.read(&mut ba)?;
-        let read_b = fb.read(&mut bb)?;
+        let read_a = fill(&mut fa, &mut ba)?;
+        let read_b = fill(&mut fb, &mut bb)?;
         if read_a != read_b {
             return Ok(false);
         }
@@ -146,6 +156,19 @@ fn same_bytes(a: &Path, b: &Path) -> Result<bool> {
             return Ok(false);
         }
     }
+}
+
+/// Read until `buf` is full or the file ends: two reads of one length can
+/// return different counts, which is not a difference in content.
+fn fill(f: &mut impl std::io::Read, buf: &mut [u8]) -> Result<usize> {
+    let mut got = 0;
+    while got < buf.len() {
+        match f.read(&mut buf[got..])? {
+            0 => break,
+            n => got += n,
+        }
+    }
+    Ok(got)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +187,12 @@ pub struct Filed {
     pub why: String,
     /// What actually moved: the frame and the sidecars that followed it.
     pub done: Tally,
+    /// Every object not simply where the record says, with its proven
+    /// place (el-lvtmk R1).
+    pub placed: Vec<crate::Placed>,
+    /// A folder of the run was moved while it ran: the run stops here
+    /// (el-lvtmk D2). See [`Filed::stop_error`].
+    pub stop: Option<crate::FolderMoved>,
 }
 
 impl Filed {
@@ -172,7 +201,27 @@ impl Filed {
             outcome: FileOutcome::Refused,
             why: why.into(),
             done: Tally::default(),
+            placed: Vec::new(),
+            stop: None,
         }
+    }
+
+    /// The error that ends the run, when this photograph's move asks for a
+    /// stop: what it did, and where everything is, typed — the same value
+    /// the command line and the web render.
+    pub fn stop_error(&self) -> Option<anyhow::Error> {
+        let stop = self.stop.clone()?;
+        let refused = if self.why.is_empty() {
+            Vec::new()
+        } else {
+            vec![self.why.clone()]
+        };
+        let e = crate::stop_run(stop.into(), &self.done, crate::Route::Quarantine, refused);
+        Some(crate::outcome::with_placed(
+            e,
+            self.placed.clone(),
+            crate::Route::Quarantine,
+        ))
     }
 }
 
@@ -201,33 +250,56 @@ pub fn quarantine_file(
     let src = Path::new(&c.path);
     let keeper = Path::new(&c.keeper_path);
 
-    if !src.is_file() {
-        return Ok(Filed::refused(pc_core::tr!(
-            "файла уже нет",
-            "the file is already gone"
-        )));
-    }
+    // The photograph is opened before it is checked and stays open until it
+    // moves: the check reads this object, and the move is bound to it — not
+    // to whatever bears the name by then (el-3wizg).
+    let held = match crate::bound::Held::open(src) {
+        Ok(Some(held)) => held,
+        Ok(None) => {
+            return Ok(Filed::refused(pc_core::tr!(
+                "файла уже нет",
+                "the file is already gone"
+            )))
+        }
+        Err(e) => return Ok(Filed::refused(format!("{e:#}"))),
+    };
 
     // A candidate the tool picked has to prove itself: the file that makes it
     // redundant must still exist and still hold the same pixels. A candidate
     // the *user* picked has no such twin and needs none — the justification is
     // that they looked at the frame and did not want it.
+    let mut kept = None;
     if !c.manual {
-        if !keeper.is_file() {
-            return Ok(Filed::refused(pc_core::tf!(
-                "нет файла, ради которого удаляем: {0}",
-                "the file this one is redundant to is missing: {0}",
-                c.keeper_path
-            )));
-        }
+        let keeper_held = match crate::bound::Held::open(keeper) {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                return Ok(Filed::refused(pc_core::tf!(
+                    "нет файла, ради которого удаляем: {0}",
+                    "the file this one is redundant to is missing: {0}",
+                    c.keeper_path
+                )))
+            }
+            Err(e) => {
+                return Ok(Filed::refused(pc_core::tf!(
+                    "проверка не удалась: {0}",
+                    "the check failed: {0}",
+                    format!("{e:#}")
+                )))
+            }
+        };
         if src == keeper {
             return Ok(Filed::refused(pc_core::tr!(
                 "это и есть сохраняемый файл",
                 "this is the file being kept"
             )));
         }
-        // Re-read both and compare the pixels as they are right now.
-        match same_picture(src, keeper) {
+        // Re-read both, through the files held, and compare the pixels as
+        // they are right now.
+        match held
+            .file()
+            .and_then(|f| Ok((f, keeper_held.file()?)))
+            .and_then(|(f, k)| same_picture_in((src, f), (keeper, k)))
+        {
             Ok(true) => {}
             Ok(false) => {
                 return Ok(Filed::refused(pc_core::tr!(
@@ -243,6 +315,8 @@ pub fn quarantine_file(
                 )))
             }
         }
+        // The keeper is held too, and asked again right before the move.
+        kept = Some(keeper_held);
     }
 
     let file = db.file(c.file_id)?.with_context(|| {
@@ -269,16 +343,44 @@ pub fn quarantine_file(
     let mut planned = vec![pc_db::Moved {
         src: c.path.clone(),
         dst: dst_str.clone(),
-        proof: evidence(src)?,
+        proof: Some(held.proof().clone()),
     }];
+    // Every companion goes with the frame or none does (user decision (c)):
+    // one whose evidence cannot be read, or whose place in quarantine is
+    // taken, refuses the frame too, before anything moves.
     for side in companion_plan(src, &dst) {
-        let Ok(proof) = evidence(&side.src) else {
-            continue;
+        let refuse = |why: String| {
+            Ok(Filed::refused(pc_core::tf!(
+                "спутник {0}: {1}; кадр со спутниками не переносится, ничего не перенесено",
+                "companion {0}: {1}; the frame and its companions are not moved, nothing moved",
+                side.src.display(),
+                why
+            )))
+        };
+        if side.taken {
+            return refuse(pc_core::tf!(
+                "его место в карантине занято: {0}",
+                "its place in quarantine is taken: {0}",
+                side.dst.display()
+            ));
+        }
+        let proof = match evidence(&side.src) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return refuse(
+                    pc_core::tr!(
+                        "эта система не умеет назвать объект файловой системы",
+                        "this system cannot name a file system object"
+                    )
+                    .to_string(),
+                )
+            }
+            Err(e) => return refuse(format!("{e:#}")),
         };
         planned.push(pc_db::Moved {
             src: side.src.to_string_lossy().into_owned(),
             dst: side.dst.to_string_lossy().into_owned(),
-            proof,
+            proof: Some(proof),
         });
     }
 
@@ -293,127 +395,79 @@ pub fn quarantine_file(
         manifest: &planned,
     })?;
 
-    match rename_with_parents(src, &dst) {
-        Ok(()) => {
-            let (moved, failed, stop) = crate::carry(&planned[1..]);
-            let done_list: Vec<pc_db::Moved> =
-                std::iter::once(planned[0].clone()).chain(moved).collect();
-            let done = Tally {
-                frames: 1,
-                companions: done_list.len() as u64 - 1,
-                bytes: moved_bytes(&done_list),
-                ..Default::default()
-            };
-            let note = match (done.companions, failed.as_slice()) {
-                (0, []) => None,
-                (n, []) => Some(pc_core::tf!(
-                    "спутников перенесено: {0}",
-                    "companions moved: {0}",
-                    n
-                )),
-                (n, f) => Some(pc_core::tf!(
-                    "спутников перенесено: {0}, не перенеслось: {1}",
-                    "companions moved: {0}, not moved: {1}",
-                    n,
-                    crate::listed(f)
-                )),
-            };
-            // The journal now says what moved, not what was meant to — the
-            // list, the count and the bytes. If it cannot be told, the run
-            // stops and says that the move happened anyway: the row stays
-            // pending with the evidence written before the move, and a
-            // reconciliation recovers it on that evidence.
-            let mut closed = false;
-            let persisted = (|| -> Result<()> {
-                db.journal_finalize(jid, &done_list, done_list.len() as i64, done.bytes as i64)?;
-                let kind = if failed.is_empty() { "done" } else { "partial" };
-                db.journal_close(
-                    jid,
-                    JournalStatus::Done,
-                    &pc_db::Event {
-                        text: note.as_deref().unwrap_or_default(),
-                        moved: &done_list,
-                        refused: &failed,
-                        error: stop.as_ref().map(|e| e.to_string()).as_deref(),
-                        ..pc_db::Event::new("forward", kind)
-                    },
-                )?;
-                closed = true;
-                // The row must stop claiming the file is still in the
-                // archive, or the planner will offer the same work again.
-                db.set_file_state(c.file_id, "quarantined")?;
-                Ok(())
-            })();
-            if let Err(e) = persisted {
-                // Pending only if the entry itself could not be closed; a
-                // closed entry whose index row did not follow is undoable
-                // as it is (el-1y8uo B3).
-                if closed {
-                    let e = e.context(pc_core::tf!(
-                        "файл перенесён в {0} и записан в журнал, но индекс не обновлён",
-                        "the file moved to {0} and is in the journal, but the index did not follow",
-                        dst.display()
-                    ));
-                    return Err(crate::stop_run(
-                        e,
-                        &done,
-                        crate::Route::Quarantine,
-                        Vec::new(),
-                    ));
-                }
-                let e = e.context(pc_core::tf!(
-                    "файл перенесён в {0}, но журнал не дописан: запись {1} осталась незавершённой — сверьте её",
-                    "the file moved to {0}, but the journal was not completed: entry {1} is left pending — reconcile it",
-                    dst.display(),
-                    jid
-                ));
-                let e = crate::stop_run(e, &done, crate::Route::Quarantine, Vec::new());
-                return Err(crate::outcome::left_pending(
-                    e,
-                    jid,
-                    crate::Route::Quarantine,
-                ));
-            }
-            if let Some(e) = stop {
-                // The photograph moved and is journaled as moved; its sidecar
-                // met a volume that cannot move without replacing, and the
-                // run stops here — with what moved said.
-                let refused = failed.iter().map(|(p, w)| format!("{p} — {w}")).collect();
-                return Err(crate::stop_run(e, &done, crate::Route::Quarantine, refused));
-            }
-            // The photograph moved; a sidecar that stayed behind is still
-            // something the run has to say out loud.
-            Ok(Filed {
-                outcome: FileOutcome::Moved,
-                why: crate::listed(&failed),
-                done,
-            })
+    let keepers: Vec<&crate::bound::Held> = kept.iter().collect();
+    let members: Vec<crate::unit::Member> =
+        planned.iter().map(crate::unit::Member::forward).collect();
+    let unit = crate::unit::move_unit(&members, crate::located::Way::Forward, Some(held), &keepers);
+    let crate::unit::Unit::Moved(arrived) = unit else {
+        let r = crate::unit::close_forward(db, jid, "forward", crate::Route::Quarantine, unit)?;
+        return Ok(Filed {
+            placed: r.placed,
+            stop: r.stop,
+            ..Filed::refused(r.why)
+        });
+    };
+    let done = Tally {
+        frames: 1,
+        companions: planned.len() as u64 - 1,
+        bytes: moved_bytes(&planned),
+        ..Default::default()
+    };
+    let note = match done.companions {
+        0 => String::new(),
+        n => pc_core::tf!("спутников перенесено: {0}", "companions moved: {0}", n),
+    };
+    let mut closed = false;
+    let persisted = (|| -> Result<()> {
+        db.journal_close(
+            jid,
+            JournalStatus::Done,
+            &pc_db::Event {
+                text: &note,
+                moved: &planned,
+                ..pc_db::Event::new("forward", "done")
+            },
+        )?;
+        closed = true;
+        db.set_file_state(c.file_id, "quarantined")?;
+        Ok(())
+    })();
+    // Held until recorded.
+    drop(arrived);
+    if let Err(e) = persisted {
+        if closed {
+            let e = e.context(pc_core::tf!(
+                "файл перенесён в {0} и записан в журнал, но индекс не обновлён",
+                "the file moved to {0} and is in the journal, but the index did not follow",
+                dst.display()
+            ));
+            return Err(crate::stop_run(
+                e,
+                &done,
+                crate::Route::Quarantine,
+                Vec::new(),
+            ));
         }
-        Err(e) => {
-            let shown = e.to_string();
-            if let Err(pe) = db.journal_close(
-                jid,
-                JournalStatus::Failed,
-                &pc_db::Event {
-                    text: &shown,
-                    error: Some(&shown),
-                    ..pc_db::Event::new("forward", "refused")
-                },
-            ) {
-                // Nothing of this file moved; its entry stays pending.
-                return Err(crate::outcome::left_pending(
-                    pe.context(shown),
-                    jid,
-                    crate::Route::Quarantine,
-                ));
-            }
-            if crate::is_no_exclusive_rename(&e) {
-                // Not this file's problem but the volume's: stop the run.
-                return Err(e);
-            }
-            Ok(Filed::refused(shown))
-        }
+        let e = e.context(pc_core::tf!(
+            "файл перенесён в {0}, но журнал не дописан: запись {1} осталась незавершённой — сверьте её",
+            "the file moved to {0}, but the journal was not completed: entry {1} is left pending — reconcile it",
+            dst.display(),
+            jid
+        ));
+        let e = crate::stop_run(e, &done, crate::Route::Quarantine, Vec::new());
+        return Err(crate::outcome::left_pending(
+            e,
+            jid,
+            crate::Route::Quarantine,
+        ));
     }
+    Ok(Filed {
+        outcome: FileOutcome::Moved,
+        why: String::new(),
+        done,
+        placed: Vec::new(),
+        stop: None,
+    })
 }
 
 #[derive(Debug, Default)]
@@ -421,6 +475,31 @@ pub struct ApplyReport {
     /// What actually moved.
     pub done: Tally,
     pub refused: Vec<(String, String)>,
+    /// Every object not simply where the record says, with its proven
+    /// place: the same [`crate::Placed`] the web renders.
+    pub placed: Vec<crate::Placed>,
+    /// The run stopped early because a folder of it was moved
+    /// (el-lvtmk D2); the candidates after it are in `refused` as not tried.
+    pub stopped: Option<crate::FolderMoved>,
+}
+
+impl ApplyReport {
+    /// The error that ends the run, if it stopped: what moved before it and
+    /// where everything is, typed.
+    pub fn stop_error(&self) -> Option<anyhow::Error> {
+        let stop = self.stopped.clone()?;
+        let refused = self
+            .refused
+            .iter()
+            .map(|(p, why)| format!("{p} — {why}"))
+            .collect();
+        let e = crate::stop_run(stop.into(), &self.done, crate::Route::Quarantine, refused);
+        Some(crate::outcome::with_placed(
+            e,
+            self.placed.clone(),
+            crate::Route::Quarantine,
+        ))
+    }
 }
 
 pub fn apply(
@@ -433,12 +512,32 @@ pub fn apply(
     // A volume that cannot move without replacing stops the run before its
     // first move.
     crate::check_candidates(db, candidates, override_root)?;
-    for c in candidates {
+    let roots = crate::RunRoots::hold(db, candidates.iter().map(|c| c.path.as_str()))?;
+    let mut todo = candidates.iter();
+    while let Some(c) = todo.next() {
+        if let Err(stop) = roots.check() {
+            report.refused.push((c.path.clone(), not_tried_folder()));
+            for left in todo.by_ref() {
+                report.refused.push((left.path.clone(), not_tried_folder()));
+            }
+            report.stopped = Some(stop);
+            break;
+        }
         match quarantine_file(db, run_id, c, override_root) {
             Ok(filed) => {
                 report.done.add(&filed.done);
+                report.placed.extend(filed.placed);
                 if !filed.why.is_empty() {
                     report.refused.push((c.path.clone(), filed.why));
+                }
+                if let Some(stop) = filed.stop {
+                    // A folder of the run was moved: nothing more is tried,
+                    // and what was not is said (el-lvtmk D2).
+                    for left in todo.by_ref() {
+                        report.refused.push((left.path.clone(), not_tried_folder()));
+                    }
+                    report.stopped = Some(stop);
+                    break;
                 }
             }
             // Whatever stopped it — the volume, or anything else after
@@ -467,6 +566,15 @@ pub fn apply(
         }
     }
     Ok(report)
+}
+
+/// Why a photograph the run never reached did not move.
+pub(crate) fn not_tried_folder() -> String {
+    pc_core::tr!(
+        "не перенесён: прогон остановлен, папку прогона переместили во время работы",
+        "not moved: the run stopped, a folder of it was moved while it ran"
+    )
+    .to_string()
 }
 
 #[cfg(test)]
@@ -539,10 +647,11 @@ mod tests {
     }
 
     #[test]
-    fn a_sidecar_that_did_not_move_is_written_down_not_assumed() {
-        // The rename of a sidecar used to be attempted and forgotten. If it
-        // fails, the journal must say so — an undo that silently finds
-        // nothing to bring back is how an edit disappears.
+    fn a_sidecar_that_cannot_move_keeps_its_frame_home_and_says_why() {
+        // The sidecar's place in quarantine is taken. It used to be left
+        // behind and the frame moved without it; now the frame and its
+        // companions are one unit (user decision (c)): neither moves, and
+        // the refusal names the sidecar.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("archive");
         let quarantine = dir.join(pc_core::QUARANTINE_DIR);
@@ -550,8 +659,6 @@ mod tests {
         let photo = dir.join("frame.arw");
         fs::write(&photo, b"raw").unwrap();
         fs::write(dir.join("frame.xmp"), b"my edits").unwrap();
-        // Something else already occupies the sidecar's destination, and a
-        // directory with a file in it will not be renamed over.
         fs::create_dir_all(quarantine.join("frame.xmp")).unwrap();
         fs::write(quarantine.join("frame.xmp").join("inside"), b"x").unwrap();
 
@@ -559,20 +666,17 @@ mod tests {
         let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
         let c = one_manual_candidate(&db, run, &photo);
         let filed = quarantine_file(&db, run, &c, None).unwrap();
-        let stuck = filed.why;
-        assert_eq!(filed.outcome, FileOutcome::Moved);
-        assert!(
-            stuck.contains("frame.xmp"),
-            "отказ спутника молчит: {stuck:?}"
-        );
-
-        let entry = db.journal_quarantined(None).unwrap().pop().unwrap();
-        assert_eq!(
-            entry.manifest.len(),
-            1,
-            "спутник не уехал, но записан как уехавший"
-        );
+        assert_eq!(filed.outcome, FileOutcome::Refused);
+        assert!(filed.why.contains("frame.xmp"), "{:?}", filed.why);
+        assert!(filed.done.is_empty());
+        assert_eq!(fs::read(&photo).unwrap(), b"raw");
         assert_eq!(fs::read(dir.join("frame.xmp")).unwrap(), b"my edits");
+        assert!(!quarantine.join("frame.arw").exists());
+        assert_eq!(
+            fs::read(quarantine.join("frame.xmp").join("inside")).unwrap(),
+            b"x"
+        );
+        assert!(db.journal_quarantined(None).unwrap().is_empty());
     }
 
     #[test]

@@ -260,9 +260,9 @@ fn the_layout_is_written_once_and_grows() {
 // ---------------------------------------------------------------- B2 -----
 
 /// An entry from before the journal held a list: the frame comes home, its
-/// sidecar is refused (a stranger turned up at home). Once the stranger is
-/// moved aside, asking again finishes — it recognises the frame that is
-/// already home instead of failing on its absence from quarantine.
+/// sidecar is refused (a stranger turned up at home), and the frame goes
+/// back into quarantine with it — no half undo (user decision (c)). Once the
+/// stranger is moved aside, asking again brings both home.
 #[cfg(unix)]
 #[test]
 fn a_legacy_undo_that_stopped_at_a_sidecar_can_be_asked_again() {
@@ -281,7 +281,8 @@ fn a_legacy_undo_that_stopped_at_a_sidecar_can_be_asked_again() {
 
     assert!(err.to_string().contains("legacy.xmp"), "{err:#}");
     assert_eq!(Some(signature(&side)), *foreign.borrow());
-    assert_eq!(fs::read(&home).unwrap(), b"raw frame");
+    assert!(fs::symlink_metadata(&home).is_err(), "half undo");
+    assert_eq!(fs::read(&held).unwrap(), b"raw frame");
     let (status, first_note) = journal_row(&a.db, id);
     assert_eq!(status, "done");
     assert!(first_note.contains("legacy.xmp"), "{first_note}");
@@ -304,9 +305,9 @@ fn a_legacy_undo_that_stopped_at_a_sidecar_can_be_asked_again() {
     );
 }
 
-/// The frame that was brought home is not there any more — another file of
-/// the same name is. The retry does not take that file for the frame: it
-/// stops, the entry stays `done`, and the held sidecar stays held.
+/// After a refused undo a file of the frame's name turns up at home. The
+/// retry does not take that file for the frame: nothing moves, the entry
+/// stays `done`, and the frame and its sidecar stay held.
 #[cfg(unix)]
 #[test]
 fn a_retried_undo_does_not_take_a_stranger_at_home_for_the_frame() {
@@ -323,10 +324,9 @@ fn a_retried_undo_does_not_take_a_stranger_at_home_for_the_frame() {
     crate::undo(&a.db, id).unwrap_err();
     drop(hook);
 
-    // The frame is taken elsewhere and a stranger arrives at its name.
-    fs::rename(&home, a.dir.join("moved-by-user.arw")).unwrap();
+    // A stranger arrives at the frame's name.
     fs::write(&home, STRANGER).unwrap();
-    fs::remove_file(&side).unwrap();
+    fs::rename(&side, a.dir.join("moved-by-user.xmp")).unwrap();
 
     let err = crate::undo(&a.db, id).unwrap_err();
 
@@ -335,6 +335,7 @@ fn a_retried_undo_does_not_take_a_stranger_at_home_for_the_frame() {
         "{err:#}"
     );
     assert_eq!(fs::read(&home).unwrap(), STRANGER);
+    assert_eq!(fs::read(&held).unwrap(), b"raw frame");
     assert_eq!(fs::read(&held_side).unwrap(), b"original edits");
     assert!(fs::symlink_metadata(&side).is_err());
     assert_eq!(journal_row(&a.db, id).0, "done");
@@ -375,8 +376,9 @@ fn an_old_half_undo_without_a_list_is_not_finished_by_guessing() {
 // ---------------------------------------------------------------- B3 -----
 
 /// A sidecar the volume refuses to move the way it would refuse every move:
-/// the photograph that already moved stays journaled as moved, the sidecar
-/// stays home and is named, and the next photograph is never touched.
+/// the photograph that already moved is put back with it (user decision
+/// (c)), the refusal names the sidecar, and the next photograph is never
+/// touched.
 #[test]
 fn a_volume_refusal_at_a_sidecar_stops_apply_after_journaling_the_photo() {
     let a = archive();
@@ -399,13 +401,20 @@ fn a_volume_refusal_at_a_sidecar_stops_apply_after_journaling_the_photo() {
         b"raw two",
         "следующий снимок уехал"
     );
-    let done = a.db.journal_quarantined(None).unwrap();
-    assert_eq!(done.len(), 1);
-    assert_eq!(done[0].src, one.display().to_string());
-    assert_eq!(done[0].manifest.len(), 1, "спутник записан как уехавший");
-    let (_, note) = journal_row(&a.db, done[0].id);
+    assert_eq!(
+        fs::read(&one).unwrap(),
+        b"raw one",
+        "снимок уехал без спутника"
+    );
+    assert!(a.db.journal_quarantined(None).unwrap().is_empty());
+    let id: i64 =
+        a.db.conn
+            .query_row("SELECT max(id) FROM journal", [], |r| r.get(0))
+            .unwrap();
+    let (status, note) = journal_row(&a.db, id);
+    assert_eq!(status, "failed");
     assert!(note.contains("one.xmp"), "{note}");
-    assert_eq!(file_state(&a.db, &one), "quarantined");
+    assert_eq!(file_state(&a.db, &one), "present");
 }
 
 /// The same at a sidecar in a reorganisation.
@@ -426,15 +435,22 @@ fn a_volume_refusal_at_a_sidecar_stops_organize() {
     let err = crate::organize(&a.db, a.run, &moves).unwrap_err();
 
     assert!(crate::is_no_exclusive_rename(&err), "{err:#}");
-    assert_eq!(fs::read(a.dir.join("2019/one.jpg")).unwrap(), b"one");
+    assert_eq!(fs::read(&one).unwrap(), b"one", "файл уехал без спутника");
+    assert!(fs::symlink_metadata(a.dir.join("2019/one.jpg")).is_err());
     assert_eq!(fs::read(&side).unwrap(), b"edits");
     assert_eq!(fs::read(&two).unwrap(), b"two", "следующий файл уехал");
-    let done = a.db.journal_by_run_op(a.run, "organize").unwrap();
-    assert_eq!(done.len(), 1);
-    assert_eq!(done[0].manifest.len(), 1);
-    let (_, note) = journal_row(&a.db, done[0].id);
+    assert!(a
+        .db
+        .journal_by_run_op(a.run, "organize")
+        .unwrap()
+        .is_empty());
+    let id: i64 =
+        a.db.conn
+            .query_row("SELECT max(id) FROM journal", [], |r| r.get(0))
+            .unwrap();
+    let (status, note) = journal_row(&a.db, id);
+    assert_eq!(status, "failed");
     assert!(note.contains("one.xmp"), "{note}");
-    assert!(!denies_earlier_moves(&err.to_string()), "{err}");
 }
 
 /// The litter sweep after a reorganisation: the first service file refused
@@ -578,9 +594,10 @@ fn a_refused_recovery_is_written_down_and_stays_pending() {
     assert!(note.contains(&home.display().to_string()), "{note}");
 }
 
-/// Two files to bring back; the first comes, the volume refuses the second.
-/// The journal keeps both facts, the entry stays pending, and the volume
-/// refusal keeps its type for the caller.
+/// Two files to bring back; the first comes, the volume refuses the second,
+/// and the first goes back into quarantine (user decision (c)). The journal
+/// says where both are, the entry stays pending, and the volume refusal
+/// keeps its type for the caller.
 #[test]
 fn a_recovery_stopped_by_the_volume_says_what_came_back() {
     let a = archive();
@@ -601,7 +618,8 @@ fn a_recovery_stopped_by_the_volume_says_what_came_back() {
     let err = crate::reconcile_undo(&a.db, id).unwrap_err();
 
     assert!(crate::is_no_exclusive_rename(&err), "{err:#}");
-    assert_eq!(fs::read(&home).unwrap(), b"raw");
+    assert!(fs::symlink_metadata(&home).is_err(), "half reconciled");
+    assert_eq!(fs::read(&held).unwrap(), b"raw");
     assert_eq!(fs::read(&held_side).unwrap(), b"edits");
     let (status, note) = journal_row(&a.db, id);
     assert_eq!(status, "pending");

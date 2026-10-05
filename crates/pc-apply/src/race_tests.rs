@@ -197,14 +197,16 @@ fn a_sidecar_never_replaces_what_appears_beside_its_photograph() {
     let _race = race_at(taken.clone(), Stranger::File);
     let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
 
-    // The photograph moved; its sidecar did not, and says so.
-    assert_eq!(report.done.frames, 1);
+    // The sidecar could not follow, so the photograph was put back: the
+    // frame and its companions move as one (user decision (c)).
+    assert_eq!(report.done.frames, 0);
     let (_, stuck) = &report.refused[0];
     assert!(stuck.contains("frame.xmp"), "{stuck}");
     intact(&taken, Stranger::File);
+    assert_eq!(fs::read(&photo).unwrap(), b"raw");
     assert_eq!(fs::read(a.dir.join("frame.xmp")).unwrap(), b"my edits");
-    let entry = a.db.journal_quarantined(None).unwrap().pop().unwrap();
-    assert_eq!(entry.manifest.len(), 1, "спутник записан как уехавший");
+    assert!(!a.quarantine.join("frame.arw").exists());
+    assert!(a.db.journal_quarantined(None).unwrap().is_empty());
 }
 
 #[test]
@@ -293,8 +295,11 @@ fn an_undo_never_replaces_a_sidecar_that_appears_at_home_and_can_be_retried() {
     let err = crate::undo(&a.db, entry.id).unwrap_err().to_string();
     drop(race);
 
+    // No half undo: the photograph went back into quarantine with its
+    // sidecar (user decision (c)).
     assert!(err.contains("frame.xmp"), "{err}");
-    assert_eq!(fs::read(&photo).unwrap(), b"raw");
+    assert!(!photo.exists(), "половина отката");
+    assert_eq!(fs::read(a.quarantine.join("frame.arw")).unwrap(), b"raw");
     intact(&side, Stranger::File);
     assert_eq!(
         fs::read(a.quarantine.join("frame.xmp")).unwrap(),
@@ -306,6 +311,7 @@ fn an_undo_never_replaces_a_sidecar_that_appears_at_home_and_can_be_retried() {
     // The person moves the stranger away; asking again finishes the job.
     fs::rename(&side, a.dir.join("stranger.xmp")).unwrap();
     crate::undo(&a.db, entry.id).unwrap();
+    assert_eq!(fs::read(&photo).unwrap(), b"raw");
     assert_eq!(fs::read(&side).unwrap(), b"my edits");
     assert_eq!(fs::read(a.dir.join("stranger.xmp")).unwrap(), STRANGER);
 }
