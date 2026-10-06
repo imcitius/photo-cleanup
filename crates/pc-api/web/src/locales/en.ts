@@ -239,7 +239,7 @@ export const ui = {
   setAside: "set aside by you",
   keepAllVersions: "Take that back",
   orphanQuarantineHelp:
-    "These files sit in quarantine folders, but the journal knows nothing about them: another database moved them — an earlier one, or one from another machine. They can go back where they came from, one level up from where they lie. Deleting is for good.",
+    "These files sit in quarantine folders, but the journal knows nothing about them: another database moved them — an earlier one, or one from another machine. They can go back where they came from, one level up from where they lie. They are not deleted from here: with nothing in the journal to prove what they are, deleting keeps each one and names it, with its size and why, for you to delete by hand.",
   orphanRestore: "Put everything back",
   orphanDelete: "Delete for good",
   notACopyOfKept:

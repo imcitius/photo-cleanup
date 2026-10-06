@@ -2106,3 +2106,36 @@ async fn reviewer_web_finalization_failure_keeps_actual_counts() {
         "caller must see actual destruction: {done}"
     );
 }
+
+#[tokio::test]
+async fn deleting_orphans_for_good_keeps_every_one_and_says_where_they_are() {
+    // An orphan has no journal evidence, and nothing is deleted without it
+    // (el-63ph1). The reviewed, confirmed job runs, deletes nothing, and
+    // names each one with why, so that a person can delete it by hand.
+    let f = Fixture::new();
+    let q = f.archive.join(pc_core::QUARANTINE_DIR);
+    std::fs::create_dir_all(q.join("2015")).unwrap();
+    let photo = q.join("2015").join("IMG_0001.jpg");
+    std::fs::write(&photo, b"a photograph from a database that is gone").unwrap();
+    let catalogue = q.join("Old.lrcat");
+    std::fs::write(&catalogue, b"SQLite format 3\0").unwrap();
+    f.scan().await;
+
+    let purge = f.preview("quarantine-purge", json!({})).await;
+    assert_eq!(purge["items"].as_array().unwrap().len(), 2, "{purge}");
+    let done = f.apply(&purge).await;
+    assert_eq!(done["state"], "done", "{done}");
+
+    assert_eq!(
+        std::fs::read(&photo).unwrap(),
+        b"a photograph from a database that is gone"
+    );
+    assert_eq!(std::fs::read(&catalogue).unwrap(), b"SQLite format 3\0");
+    let refusals = done["progress"]["refusals"].to_string();
+    assert!(refusals.contains("IMG_0001.jpg"), "{done}");
+    assert!(refusals.contains("Old.lrcat"), "{done}");
+    assert!(refusals.contains("by hand"), "{done}");
+    // Still there, so still listed.
+    let (_, orphans) = f.req("GET", "/api/quarantine/orphans", Value::Null).await;
+    assert_eq!(orphans["files"], 2, "{orphans}");
+}

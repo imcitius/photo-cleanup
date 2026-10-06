@@ -547,7 +547,8 @@ pub enum Action {
     Undo(pc_db::JournalEntry),
     Purge(pc_db::JournalEntry),
     /// A file in a quarantine folder that this database never put there,
-    /// carried back to where it came from, or deleted for good.
+    /// carried back to where it came from — or, asked to be deleted for
+    /// good, kept and named for a person to delete by hand (el-63ph1).
     Adopt(pc_db::QuarantineFound),
     Abandon(pc_db::QuarantineFound),
     /// An operation a killed process left half-done, read against the disk.
@@ -854,7 +855,7 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 }
                 if purge {
                     items.push(
-                        json!({"path":f.path,"dst":pc_core::tr!("Окончательное удаление","Deleted for good"),"size":f.size,"file_count":1}),
+                        json!({"path":f.path,"dst":pc_core::tr!("Оставляется: доказательства нет — удаляйте вручную","Kept: there is no evidence — delete it by hand"),"size":f.size,"file_count":1}),
                     );
                     actions.push(Action::Abandon(f));
                     continue;
@@ -1263,10 +1264,13 @@ pub fn apply_action(
             }
             done
         }
+        // An orphan has no recorded evidence, and nothing is deleted without
+        // it (el-63ph1): each one is this item's refusal, with where it is,
+        // how big, and why — nothing counted as deleted. It stays listed as
+        // found, because it is still there.
         Action::Abandon(f) => {
-            pc_apply::abandon_orphan(db, run, &f.path, control)?;
-            db.forget_quarantine_found(&f.path)?;
-            ActionResult::default()
+            let kept = pc_apply::abandon_orphan(db, run, &f.path, control)?;
+            ActionResult::refused(kept.to_string(), Default::default())
         }
     })
 }

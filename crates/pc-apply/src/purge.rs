@@ -262,6 +262,76 @@ pub fn purge_keeps(e: &JournalEntry) -> Option<PurgeKept> {
     })
 }
 
+/// Why an orphan in quarantine is kept rather than deleted (el-63ph1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrphanWhy {
+    /// Something of Lightroom's, by any part of its path ([`is_lightroom`]).
+    Lightroom,
+    /// A folder: purge deletes no folder, and so no orphan folder either.
+    Folder,
+    /// Anything else — a file, a link, a device, or nothing at all any
+    /// more: no journal row recorded what it was, so nothing proves it.
+    Unproven,
+}
+
+/// What "deleting an orphan for good" does: keeps it, says why, and where
+/// and how big it is so that a person can delete it by hand (el-63ph1).
+///
+/// An orphan is, by definition, something in a quarantine folder that no
+/// `done` or `pending` journal row claims. Purge deletes a file only on its
+/// full recorded evidence ([`Proof::check_file`]); an orphan has none, and
+/// a weaker stand-in — its name, the size and time a walk once saw — is
+/// exactly what a stranger's file at that name would also pass. So nothing
+/// is deleted here, and there is no second deletion path to keep in step
+/// with purge. A row with this outcome is written to the journal each time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanKept {
+    /// The journal row the refusal is written under.
+    pub entry: i64,
+    pub path: String,
+    pub why: OrphanWhy,
+    /// Bytes at the path as it is now, read without following a link; zero
+    /// for a folder (its contents are not walked) or for nothing there.
+    pub bytes: u64,
+}
+
+impl OrphanKept {
+    /// The words for why.
+    pub fn reason(&self) -> &'static str {
+        match self.why {
+            OrphanWhy::Lightroom => pc_core::tr!(
+                "это данные Lightroom, а их окончательное удаление не трогает никогда",
+                "it is Lightroom's, and permanent deletion never touches anything of Lightroom's"
+            ),
+            OrphanWhy::Folder => pc_core::tr!(
+                "это папка, а окончательное удаление папок не удаляет",
+                "it is a folder, and permanent deletion deletes no folder"
+            ),
+            OrphanWhy::Unproven => pc_core::tr!(
+                "журнал не записал, что это и как оно сюда попало, — доказать, что это перенесено \
+                 этой программой, нечем",
+                "the journal never recorded what this is or how it got here, so nothing proves it \
+                 is something this tool moved"
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for OrphanKept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = pc_core::tf!(
+            "{0} ({1}) оставлен — удалите вручную, если уверены: {2}. Ничего не удалено",
+            "{0} ({1}) is kept — delete it by hand if you are sure: {2}. Nothing was deleted",
+            self.path,
+            pc_core::fmt_bytes(self.bytes),
+            self.reason()
+        );
+        f.write_str(&text)
+    }
+}
+
+impl std::error::Error for OrphanKept {}
+
 /// The kept outcome of `e`, if that is what `err` is.
 pub fn purge_kept(err: &anyhow::Error) -> Option<&PurgeKept> {
     err.downcast_ref::<PurgeKept>()

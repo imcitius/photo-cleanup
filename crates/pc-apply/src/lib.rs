@@ -41,7 +41,7 @@ pub use outcome::{
 };
 pub use purge::{
     is_lightroom, purge_entry_controlled, purge_keeps, purge_kept, purge_stopped, purged_before,
-    KeptWhy, PurgeKept, PurgeStage, PurgeStopped,
+    KeptWhy, OrphanKept, OrphanWhy, PurgeKept, PurgeStage, PurgeStopped,
 };
 pub use recovery::{
     reconcile, reconcile_undo, undo, undo_offered, undo_preview, Item, Reconciled, Standing,
@@ -700,6 +700,9 @@ mod binding_tests;
 #[cfg(all(test, unix))]
 mod purge_tests;
 
+#[cfg(all(test, unix))]
+mod abandon_tests;
+
 /// The catalogue's own answer, asked at the moment of the move.
 ///
 /// A scan writes down what it found — and by the time a plan is carried out,
@@ -959,44 +962,62 @@ pub fn adopt_orphan(db: &Db, run_id: i64, src: &str, dst: &str) -> Result<Tally>
     Ok(done)
 }
 
-/// Delete a file the journal never claimed. There is nothing to move it back
-/// from, so the row is written first and the bytes go second.
+/// "Delete for good" a file the journal never claimed: it is kept, and the
+/// row says why ([`OrphanKept`], el-63ph1).
+///
+/// This used to remove whatever was at the path, recursively and by name —
+/// a stranger's file, a folder with everything in it, a link, a Lightroom
+/// catalogue. An orphan has no recorded evidence to prove anything against,
+/// and purge deletes nothing it cannot prove, so nothing is deleted here at
+/// all: not even a stop can leave part of it gone. `Ok` is the outcome,
+/// journaled (`abandon`/`kept`, the row `failed`, so it claims nothing);
+/// an error is a stop asked for before, or the journal not taking the row —
+/// with nothing deleted either way.
 pub fn abandon_orphan(
     db: &Db,
     run_id: i64,
     path: &str,
     control: &pc_core::work::Control,
-) -> Result<()> {
-    let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0) as i64;
+) -> Result<OrphanKept> {
+    control.current(path)?;
+    // What is there now, without following a link: the words a person gets
+    // must say what they would be deleting by hand.
+    let now = fs::symlink_metadata(path).ok();
+    let why = if is_lightroom(path) {
+        OrphanWhy::Lightroom
+    } else if now.as_ref().is_some_and(|m| m.is_dir()) {
+        OrphanWhy::Folder
+    } else {
+        OrphanWhy::Unproven
+    };
+    let bytes = now.filter(|m| m.is_file()).map_or(0, |m| m.len());
     let jid = db.journal_begin(&pc_db::NewJournalEntry {
         run_id,
         op: "abandon",
         target_id: None,
         src: path,
         dst: None,
-        size,
+        size: bytes as i64,
         file_count: 1,
         manifest: &[],
     })?;
-    match remove_controlled(Path::new(path), control) {
-        Ok(()) => {
-            db.journal_mark_purged(jid)?;
-            Ok(())
-        }
-        Err(e) => {
-            let shown = format!("{e:#}");
-            db.journal_close(
-                jid,
-                JournalStatus::Failed,
-                &pc_db::Event {
-                    text: &shown,
-                    error: Some(&shown),
-                    ..pc_db::Event::new("abandon", "refused")
-                },
-            )?;
-            Err(e)
-        }
-    }
+    let kept = OrphanKept {
+        entry: jid,
+        path: path.to_string(),
+        why,
+        bytes,
+    };
+    let shown = kept.to_string();
+    db.journal_close(
+        jid,
+        JournalStatus::Failed,
+        &pc_db::Event {
+            text: &shown,
+            refused: &[(path.to_string(), kept.reason().to_string())],
+            ..pc_db::Event::new("abandon", "kept")
+        },
+    )?;
+    Ok(kept)
 }
 
 /// Permanently remove quarantined data older than `older_than_secs`.
@@ -1037,33 +1058,6 @@ pub fn purge(db: &Db, older_than_secs: i64) -> Result<Totals> {
 /// Purge one previously reviewed quarantine entry.
 pub fn purge_entry(db: &Db, id: i64) -> Result<Tally> {
     purge_entry_controlled(db, id, &pc_core::work::Control::default())
-}
-
-/// Deletes an orphan the journal never claimed (`abandon`), recursively and
-/// by path: there is no record to prove it against. Purge does not use it.
-fn remove_controlled(path: &Path, control: &pc_core::work::Control) -> Result<()> {
-    control.current(&path.display().to_string())?;
-    match fs::symlink_metadata(path) {
-        Ok(md) if md.is_dir() => {
-            for entry in fs::read_dir(path).with_context(|| {
-                pc_core::tf!("не прочитать {0}", "cannot read {0}", path.display())
-            })? {
-                remove_controlled(&entry?.path(), control)?;
-            }
-            fs::remove_dir(path).with_context(|| {
-                pc_core::tf!("не удалить {0}", "cannot remove {0}", path.display())
-            })?;
-        }
-        Ok(_) => fs::remove_file(path)
-            .with_context(|| pc_core::tf!("не удалить {0}", "cannot remove {0}", path.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(e).with_context(|| {
-                pc_core::tf!("не прочитать {0}", "cannot read {0}", path.display())
-            })
-        }
-    }
-    Ok(())
 }
 
 /// What is currently sitting in quarantine, not yet purged.
