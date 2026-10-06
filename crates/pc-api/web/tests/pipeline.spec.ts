@@ -243,7 +243,9 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
           ).json()
         ).total_files,
     )
-    .toBe(3);
+    // The copy and its sidecar; the preview bundle is never deleted by
+    // purge (el-3s9kp) and is named among the refusals as kept instead.
+    .toBe(2);
   const journal = await (await request.get("/api/journal")).json();
   const destinations = journal
     .filter((j) => j.status === "done" && j.op.startsWith("quarantine"))
@@ -269,6 +271,10 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .click();
   await finished();
   for (const dst of destinations) {
+    if (dst.endsWith(".lrdata")) {
+      expect(existsSync(join(dst, "cache"))).toBe(true);
+      continue;
+    }
     expect(existsSync(dst)).toBe(false);
     if (dst.endsWith(".jpg"))
       expect(existsSync(dst.replace(/\.jpg$/, ".xmp"))).toBe(false);

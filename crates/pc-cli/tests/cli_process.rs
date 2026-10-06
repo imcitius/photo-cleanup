@@ -233,3 +233,337 @@ fn a_database_failure_after_a_move_prints_the_receipt() {
     assert!(text.contains("review second journal failure"), "{text}");
     let _ = one;
 }
+
+#[test]
+fn reviewer_photo_in_named_bundle_is_not_regenerable_data() {
+    let cli = Cli::new();
+    let bundle = cli.archive.join("Cat Previews.lrdata");
+    std::fs::create_dir_all(&bundle).unwrap();
+    let original = cli.photo("Cat Previews.lrdata/original.jpg", 37);
+    let bytes = std::fs::read(&original).unwrap();
+    cli.run(&["scan", "--root", cli.archive.to_str().unwrap()]);
+    let cleaned = cli.said(&["derived", "clean", "--yes"]);
+    let at = cli
+        .archive
+        .join(pc_core::QUARANTINE_DIR)
+        .join("Cat Previews.lrdata/original.jpg");
+    assert!(at.exists(), "fixture did not reach quarantine: {cleaned}");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let said = cli.said(&["derived", "purge", "--older-than", "0d", "--yes"]);
+    assert!(
+        at.exists(),
+        "valid synthetic JPEG deleted as regenerable preview: {said}"
+    );
+    assert_eq!(std::fs::read(at).unwrap(), bytes);
+}
+
+#[test]
+fn reviewer_missing_purge_confirmation_leaves_the_fixture_intact() {
+    let cli = Cli::new();
+    let bundle = cli.archive.join("Cat Previews.lrdata");
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("cache.lrprev"), b"synthetic cache").unwrap();
+    cli.run(&["scan", "--root", cli.archive.to_str().unwrap()]);
+    cli.run(&["derived", "clean", "--yes"]);
+    let at = cli
+        .archive
+        .join(pc_core::QUARANTINE_DIR)
+        .join("Cat Previews.lrdata/cache.lrprev");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let out = cli.said(&["derived", "purge", "--older-than", "0d"]);
+    assert!(out.contains("cannot be undone"), "{out}");
+    assert_eq!(std::fs::read(at).unwrap(), b"synthetic cache");
+}
+
+/// el-8s63g B2, the command-line half of
+/// `pc-api::reviewer_web_finalization_failure_keeps_actual_counts`: the
+/// journal refuses the end of a purge after the file is gone. The command
+/// prints what was deleted, and then fails. (A photograph's copy now: purge
+/// deletes no bundle, el-3s9kp.)
+#[test]
+fn a_journal_failure_after_purge_prints_what_went_and_fails() {
+    let cli = Cli::new();
+    cli.photo("frame.jpg", 90);
+    let copy = cli.photo("frame copy.jpg", 90);
+    let size = std::fs::metadata(&copy).unwrap().len();
+    cli.run(&[
+        "index",
+        "--root",
+        cli.archive.to_str().unwrap(),
+        "--min-size",
+        "0",
+    ]);
+    cli.run(&["families", "build"]);
+    cli.run(&["apply", "--yes"]);
+    let at = cli
+        .archive
+        .join(pc_core::QUARANTINE_DIR)
+        .join("frame copy.jpg");
+    assert!(at.exists());
+    rusqlite::Connection::open(&cli.db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_purge_close BEFORE UPDATE OF status ON journal \
+             WHEN NEW.status='purged' BEGIN SELECT RAISE(FAIL, 'synthetic journal failure'); END;",
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup"))
+        .arg("--db")
+        .arg(&cli.db)
+        .args(["derived", "purge", "--older-than", "0d", "--yes"])
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{said}\n{err}");
+    assert!(!at.exists());
+    let receipt = format!("Deleted: 1 object, 1 file, {}", pc_core::fmt_bytes(size));
+    assert!(said.contains(&receipt), "the receipt is missing: {said}");
+    assert!(said.contains("synthetic journal failure"), "{said}");
+    assert!(err.contains("stopped after deleting"), "{err}");
+}
+
+/// el-wffu8 B1-R2b through the real command line: system junk whose format
+/// has no reliable signature is never deleted for good, whatever its bytes
+/// — not even when they start the way the real format starts. `scan`,
+/// `derived clean`, `derived purge` as a person runs them; each payload is
+/// still there, byte for byte, and the command says it is kept: purge
+/// deletes no bundle at all (el-3s9kp), a lone junk file included.
+#[test]
+fn junk_without_a_reliable_signature_survives_scan_clean_and_purge() {
+    let cli = Cli::new();
+    let arbitrary: Vec<u8> = (0..=255).collect();
+    let with_head = |head: &[u8]| {
+        let mut v = head.to_vec();
+        v.extend_from_slice(&arbitrary);
+        v
+    };
+    let fixtures = [
+        ("desktop.ini", arbitrary.clone()),
+        (
+            "Thumbs.db",
+            with_head(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]),
+        ),
+        (".DS_Store", with_head(b"\0\0\0\x01Bud1")),
+    ];
+    for (name, bytes) in &fixtures {
+        std::fs::write(cli.archive.join(name), bytes).unwrap();
+    }
+    cli.run(&["scan", "--root", cli.archive.to_str().unwrap()]);
+    let cleaned = cli.said(&["derived", "clean", "--kind", "system-junk", "--yes"]);
+    let q = cli.archive.join(pc_core::QUARANTINE_DIR);
+    for (name, bytes) in &fixtures {
+        let at = q.join(name);
+        assert_eq!(
+            std::fs::read(&at).ok().as_ref(),
+            Some(bytes),
+            "{name} did not reach quarantine: {cleaned}"
+        );
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let said = cli.said(&["derived", "purge", "--older-than", "0d", "--yes"]);
+    for (name, bytes) in &fixtures {
+        assert_eq!(
+            std::fs::read(q.join(name)).ok().as_ref(),
+            Some(bytes),
+            "{name} was deleted for good: {said}"
+        );
+    }
+    assert!(
+        said.contains("kept — delete it by hand if you are sure"),
+        "{said}"
+    );
+    assert!(said.contains("Deleted: 0 objects"), "{said}");
+}
+
+/// Everything that says a file is the same file, untouched: where it lives,
+/// what it is, who may read it, and every byte.
+#[cfg(unix)]
+fn fingerprint(p: &Path) -> (u64, u64, u32, u32, u32, u64, u64, i64, i64, Vec<u8>) {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(p).unwrap();
+    (
+        m.dev(),
+        m.ino(),
+        m.mode(),
+        m.uid(),
+        m.gid(),
+        m.nlink(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec(),
+        std::fs::read(p).unwrap(),
+    )
+}
+
+/// el-5gr1y B1-R3 and the user's decision of 2026-10-06 ("Lightroom
+/// catalogues are not to be touched at all"), through the real command
+/// line: `scan`, `derived clean`, `derived purge --yes` as a person runs
+/// them. Whatever a Lightroom bundle held when it moved — a catalogue under
+/// a `.db` name, this tool's own database, SQLite named `Thumbs.db`, a
+/// 24-byte fragment, or the protected names that were already refused —
+/// purge deletes nothing of it, and says it is kept for a person to delete
+/// by hand, naming where it is and how big.
+#[cfg(unix)]
+#[test]
+fn lightroom_bundles_survive_purge_whatever_they_hold_and_are_reported_kept() {
+    // A synthetic catalogue: tables named as Lightroom names them, rows
+    // that stand for edits nobody can rebuild.
+    let seed = tempfile::tempdir().unwrap();
+    let catalog = seed.path().join("source.lrcat");
+    rusqlite::Connection::open(&catalog)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE AgLibraryFile (id_local INTEGER PRIMARY KEY, baseName TEXT);
+             INSERT INTO AgLibraryFile VALUES (1, 'synthetic-frame');
+             CREATE TABLE Adobe_images (id_local INTEGER PRIMARY KEY, developSettings TEXT);
+             INSERT INTO Adobe_images VALUES (1, 'synthetic irreplaceable edit');",
+        )
+        .unwrap();
+    let catalog = std::fs::read(&catalog).unwrap();
+    // This tool's own database, made by this tool from a synthetic scan.
+    let state = {
+        let cli = Cli::new();
+        std::fs::write(cli.archive.join("desktop.ini"), b"synthetic state").unwrap();
+        cli.run(&["scan", "--root", cli.archive.to_str().unwrap()]);
+        std::fs::read(&cli.db).unwrap()
+    };
+    let cells: [(&str, &str, &str, Vec<u8>); 8] = [
+        (
+            "lr-previews",
+            "Library Previews.lrdata",
+            "catalog.db",
+            catalog.clone(),
+        ),
+        (
+            "lr-helper",
+            "Library Helper.lrdata",
+            "catalog.db",
+            catalog.clone(),
+        ),
+        (
+            "lr-previews",
+            "Library Previews.lrdata",
+            "photo-cleanup.db",
+            state,
+        ),
+        (
+            "lr-previews",
+            "Library Previews.lrdata",
+            "Thumbs.db",
+            catalog.clone(),
+        ),
+        (
+            "lr-previews",
+            "Library Previews.lrdata",
+            "unknown.db",
+            catalog[..24].to_vec(),
+        ),
+        (
+            "lr-previews",
+            "Library Previews.lrdata",
+            "catalog.lrcat",
+            catalog.clone(),
+        ),
+        (
+            "lr-previews",
+            "Library Previews.lrdata",
+            "Library.lrcat-data/data.db",
+            catalog.clone(),
+        ),
+        (
+            "lr-previews",
+            "Library Previews.lrdata",
+            "Library.photoslibrary/database/Photos.db",
+            catalog.clone(),
+        ),
+    ];
+    // Every cell runs, and the failure names each that failed.
+    let mut failed = Vec::new();
+    for (kind, bundle, name, payload) in cells {
+        let cell = format!("{bundle}/{name}");
+        let run = std::panic::catch_unwind(|| lightroom_cell(kind, bundle, name, &payload));
+        if run.is_err() {
+            failed.push(cell);
+        }
+    }
+    assert!(failed.is_empty(), "failed cells: {failed:?}");
+}
+
+#[cfg(unix)]
+fn lightroom_cell(kind: &str, bundle: &str, name: &str, payload: &[u8]) {
+    let cell = format!("{bundle}/{name}");
+    {
+        let cli = Cli::new();
+        let at = cli.archive.join(bundle).join(name);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, payload).unwrap();
+        let mut held = vec![name.to_string()];
+        if kind == "lr-previews" {
+            std::fs::write(
+                cli.archive.join(bundle).join("innocent.lrprev"),
+                b"AgHg disposable synthetic preview",
+            )
+            .unwrap();
+            held.push("innocent.lrprev".into());
+        }
+        cli.run(&["scan", "--root", cli.archive.to_str().unwrap()]);
+        let cleaned = cli.said(&["derived", "clean", "--kind", kind, "--yes"]);
+        let q = cli.archive.join(pc_core::QUARANTINE_DIR).join(bundle);
+        assert!(
+            q.join(name).exists(),
+            "{cell}: not in quarantine: {cleaned}"
+        );
+        let before: Vec<_> = held.iter().map(|h| fingerprint(&q.join(h))).collect();
+        let bundle_before = fingerprint_dir(&q);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let said = cli.said(&["derived", "purge", "--older-than", "0d", "--yes"]);
+
+        for h in &held {
+            assert!(q.join(h).exists(), "{cell}: {h} was deleted: {said}");
+        }
+        let after: Vec<_> = held.iter().map(|h| fingerprint(&q.join(h))).collect();
+        assert!(before == after, "{cell}: something was changed: {said}");
+        assert_eq!(bundle_before, fingerprint_dir(&q), "{cell}: {said}");
+        assert!(said.contains("Deleted: 0 objects"), "{cell}: {said}");
+        assert!(
+            said.contains("kept — delete it by hand if you are sure"),
+            "{cell}: {said}"
+        );
+        assert!(said.contains(&q.display().to_string()), "{cell}: {said}");
+        // Still in quarantine, still undoable, and its history says why.
+        let db = pc_db::Db::open(&cli.db).unwrap();
+        let e = db.journal_quarantined(None).unwrap().pop().unwrap();
+        assert_eq!(e.status, pc_db::JournalStatus::Done, "{cell}");
+        let events: Vec<_> = db
+            .journal_events(e.id)
+            .unwrap()
+            .into_iter()
+            .map(|ev| (ev.phase, ev.kind))
+            .collect();
+        assert!(
+            events.contains(&("purge".into(), "kept".into())),
+            "{cell}: {events:?}"
+        );
+    }
+}
+
+/// Every entry below `dir`, with its kind and identity: nothing added,
+/// nothing taken away.
+#[cfg(unix)]
+fn fingerprint_dir(dir: &Path) -> Vec<(PathBuf, u64, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out: Vec<_> = walkdir::WalkDir::new(dir)
+        .into_iter()
+        .map(|e| {
+            let e = e.unwrap();
+            let m = e.path().symlink_metadata().unwrap();
+            (e.path().to_path_buf(), m.ino(), m.mode())
+        })
+        .collect();
+    out.sort();
+    out
+}

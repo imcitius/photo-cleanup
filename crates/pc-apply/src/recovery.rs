@@ -110,11 +110,42 @@ fn spot(path: &str, proof: Option<&Proof>) -> Spot {
         Err(e) => Spot::Unreadable(e.to_string()),
         Ok(md) => match proof {
             None => Spot::Unproven,
-            Some(p) => match p.check(&md) {
+            Some(p) => match verdict_at(path, p, &md) {
                 Verdict::Same => Spot::Proven,
                 Verdict::Differs(w) | Verdict::Unprovable(w) => Spot::Other(w),
             },
         },
+    }
+}
+
+/// The evidence against what is at `path`, by [`Proof::verify`]: through
+/// an open descriptor when the evidence records a hash, so the content is
+/// compared too; a hash that cannot be read again is not a match.
+fn verdict_at(path: &str, p: &Proof, md: &fs::Metadata) -> Verdict {
+    if p.blake3.is_none() || !md.is_file() {
+        return p.check(md);
+    }
+    #[cfg(unix)]
+    {
+        // Never follow a link, never wait on a pipe put in its place.
+        let at = Path::new(path);
+        let opened = match (at.parent(), at.file_name().and_then(|n| n.to_str())) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                pc_core::anchored::Dir::open_following(parent)
+                    .and_then(|d| d.open_file(name, false))
+                    .ok()
+            }
+            _ => None,
+        };
+        match opened {
+            Some(f) => p.check_file(&f),
+            None => Verdict::Unprovable("its content can no longer be read"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        p.check(md)
     }
 }
 

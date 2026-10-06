@@ -870,9 +870,12 @@ fn cmd_clean(db: &Db, a: CleanArgs) -> Result<()> {
     for s in &totals.skipped {
         println!("  skipped: {s}");
     }
+    // `purge` deletes no bundle (el-3s9kp): saying it would reclaim this
+    // space would send a person to a command that keeps all of it.
     println!(
-        "\nNo space has come back yet — the data is in quarantine.\n\
-         To reclaim it: photo-cleanup derived purge --older-than 7d --yes"
+        "\nNo space has come back yet — the data is in quarantine, and can be undone.\n\
+         `derived purge` never deletes bundles: to reclaim the space, delete them from\n\
+         quarantine by hand if you are sure."
     );
     Ok(())
 }
@@ -883,11 +886,16 @@ fn cmd_purge(db: &Db, a: PurgeArgs) -> Result<()> {
         println!("Nothing to delete: no quarantine entry is older than that.");
         return Ok(());
     }
+    // Bundles and anything of Lightroom's are never deleted (el-3s9kp):
+    // they are not counted as to be deleted, and are named as kept.
+    let (kept, pending): (Vec<_>, Vec<_>) = pending
+        .into_iter()
+        .partition(|e| pc_apply::purge_keeps(e).is_some());
     let files: i64 = pending.iter().map(|e| e.file_count).sum();
     let bytes: i64 = pending.iter().map(|e| e.size).sum();
 
     println!(
-        "Will be deleted irreversibly: {}, {}, {}",
+        "Will be deleted irreversibly, each proven to be what it moved: {}, {}, {}",
         pc_core::count_en(pending.len() as i64, "object", "objects"),
         pc_core::count_en(files, "file", "files"),
         fmt_bytes(bytes as u64)
@@ -898,15 +906,39 @@ fn cmd_purge(db: &Db, a: PurgeArgs) -> Result<()> {
     if pending.len() > 10 {
         println!("  … and {} more", pending.len() - 10);
     }
+    if !kept.is_empty() {
+        println!(
+            "Kept, not deleted — bundles and Lightroom's data are never deleted by purge: {}",
+            pc_core::count_en(kept.len() as i64, "object", "objects")
+        );
+        for k in kept.iter().filter_map(pc_apply::purge_keeps) {
+            for (path, bytes) in &k.held {
+                println!("  {path} ({})", fmt_bytes(*bytes));
+            }
+        }
+    }
 
     if !a.yes {
         println!("\nThis cannot be undone. Add --yes to carry it out.");
         return Ok(());
     }
     let totals = pc_apply::purge(db, a.older_than)?;
+    // The receipt first, whatever follows: what went is gone either way.
     println!("\nDeleted: {}", totals.summary());
     for s in &totals.skipped {
         println!("  skipped: {s}");
+    }
+    for s in &totals.stopped {
+        println!("  stopped after deleting: {s}");
+    }
+    for s in &totals.kept {
+        println!("  {s}");
+    }
+    if !totals.stopped.is_empty() {
+        bail!(
+            "{} stopped after deleting part or all of what they moved; the counts above include it",
+            pc_core::count_en(totals.stopped.len() as i64, "entry", "entries")
+        );
     }
     Ok(())
 }

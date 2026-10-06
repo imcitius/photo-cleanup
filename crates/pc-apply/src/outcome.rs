@@ -125,6 +125,12 @@ pub struct Tally {
     /// Files brought back. An entry comes back whole or not at all (user
     /// decision (c)), so there is no partly walked-back entry to count.
     pub files_back: u64,
+    /// Quarantine entries deleted for good, whole.
+    pub purged_entries: u64,
+    /// Files deleted for good — each proven the one the entry moved.
+    pub purged_files: u64,
+    /// Bytes that came back: of files whose last link went.
+    pub purged_bytes: u64,
 }
 
 impl Tally {
@@ -137,6 +143,9 @@ impl Tally {
         self.bytes += o.bytes;
         self.entries_back += o.entries_back;
         self.files_back += o.files_back;
+        self.purged_entries += o.purged_entries;
+        self.purged_files += o.purged_files;
+        self.purged_bytes += o.purged_bytes;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -217,6 +226,18 @@ impl Tally {
                 self.files_back as i64,
                 ["файл вернулся", "файла вернулись", "файлов вернулось"],
                 ["file back", "files back"],
+            ));
+        }
+        if self.purged_files > 0 || self.purged_entries > 0 {
+            parts.push(pc_core::tf!(
+                "удалено окончательно: {0}, {1}",
+                "deleted for good: {0}, {1}",
+                pc_core::count(
+                    self.purged_files as i64,
+                    ["файл", "файла", "файлов"],
+                    ["file", "files"]
+                ),
+                fmt_bytes(self.purged_bytes)
             ));
         }
         if parts.is_empty() {

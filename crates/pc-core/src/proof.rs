@@ -120,13 +120,42 @@ impl Proof {
     }
 
     /// Whether `md` is the object this evidence was taken from.
+    /// The evidence against the object `md` describes, by metadata alone:
+    /// [`Proof::verify`] with no content to hash. Evidence that records a
+    /// hash is therefore never [`Verdict::Same`] here — ask
+    /// [`Proof::check_file`] through an open descriptor instead.
     pub fn check(&self, md: &Metadata) -> Verdict {
-        if self.v != VERSION {
-            return Verdict::Unprovable("evidence of an unknown version");
-        }
         let Some(now) = Proof::of(md) else {
             return Verdict::Unprovable("this system cannot name a file system object");
         };
+        self.verify(&now, None)
+    }
+
+    /// The evidence against the open `file`: its metadata and, where the
+    /// evidence records a hash, its content read through that descriptor.
+    pub fn check_file(&self, file: &std::fs::File) -> Verdict {
+        let md = match file.metadata() {
+            Ok(md) => md,
+            Err(_) => return Verdict::Unprovable("it can no longer be read"),
+        };
+        let Some(now) = Proof::of(&md) else {
+            return Verdict::Unprovable("this system cannot name a file system object");
+        };
+        self.verify(&now, Some(file))
+    }
+
+    /// The one comparison of recorded evidence with an object now (el-3s9kp,
+    /// el-wffu8): every field the evidence records must match, and a field
+    /// that cannot be read again is not a match. `now` is the object's
+    /// metadata; `content` is the descriptor `now` was read through, needed
+    /// only when the evidence records a hash, which is then recomputed
+    /// whole. Every caller — move, rollback, recovery, purge of a file and of
+    /// every file in a bundle — asks through this function; there is no
+    /// caller-specific subset of fields.
+    pub fn verify(&self, now: &Proof, content: Option<&std::fs::File>) -> Verdict {
+        if self.v != VERSION {
+            return Verdict::Unprovable("evidence of an unknown version");
+        }
         if (now.dev, now.ino, now.kind) != (self.dev, self.ino, self.kind) {
             return Verdict::Differs("another object");
         }
@@ -137,28 +166,24 @@ impl Proof {
             return Verdict::Differs("it was modified");
         }
         match (self.birth_ns, now.birth_ns) {
-            (Some(a), Some(b)) if a != b => Verdict::Differs("another object (birth time)"),
-            (Some(_), None) => Verdict::Unprovable("its birth time can no longer be read"),
-            _ => Verdict::Same,
-        }
-    }
-
-    /// [`Proof::check`] of an open file, and — where the evidence carries
-    /// one — its content hash, read through that same open file. A move
-    /// compares with this before and after its rename, so both sides of it
-    /// ask exactly the same question.
-    pub fn check_file(&self, file: &std::fs::File) -> Verdict {
-        let md = match file.metadata() {
-            Ok(md) => md,
-            Err(_) => return Verdict::Unprovable("it can no longer be read"),
-        };
-        match self.check(&md) {
-            Verdict::Same => {}
-            other => return other,
+            (Some(a), Some(b)) if a != b => return Verdict::Differs("another object (birth time)"),
+            (Some(_), None) => return Verdict::Unprovable("its birth time can no longer be read"),
+            _ => {}
         }
         let Some(want) = &self.blake3 else {
             return Verdict::Same;
         };
+        let Some(file) = content else {
+            return Verdict::Unprovable(
+                "its recorded content hash is not checked without the file",
+            );
+        };
+        // The descriptor must be the object `now` describes, or its bytes
+        // prove nothing about it.
+        match file.metadata().ok().as_ref().and_then(Proof::of) {
+            Some(held) if (held.dev, held.ino) == (now.dev, now.ino) => {}
+            _ => return Verdict::Unprovable("its content can no longer be read"),
+        }
         match hash_of(file) {
             Some(got) if got.eq_ignore_ascii_case(want) => Verdict::Same,
             Some(_) => Verdict::Differs("its content changed"),
@@ -258,5 +283,76 @@ mod tests {
             future.check(&fs::symlink_metadata(&a).unwrap()),
             Verdict::Unprovable(_)
         ));
+    }
+
+    /// el-wffu8: the one comparison rejects each recorded field that
+    /// differs on its own, and each recorded field it cannot read again.
+    #[test]
+    fn verify_rejects_every_single_differing_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        fs::write(&a, b"frame").unwrap();
+        let f = fs::File::open(&a).unwrap();
+        let now = Proof::of(&f.metadata().unwrap()).unwrap();
+        let mut was = now.clone();
+        was.birth_ns = Some(7);
+        let mut now_b = now.clone();
+        now_b.birth_ns = Some(7);
+        was.blake3 = Some(blake3::hash(b"frame").to_hex().to_string());
+        assert_eq!(was.verify(&now_b, Some(&f)), Verdict::Same);
+
+        type Edit = fn(&mut Proof);
+        let differs: [(&str, Edit); 7] = [
+            ("dev", |p| p.dev += 1),
+            ("ino", |p| p.ino += 1),
+            ("kind", |p| p.kind = Kind::Dir),
+            ("size", |p| p.size = p.size.map(|s| s + 1)),
+            ("mtime", |p| p.mtime_ns = p.mtime_ns.map(|t| t + 1)),
+            ("birth", |p| p.birth_ns = Some(8)),
+            ("blake3", |p| {
+                p.blake3 = Some(blake3::hash(b"other").to_hex().to_string())
+            }),
+        ];
+        for (field, edit) in differs {
+            let mut w = was.clone();
+            edit(&mut w);
+            assert!(
+                matches!(w.verify(&now_b, Some(&f)), Verdict::Differs(_)),
+                "{field}"
+            );
+        }
+
+        // Recorded, and no longer readable: not a match.
+        let mut gone = now_b.clone();
+        gone.birth_ns = None;
+        assert!(matches!(
+            was.verify(&gone, Some(&f)),
+            Verdict::Unprovable(_)
+        ));
+        assert!(matches!(was.verify(&now_b, None), Verdict::Unprovable(_)));
+        assert!(matches!(
+            was.check(&f.metadata().unwrap()),
+            Verdict::Unprovable(_) | Verdict::Differs(_)
+        ));
+        let mut future = was.clone();
+        future.v = VERSION + 1;
+        assert!(matches!(
+            future.verify(&now_b, Some(&f)),
+            Verdict::Unprovable(_)
+        ));
+
+        // A descriptor of another object proves nothing about this one.
+        let b = tmp.path().join("b");
+        fs::write(&b, b"frame").unwrap();
+        let other = fs::File::open(&b).unwrap();
+        assert!(matches!(
+            was.verify(&now_b, Some(&other)),
+            Verdict::Unprovable(_)
+        ));
+
+        // Unrecorded fields are not invented: no hash, nothing to read.
+        let mut plain = now.clone();
+        plain.blake3 = None;
+        assert_eq!(plain.verify(&now, None), Verdict::Same);
     }
 }

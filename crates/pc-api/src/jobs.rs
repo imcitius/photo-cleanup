@@ -416,10 +416,15 @@ fn execute(st: &AppState, id: i64, req: &Request, control: &Control) -> Result<(
                 moved_note(&done);
                 return Err(e);
             }
+            // An action that is no reviewed item (a purge entry pc-apply keeps,
+            // listed among the refusals) adds nothing to the reviewed bytes.
             let bytes = reviewed_bytes
                 .get(action.source_path())
                 .copied()
-                .unwrap_or(action.size());
+                .unwrap_or(match action {
+                    service::Action::Purge(_) => 0,
+                    _ => action.size(),
+                });
             let result = roots
                 .check()
                 .map_err(anyhow::Error::from)

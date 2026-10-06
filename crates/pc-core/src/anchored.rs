@@ -186,6 +186,68 @@ impl Dir {
         crate::disk::rename_no_replace_at(&self.fd, &a, &self.fd, &b)
     }
 
+    /// `unlinkat(fd, name, 0)`: the entry `name` in *this* folder, never a
+    /// path. POSIX has no conditional unlink — whatever bears the name at the
+    /// moment of the call goes — so the caller compares first and, after,
+    /// reads what it held to say what actually went (el-3s9kp).
+    pub fn remove_file_at(&self, name: &str) -> io::Result<()> {
+        let c = cname(name)?;
+        cvt(unsafe { libc::unlinkat(self.fd.as_raw_fd(), c.as_ptr(), 0) })?;
+        Ok(())
+    }
+
+    /// `unlinkat(fd, name, AT_REMOVEDIR)`: an *empty* folder in this folder.
+    /// The system refuses a folder with anything in it; nothing here walks
+    /// into one.
+    pub fn remove_dir_at(&self, name: &str) -> io::Result<()> {
+        let c = cname(name)?;
+        cvt(unsafe { libc::unlinkat(self.fd.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) })?;
+        Ok(())
+    }
+
+    /// The names in this folder (without `.` and `..`), read through the
+    /// held descriptor, not through its path.
+    pub fn names(&self) -> io::Result<Vec<std::ffi::OsString>> {
+        // `fdopendir` takes the descriptor over; it gets its own duplicate,
+        // rewound, so the held one is neither closed nor moved.
+        let dup = cvt(unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) })?;
+        let dir = unsafe { libc::fdopendir(dup) };
+        if dir.is_null() {
+            let e = io::Error::last_os_error();
+            unsafe { libc::close(dup) };
+            return Err(e);
+        }
+        unsafe { libc::rewinddir(dir) };
+        let mut out = Vec::new();
+        let result = loop {
+            // readdir reports an error only through errno, so it is cleared
+            // first: a null with errno still 0 is the end of the folder.
+            #[cfg(target_os = "macos")]
+            unsafe {
+                *libc::__error() = 0
+            };
+            #[cfg(target_os = "linux")]
+            unsafe {
+                *libc::__errno_location() = 0
+            };
+            let ent = unsafe { libc::readdir(dir) };
+            if ent.is_null() {
+                let e = io::Error::last_os_error();
+                break match e.raw_os_error() {
+                    Some(0) | None => Ok(()),
+                    _ => Err(e),
+                };
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) };
+            let bytes = name.to_bytes();
+            if bytes != b"." && bytes != b".." {
+                out.push(std::ffi::OsStr::from_bytes(bytes).to_os_string());
+            }
+        };
+        unsafe { libc::closedir(dir) };
+        result.map(|()| out)
+    }
+
     pub fn sync(&self) -> io::Result<()> {
         self.fd.sync_all()
     }

@@ -269,8 +269,11 @@ fn a_bundle_that_changed_since_the_scan_is_skipped() {
         .exists());
 }
 
+/// Purge never deletes a bundle (el-3s9kp, the user's decision of
+/// 2026-10-06): inside the holding period it is not even looked at, past it
+/// it is named as kept — and it stays quarantined and undoable.
 #[test]
-fn purge_deletes_only_after_the_retention_window() {
+fn purge_keeps_a_preview_bundle_before_and_after_the_retention_window() {
     let fx = build();
     let run_id = fx.db.latest_run().unwrap().unwrap();
     let bundles = all(&fx.db);
@@ -279,19 +282,23 @@ fn purge_deletes_only_after_the_retention_window() {
     pc_apply::quarantine(&fx.db, run_id, &dog, Some(&fx.quarantine)).unwrap();
 
     // Nothing is old enough for a seven-day window yet.
-    let kept = pc_apply::purge(&fx.db, 7 * 86_400).unwrap();
-    assert_eq!(kept.bundles, 0);
+    let held = pc_apply::purge(&fx.db, 7 * 86_400).unwrap();
+    assert_eq!(held.bundles, 0);
+    assert!(held.kept.is_empty(), "{:?}", held.kept);
     assert_eq!(pc_apply::quarantined_totals(&fx.db).unwrap().bundles, 1);
 
-    // With a zero window it goes for good.
-    let gone = pc_apply::purge(&fx.db, 0).unwrap();
-    assert_eq!(gone.bundles, 1);
+    // With a zero window it is kept, named, and nothing of it goes.
+    let kept = pc_apply::purge(&fx.db, 0).unwrap();
+    assert_eq!((kept.bundles, kept.files, kept.bytes), (0, 0, 0));
+    assert_eq!(kept.kept.len(), 1, "{kept:?}");
+    assert!(kept.kept[0].contains("Dogshow Previews.lrdata"), "{kept:?}");
     assert_eq!(
         fx.db.bundle(dog.id).unwrap().unwrap().state,
-        BundleState::Purged
+        BundleState::Quarantined
     );
-    assert!(
-        pc_apply::undo(&fx.db, 1).is_err(),
-        "откат после purge невозможен"
-    );
+    pc_apply::undo(&fx.db, 1).unwrap();
+    assert!(fx
+        .foto
+        .join("Lightroom_lib/Dogshow/Dogshow Previews.lrdata/1/2")
+        .is_dir());
 }

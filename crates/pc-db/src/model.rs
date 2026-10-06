@@ -284,7 +284,7 @@ pub struct JournalEvent {
 pub struct Event<'a> {
     /// `forward`, `undo`, `reconcile`, `adopt`, `purge`, `abandon`.
     pub phase: &'a str,
-    /// `done`, `partial`, `refused`, `begun`.
+    /// `done`, `partial`, `refused`, `begun`, `kept`.
     pub kind: &'a str,
     /// The words, as shown; may be empty.
     pub text: &'a str,

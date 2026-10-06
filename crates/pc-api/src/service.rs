@@ -811,6 +811,19 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     );
                     continue;
                 }
+                // A bundle, or anything of Lightroom's, is never deleted
+                // (el-3s9kp): pc-apply says so, in the words the command
+                // line prints. It is not an item to delete, so not counted;
+                // it still runs, to be kept and recorded as `derived purge`
+                // keeps and records it.
+                if let Some(kept) = pc_apply::purge_keeps(&e) {
+                    add_refusal(
+                        e.dst.clone().unwrap_or_else(|| e.src.clone()),
+                        kept.to_string(),
+                    );
+                    actions.push(Action::Purge(e));
+                    continue;
+                }
                 let mut item = json!({"journal_id":e.id,"path":e.dst,"dst":"Окончательное удаление","original":e.src,"size":e.size,"file_count":e.file_count});
                 // The entry already counts what travelled with the frame, so
                 // the companions are read off it rather than looked for on
@@ -1227,10 +1240,18 @@ pub fn apply_action(
         }
         Action::Undo(e) => per_entry(pc_apply::undo(db, e.id))?,
         Action::Reconcile(e) => per_entry(pc_apply::reconcile_undo(db, e.id).map(|r| r.done))?,
-        Action::Purge(e) => {
-            pc_apply::purge_entry_controlled(db, e.id, control)?;
-            ActionResult::default()
-        }
+        // What may be deleted is pc-apply's to prove, for the command line
+        // and the web alike (el-3s9kp). An entry it refuses, or stops part
+        // way, is this item's refusal with what actually went; the run goes
+        // on to the next entry, as `derived purge` does.
+        Action::Purge(e) => match pc_apply::purge_entry_controlled(db, e.id, control) {
+            Ok(done) => ActionResult {
+                done,
+                ..Default::default()
+            },
+            Err(err) if err.is::<pc_core::work::Cancelled>() => return Err(err),
+            Err(err) => ActionResult::refused(format!("{err:#}"), pc_apply::purged_before(&err)),
+        },
         Action::Adopt(f) => {
             let dst = pc_core::quarantine_origin_of(&f.path).context(pc_core::tr!(
                 "Непонятно, откуда этот файл",

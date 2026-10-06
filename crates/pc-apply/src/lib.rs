@@ -26,6 +26,7 @@ pub mod files;
 mod located;
 pub mod organize;
 pub mod outcome;
+mod purge;
 pub mod recovery;
 mod roots;
 mod unit;
@@ -37,6 +38,10 @@ pub use organize::{organize, undo_run, OrganizeReport};
 pub use outcome::{
     is_folder_moved, is_no_exclusive_rename, is_run_stop, stop_run, stopped_run, FolderMoved,
     Halted, NoExclusiveRename, Placed, Role, Route, Stopped, Tally, Whereabouts,
+};
+pub use purge::{
+    is_lightroom, purge_entry_controlled, purge_keeps, purge_kept, purge_stopped, purged_before,
+    KeptWhy, PurgeKept, PurgeStage, PurgeStopped,
 };
 pub use recovery::{
     reconcile, reconcile_undo, undo, undo_offered, undo_preview, Item, Reconciled, Standing,
@@ -61,7 +66,15 @@ pub struct Totals {
     pub bundles: u64,
     pub files: u64,
     pub bytes: u64,
+    /// Refused whole, nothing of it deleted: with why.
     pub skipped: Vec<String>,
+    /// Stopped after deleting (a [`PurgeStopped`]): what went is in the
+    /// counts above, and the entry needs a person — the command fails.
+    pub stopped: Vec<String>,
+    /// Kept by purge whatever their proof — every bundle, and anything of
+    /// Lightroom's ([`PurgeKept`]): nothing of them deleted, each with where
+    /// it is and how big, for a person to delete by hand if sure.
+    pub kept: Vec<String>,
 }
 
 impl Totals {
@@ -684,6 +697,9 @@ mod race_tests;
 #[cfg(all(test, unix))]
 mod binding_tests;
 
+#[cfg(all(test, unix))]
+mod purge_tests;
+
 /// The catalogue's own answer, asked at the moment of the move.
 ///
 /// A scan writes down what it found — and by the time a plan is carried out,
@@ -764,6 +780,8 @@ pub fn quarantine(
     let dst_str = dst.to_string_lossy().into_owned();
     // A bundle moves as one directory: one entry, with the evidence of which
     // directory it is, so its undo does not take a stranger for it either.
+    // Purge never deletes it: a bundle in quarantine is a person's to delete
+    // (el-3s9kp, the user's decision of 2026-10-06).
     let manifest = [pc_db::Moved {
         src: b.path.clone(),
         dst: dst_str.clone(),
@@ -983,119 +1001,46 @@ pub fn abandon_orphan(
 
 /// Permanently remove quarantined data older than `older_than_secs`.
 ///
-/// This is the only destructive operation in the tool.
+/// This is the only destructive operation in the tool, and it deletes only
+/// what it proves to be what each entry moved ([`purge_entry_controlled`]).
+/// The totals are what actually went — including what an entry that
+/// stopped after deleting had deleted (el-8s63g B2). An entry refused whole
+/// is named in `skipped`, one that stopped after deleting in `stopped`,
+/// each with why; a bundle, or anything of Lightroom's, in `kept`.
 pub fn purge(db: &Db, older_than_secs: i64) -> Result<Totals> {
     let cutoff = pc_core::time::now_unix() - older_than_secs;
     let entries = db.journal_quarantined(Some(cutoff))?;
     let mut t = Totals::default();
     for e in entries {
-        match purge_entry(db, e.id) {
-            Ok(()) => {
-                t.bundles += 1;
-                t.files += e.file_count as u64;
-                t.bytes += e.size as u64;
+        let done = match purge_entry(db, e.id) {
+            Ok(done) => done,
+            Err(err) if purge::purge_kept(&err).is_some() => {
+                t.kept.push(format!("{err:#}"));
+                Tally::default()
             }
-            Err(err) => t.skipped.push(format!("{} — {err}", e.src)),
-        }
+            Err(err) if purge::purge_stopped(&err).is_some() => {
+                t.stopped.push(format!("{} — {err:#}", e.src));
+                purged_before(&err)
+            }
+            Err(err) => {
+                t.skipped.push(format!("{} — {err:#}", e.src));
+                Tally::default()
+            }
+        };
+        t.bundles += done.purged_entries;
+        t.files += done.purged_files;
+        t.bytes += done.purged_bytes;
     }
     Ok(t)
 }
 
 /// Purge one previously reviewed quarantine entry.
-pub fn purge_entry(db: &Db, id: i64) -> Result<()> {
+pub fn purge_entry(db: &Db, id: i64) -> Result<Tally> {
     purge_entry_controlled(db, id, &pc_core::work::Control::default())
 }
-/// A partially purged entry is left pending: it must never be offered as
-/// intact, undoable quarantine after a cancellation or server restart.
-pub fn purge_entry_controlled(db: &Db, id: i64, control: &pc_core::work::Control) -> Result<()> {
-    let e = db.journal_entry(id)?.context(pc_core::tr!(
-        "нет записи карантина",
-        "no such quarantine entry"
-    ))?;
-    if e.status != JournalStatus::Done || !matches!(e.op.as_str(), "quarantine" | "quarantine-file")
-    {
-        bail!(
-            "{}",
-            pc_core::tf!(
-                "запись {0} не находится в карантине",
-                "entry {0} is not in quarantine",
-                id
-            )
-        );
-    }
-    // A list this version cannot read says nothing about which files beside
-    // the entry are its own; deleting by name would guess (el-1y8uo B2).
-    recovery::readable(&e)?;
-    // An entry with an object found away from its record, or whose place
-    // could not be proven, is not deleted by its recorded paths: those may
-    // name something else by now (el-lvtmk D6b). Deleting by proof is the
-    // separate task el-3s9kp; until then such an entry is refused whole.
-    if !e.located.is_empty() {
-        bail!(
-            "{}",
-            pc_core::tf!(
-                "запись {0}: место перенесённого не подтверждено по записанным путям ({1}); \
-                 окончательное удаление по путям отказано, ничего не удалено",
-                "entry {0}: what it moved is not proven to be at its recorded paths ({1}); \
-                 permanent deletion by those paths is refused, nothing was deleted",
-                id,
-                e.located
-                    .iter()
-                    .map(|l| format!("{} — {}", l.src, l.at.shown()))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
-        );
-    }
-    let dst = e.dst.as_deref().context(pc_core::tr!(
-        "в записи нет пути назначения",
-        "the entry has no destination path"
-    ))?;
-    let path = Path::new(dst);
-    control.check()?;
-    db.journal_close(
-        id,
-        JournalStatus::Pending,
-        &pc_db::Event {
-            text: "Окончательное удаление начато; при прерывании часть файлов уже может отсутствовать",
-            ..pc_db::Event::new("purge", "begun")
-        },
-    )?;
-    // Exactly what this operation moved here, when it wrote it down; for an
-    // older row, whatever carries the same name beside it.
-    let rest: Vec<PathBuf> = if e.manifest.is_empty() {
-        files::companions(path)
-    } else {
-        e.manifest
-            .iter()
-            .filter(|m| m.src != e.src)
-            .map(|m| PathBuf::from(&m.dst))
-            .collect()
-    };
-    remove_controlled(path, control)?;
-    for side in rest {
-        remove_controlled(&side, control)?;
-    }
-    db.journal_mark_purged(id)?;
-    // By path, for the same reason as in `undo`: the number in the entry may
-    // now belong to a file that is still in the archive, and marking that one
-    // purged would take it out of every view while its bytes sit untouched.
-    match e.op.as_str() {
-        "quarantine" => {
-            if let Some(id) = db.bundle_id_at(&e.src)? {
-                db.set_bundle_state(id, BundleState::Purged)?;
-            }
-        }
-        "quarantine-file" => {
-            if let Some(id) = db.file_id_at(&e.src)? {
-                db.set_file_state(id, "purged")?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
 
+/// Deletes an orphan the journal never claimed (`abandon`), recursively and
+/// by path: there is no record to prove it against. Purge does not use it.
 fn remove_controlled(path: &Path, control: &pc_core::work::Control) -> Result<()> {
     control.current(&path.display().to_string())?;
     match fs::symlink_metadata(path) {

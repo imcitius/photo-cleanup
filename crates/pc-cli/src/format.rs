@@ -128,7 +128,7 @@ pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
     if footer {
         println!(
             "\nИтого к переносу: {}\n\
-             (место освободится только после `derived purge`)",
+             (место освободится, только если удалить вручную: `derived purge` бандлов не удаляет)",
             fmt_bytes(grand_removable)
         );
     }

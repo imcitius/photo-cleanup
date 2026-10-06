@@ -99,7 +99,8 @@ by hand say so, and do not depend on the role checkboxes above.
 | Smart Previews | removable only when **every** master the catalogue references is found on disk |
 | changed since the scan | skipped, never moved |
 | quarantine on another disk | refused: the move would silently become a copy |
-| deletion | `purge` only, with an explicit `--yes`, only after the holding period |
+| deletion | `purge` only, with an explicit `--yes`, only after the holding period, and only files proven to be the ones moved |
+| bundles and Lightroom in quarantine | **never deleted by `purge`** — previews, caches and anything of Lightroom's are named as kept, with path and size, for you to delete by hand if you are sure |
 
 Every move is written to a journal **before** the filesystem is touched, so an
 interrupted run leaves a row pointing at exactly what to inspect.

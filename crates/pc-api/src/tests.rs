@@ -98,10 +98,52 @@ impl Fixture {
         assert_eq!(s, 202, "{v}");
         self.wait(v["job_id"].as_i64().unwrap()).await
     }
+    /// Synthetic photographs, each with an identical copy, indexed, built
+    /// into families, and the copies moved into quarantine by a reviewed
+    /// plan; past the holding period. `(name, shade)`; returns the encoded
+    /// size of each.
+    async fn quarantined_copies(&self, frames: &[(&str, u8)]) -> Vec<u64> {
+        let mut sizes = Vec::new();
+        for (name, shade) in frames {
+            let img = image::RgbImage::from_fn(240, 180, |x, y| {
+                image::Rgb([(x % 256) as u8, (y % 256) as u8, *shade])
+            });
+            let mut encoded = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+                .encode_image(&img)
+                .unwrap();
+            std::fs::write(self.archive.join(format!("{name}.jpg")), &encoded).unwrap();
+            std::fs::write(self.archive.join(format!("{name} copy.jpg")), &encoded).unwrap();
+            sizes.push(encoded.len() as u64);
+        }
+        let id = self
+            .start("index", json!({"roots":[self.archive],"min_size":0}))
+            .await;
+        assert_eq!(self.wait(id).await["state"], "done");
+        let id = self.start("families", json!({})).await;
+        assert_eq!(self.wait(id).await["state"], "done");
+        let plan = self.preview("plan-apply", json!({"roles":["copy"]})).await;
+        assert_eq!(
+            plan["items"].as_array().unwrap().len(),
+            frames.len(),
+            "{plan}"
+        );
+        assert_eq!(self.apply(&plan).await["state"], "done");
+        self.state
+            .db
+            .lock()
+            .unwrap()
+            .conn
+            .execute("UPDATE journal SET applied_at=1 WHERE status='done'", [])
+            .unwrap();
+        sizes
+    }
     fn bundle(&self, name: &str) {
         let dir = self.archive.join(format!("{name} Previews.lrdata"));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("preview.jpg"), b"rebuildable preview").unwrap();
+        // A synthetic Lightroom preview folder, 19 bytes. Purge never
+        // deletes it (el-3s9kp): it is kept, for a person to delete.
+        std::fs::write(dir.join("preview.lrprev"), b"AgHg rebuildable pv").unwrap();
     }
 }
 #[tokio::test]
@@ -195,6 +237,7 @@ async fn reviewed_derived_cycle_undo_and_purge_and_stale_plan() {
         .conn
         .execute("UPDATE journal SET applied_at=1 WHERE status='done'", [])
         .unwrap();
+    let (_, before) = f.req("GET", "/api/status", Value::Null).await;
     let purge = f
         .preview("derived-purge", json!({"older_than_secs":604800}))
         .await;
@@ -206,9 +249,42 @@ async fn reviewed_derived_cycle_undo_and_purge_and_stale_plan() {
         )
         .await;
     assert_eq!(s, 400);
-    assert_eq!(f.apply(&purge).await["state"], "done");
+    // Bundles are never deleted by purge (el-3s9kp): nothing to delete is
+    // offered, each is named as kept in pc-apply's words — the words the
+    // command line prints — and running it records that, deleting nothing.
+    assert_eq!(purge["items"].as_array().unwrap().len(), 0, "{purge}");
+    assert_eq!(purge["total_bytes"], 0, "{purge}");
+    let kept = purge["refusals"].as_array().unwrap();
+    assert_eq!(kept.len(), 2, "{purge}");
+    for k in kept {
+        let why = k["why"].as_str().unwrap();
+        assert!(why.contains("delete it by hand if you are sure"), "{why}");
+        assert!(why.contains(k["path"].as_str().unwrap()), "{why}");
+    }
+    let done = f.apply(&purge).await;
+    assert_eq!(done["state"], "done", "{done}");
+    assert!(
+        done["progress"]["refusals"]
+            .to_string()
+            .contains("delete it by hand if you are sure"),
+        "{done}"
+    );
     let (_, status) = f.req("GET", "/api/status", Value::Null).await;
-    assert_eq!(status["quarantined_bytes"], 0);
+    assert_eq!(status["quarantined_bytes"], before["quarantined_bytes"]);
+    assert_ne!(status["quarantined_bytes"], 0);
+    let db = f.state.db.lock().unwrap();
+    for e in db.journal_quarantined(None).unwrap() {
+        assert!(Path::new(e.dst.as_deref().unwrap())
+            .join("preview.lrprev")
+            .exists());
+        let events = db.journal_events(e.id).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|ev| ev.phase == "purge" && ev.kind == "kept"),
+            "{events:?}"
+        );
+    }
 }
 #[tokio::test]
 async fn open_lightroom_at_apply_time_invalidates_a_preview() {
@@ -1001,6 +1077,52 @@ async fn a_purge_takes_the_sidecar_with_the_frame_and_leaves_nothing_behind() {
     // And what was kept is untouched.
     assert!(f.archive.join("a.jpg").exists());
     assert!(f.archive.join("a.xmp").exists());
+}
+
+#[tokio::test]
+async fn a_web_purge_leaves_a_stranger_at_the_recorded_path_and_says_why() {
+    // The same proof as the command line (el-3s9kp): the web job asks
+    // pc-apply, and what pc-apply refuses stays — named, with nothing
+    // counted as deleted.
+    let f = Fixture::new();
+    f.quarantined_copies(&[("first", 90), ("second", 30)]).await;
+    let quarantined: Vec<String> = {
+        let db = f.state.db.lock().unwrap();
+        db.journal_quarantined(None)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.dst.unwrap())
+            .collect()
+    };
+    let stranger_at = quarantined
+        .iter()
+        .find(|d| d.contains("first"))
+        .map(PathBuf::from)
+        .unwrap();
+    // The copy of "first" is moved aside by someone else, and another file
+    // takes its name.
+    let aside = f.archive.join("aside.jpg");
+    std::fs::rename(&stranger_at, &aside).unwrap();
+    std::fs::write(&stranger_at, b"someone else's photograph").unwrap();
+
+    let purge = f
+        .preview("derived-purge", json!({"older_than_secs":604800}))
+        .await;
+    assert_eq!(purge["items"].as_array().unwrap().len(), 2, "{purge}");
+    let done = f.apply(&purge).await;
+    assert_eq!(done["state"], "done", "{done}");
+
+    assert_eq!(
+        std::fs::read(&stranger_at).unwrap(),
+        b"someone else's photograph",
+        "a file that is not the one moved was deleted"
+    );
+    assert!(aside.exists());
+    let refusals = done["progress"]["refusals"].to_string();
+    assert!(refusals.contains("first"), "{done}");
+    // The other, proven, went.
+    let second = quarantined.iter().find(|d| d.contains("second")).unwrap();
+    assert!(!Path::new(second).exists(), "{done}");
 }
 
 #[tokio::test]
@@ -1957,3 +2079,30 @@ async fn the_preview_writes_nothing_into_a_configured_quarantine() {
 
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
+
+#[tokio::test]
+async fn reviewer_web_finalization_failure_keeps_actual_counts() {
+    // Re-mapped from a preview bundle to a photograph's copy: purge deletes
+    // no bundle any more (el-3s9kp); the boundary is the same.
+    let f = Fixture::new();
+    let sizes = f.quarantined_copies(&[("first", 90)]).await;
+    let at = {
+        let db = f.state.db.lock().unwrap();
+        let at = db.journal_quarantined(None).unwrap()[0]
+            .dst
+            .clone()
+            .unwrap();
+        db.conn.execute_batch("CREATE TRIGGER fail_purge_close BEFORE UPDATE OF status ON journal WHEN NEW.status='purged' BEGIN SELECT RAISE(FAIL,'synthetic finalization failure'); END;").unwrap();
+        at
+    };
+    let p = f
+        .preview("derived-purge", json!({"older_than_secs":604800}))
+        .await;
+    let done = f.apply(&p).await;
+    assert!(!Path::new(&at).exists());
+    let note = done["progress"]["note"].as_str().unwrap_or("");
+    assert!(
+        note.contains("1 file") && note.contains(&pc_core::fmt_bytes(sizes[0])),
+        "caller must see actual destruction: {done}"
+    );
+}
