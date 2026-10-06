@@ -1,19 +1,37 @@
 use pc_core::DerivedKind;
 use std::path::Path;
 
+/// `name` without `suffix`, compared without regard to case.
+///
+/// The suffixes are ASCII; `to_lowercase()` of the tail is compared, so a
+/// tail whose lowercase changes length simply does not match — and the
+/// caller still files such a name as Lightroom's by its extension.
+fn strip_suffix_nocase<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
+    let cut = name.len().checked_sub(suffix.len())?;
+    if !name.is_char_boundary(cut) {
+        return None;
+    }
+    (name[cut..].to_lowercase() == suffix).then(|| &name[..cut])
+}
+
 /// Recognise a derived-data bundle by directory name.
 ///
 /// Returns the kind and, when the name implies one, the base name of the
 /// owning Lightroom catalog (`"Dog Previews.lrdata"` -> `"Dog"`).
+///
+/// Case does not matter (`PREVIEWS.LRDATA` is Lightroom's too), and any
+/// folder carrying one of Lightroom's extensions is recorded as Lightroom's,
+/// so the walk never enters it. Recording is not selecting: nothing of
+/// Lightroom's is ever moved (el-126jk, see `pc_core::derived`).
 pub fn classify_dir(name: &str) -> Option<(DerivedKind, Option<String>)> {
-    if let Some(stem) = name.strip_suffix(".lrdata") {
+    if let Some(stem) = strip_suffix_nocase(name, ".lrdata") {
         // Order matters: "Smart Previews" also ends with "Previews".
         for (suffix, kind) in [
-            (" Smart Previews", DerivedKind::LrSmartPreviews),
-            (" Previews", DerivedKind::LrPreviews),
-            (" Helper", DerivedKind::LrHelper),
+            (" smart previews", DerivedKind::LrSmartPreviews),
+            (" previews", DerivedKind::LrPreviews),
+            (" helper", DerivedKind::LrHelper),
         ] {
-            if let Some(owner) = stem.strip_suffix(suffix) {
+            if let Some(owner) = strip_suffix_nocase(stem, suffix) {
                 if !owner.is_empty() {
                     return Some((kind, Some(owner.to_string())));
                 }
@@ -22,13 +40,13 @@ pub fn classify_dir(name: &str) -> Option<(DerivedKind, Option<String>)> {
         return Some((DerivedKind::LrDataOther, None));
     }
 
-    if let Some(owner) = name.strip_suffix(".lrcat-data") {
+    if let Some(owner) = strip_suffix_nocase(name, ".lrcat-data") {
         let owner = (!owner.is_empty()).then(|| owner.to_string());
         return Some((DerivedKind::LrCatalogData, owner));
     }
 
-    if matches!(name, "@eaDir" | ".thumbnails") {
-        return Some((DerivedKind::SystemJunk, None));
+    if pc_core::derived::has_lightroom_extension(name) {
+        return Some((DerivedKind::LrDataOther, None));
     }
 
     None
@@ -85,6 +103,26 @@ mod tests {
         assert_eq!(
             classify_dir("JustPhotos Helper.lrdata"),
             Some((DerivedKind::LrHelper, Some("JustPhotos".into())))
+        );
+    }
+
+    #[test]
+    fn lightroom_folders_are_recognised_in_any_case() {
+        assert_eq!(
+            classify_dir("PREVIEWS.LRDATA"),
+            Some((DerivedKind::LrDataOther, None))
+        );
+        assert_eq!(
+            classify_dir("Cat SMART Previews.LrData"),
+            Some((DerivedKind::LrSmartPreviews, Some("Cat".into())))
+        );
+        assert_eq!(
+            classify_dir("X.LRCAT-DATA"),
+            Some((DerivedKind::LrCatalogData, Some("X".into())))
+        );
+        assert_eq!(
+            classify_dir("Old.lrlibrary"),
+            Some((DerivedKind::LrDataOther, None))
         );
     }
 

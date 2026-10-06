@@ -1,6 +1,33 @@
 import { test, expect, main, idle } from "./isolated";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+
+// A complete Finder .DS_Store holding no records: the buddy allocator, its
+// root block with the address table and the DSDB table of contents, the
+// DSDB header and an empty leaf; the same bytes as pc-core's
+// derived/fixtures.rs. Well-formed, and still never moved (el-2rpxq).
+function dsStore(): Buffer {
+  const f = Buffer.alloc(4 + 0x1000);
+  f.writeUInt32BE(1, 0);
+  f.write("Bud1", 4, "latin1");
+  f.writeUInt32BE(0x800, 8);
+  f.writeUInt32BE(0x800, 12);
+  f.writeUInt32BE(0x800, 16);
+  Buffer.from([
+    0, 0, 0x10, 0x0c, 0, 0, 0, 0x87, 0, 0, 0x20, 0x0b, 0, 0, 0, 0,
+  ]).copy(f, 20);
+  const root = 4 + 0x800;
+  const addrs = [0x800 | 11, 0x20 | 5, 0x40 | 6];
+  f.writeUInt32BE(addrs.length, root);
+  addrs.forEach((a, i) => f.writeUInt32BE(a, root + 8 + 4 * i));
+  let p = root + 8 + 256 * 4;
+  f.writeUInt32BE(1, p);
+  f.writeUInt8(4, p + 4);
+  f.write("DSDB", p + 5, "latin1");
+  f.writeUInt32BE(1, p + 9);
+  [2, 0, 0, 1, 0x1000].forEach((x, i) => f.writeUInt32BE(x, 4 + 0x20 + 4 * i));
+  return f;
+}
 test("real archive goes through scan, index, review, quarantine, undo and organization in the browser", async ({
   page,
   request,
@@ -14,11 +41,16 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
   mkdirSync(archive);
   mkdirSync(out);
   mkdirSync(join(archive, "Backup"));
+  // Lightroom's: listed with its reason, never moved (el-126jk).
   mkdirSync(join(archive, "Example Previews.lrdata"));
   writeFileSync(
     join(archive, "Example Previews.lrdata", "cache"),
     Buffer.alloc(12345),
   );
+  // System junk, well-formed: "Previews and caches" moves none of it and
+  // says why (el-126jk, el-2rpxq).
+  mkdirSync(join(archive, "@eaDir"));
+  writeFileSync(join(archive, "@eaDir", ".DS_Store"), dsStore());
   await page.goto("/#setup");
   const data = await page.evaluate(() => {
     const c = document.createElement("canvas");
@@ -221,30 +253,39 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .getByRole("navigation")
     .getByRole("link", { name: "Previews and caches", exact: true })
     .click();
+  await expect(
+    main(page).getByText(
+      /Lightroom is never touched: Example Previews\.lrdata/,
+    ),
+  ).toBeVisible();
   await main(page)
     .getByRole("button", { name: "Plan preview", exact: true })
     .click();
-  await main(page)
-    .getByRole("button", { name: "Move to quarantine", exact: true })
-    .click();
-  await page
-    .getByRole("dialog")
-    .getByRole("button", { name: "Run the plan", exact: true })
-    .click();
-  await finished();
+  await expect(
+    main(page).getByText(/derived clean moves no system files/).first(),
+  ).toBeVisible();
+  await expect(
+    main(page).getByRole("button", { name: "Move to quarantine", exact: true }),
+  ).toBeDisabled();
+  // The purge preview is sealed by a token over its items *and* refusals.
+  // An entry moved within the current second is still refused as "holding
+  // period not passed"; a second later it is past.
+  // Waiting only for the two files to count let the page's preview and the
+  // job straddle that second — the job then refused, fail-closed, as a
+  // changed plan. So wait until nothing is held back any more.
   await expect
-    .poll(
-      async () =>
-        (
-          await (
-            await request.post("/api/preview", {
-              data: { kind: "derived-purge", params: { older_than_secs: 0 } },
-            })
-          ).json()
-        ).total_files,
-    )
-    // The copy and its sidecar; the preview bundle is never deleted by
-    // purge (el-3s9kp) and is named among the refusals as kept instead.
+    .poll(async () => {
+      const p = await (
+        await request.post("/api/preview", {
+          data: { kind: "derived-purge", params: { older_than_secs: 0 } },
+        })
+      ).json();
+      const held = p.refusals.some((r: { why: string }) =>
+        r.why.includes("holding period"),
+      );
+      return held ? -1 : p.total_files;
+    })
+    // The copy and its sidecar.
     .toBe(2);
   const journal = await (await request.get("/api/journal")).json();
   const destinations = journal
@@ -270,15 +311,16 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .getByRole("button", { name: "Delete for good", exact: true })
     .click();
   await finished();
+  expect(destinations.some((d) => d.endsWith("@eaDir"))).toBe(false);
+  expect(existsSync(join(archive, "@eaDir", ".DS_Store"))).toBe(true);
   for (const dst of destinations) {
-    if (dst.endsWith(".lrdata")) {
-      expect(existsSync(join(dst, "cache"))).toBe(true);
-      continue;
-    }
     expect(existsSync(dst)).toBe(false);
     if (dst.endsWith(".jpg"))
       expect(existsSync(dst.replace(/\.jpg$/, ".xmp"))).toBe(false);
   }
+  expect(existsSync(join(archive, "Example Previews.lrdata", "cache"))).toBe(
+    true,
+  );
   expect(existsSync(join(archive, "20190714_183200.jpg"))).toBe(true);
   expect(existsSync(join(archive, "20190714_183200.xmp"))).toBe(true);
 });

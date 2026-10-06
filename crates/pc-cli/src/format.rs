@@ -52,11 +52,9 @@ fn kind_order(k: DerivedKind) -> u8 {
     }
 }
 
+/// The inventory by kind. Nothing in it is movable (el-126jk, el-2rpxq):
+/// every present bundle is named with the reason it stays.
 pub fn print_grouped(bundles: &[Bundle]) {
-    print_grouped_opts(bundles, true)
-}
-
-pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
     let mut groups: BTreeMap<(u8, &str), Vec<&Bundle>> = BTreeMap::new();
     for b in bundles {
         groups
@@ -65,21 +63,12 @@ pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
             .push(b);
     }
 
-    let mut grand_removable = 0u64;
-
     for ((_, _), items) in &groups {
         let kind = items[0].kind;
-        let removable: u64 = items
-            .iter()
-            .filter(|b| b.removable())
-            .map(|b| b.size as u64)
-            .sum();
-        grand_removable += removable;
-
-        let header = if kind.regenerable() {
-            format!("{}  —  returns {}", kind.label(), fmt_bytes(removable))
+        let header = if kind.is_lightroom() {
+            format!("{}  —  NEVER TOUCHED", kind.label())
         } else {
-            format!("{}  —  NEVER REMOVED", kind.label())
+            format!("{}  —  NEVER MOVED", kind.label())
         };
         println!(
             "\n{}\n{}",
@@ -87,7 +76,8 @@ pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
             "─".repeat(header.chars().count())
         );
 
-        // System junk is thousands of tiny files: summarise instead of listing.
+        // System junk is thousands of tiny files: summarise instead of
+        // listing — except what is kept, which is named with its reason.
         if kind == DerivedKind::SystemJunk {
             let files: i64 = items.iter().map(|b| b.file_count).sum();
             let size: i64 = items.iter().map(|b| b.size).sum();
@@ -96,6 +86,9 @@ pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
                 pc_core::count(files, ["файл", "файла", "файлов"], ["file", "files"]),
                 fmt_bytes(size as u64)
             );
+            for b in items.iter().filter(|b| b.state == BundleState::Present) {
+                println!("  [ ] {}\n      └─ {}", b.path, b.refusal());
+            }
             continue;
         }
 
@@ -103,9 +96,7 @@ pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
             let mark = match () {
                 _ if b.state == BundleState::Quarantined => "[~]",
                 _ if b.state == BundleState::Purged => "[.]",
-                _ if !b.regenerable => "[—]",
-                _ if b.blocked_code.is_some() => "[ ]",
-                _ => "[x]",
+                _ => "[—]",
             };
             let name = short_path(&b.path);
             let line = format!(
@@ -116,8 +107,8 @@ pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
                 b.rebuild_cost_hint.as_deref().unwrap_or("")
             );
             println!("{}", line.trim_end());
-            if let Some(detail) = &b.blocked_detail {
-                println!("      └─ {detail}");
+            if b.state == BundleState::Present {
+                println!("      └─ {}", b.refusal());
             }
             if b.state == BundleState::Quarantined {
                 println!("      └─ in quarantine");
@@ -125,13 +116,11 @@ pub fn print_grouped_opts(bundles: &[Bundle], footer: bool) {
         }
     }
 
-    if footer {
-        println!(
-            "\nИтого к переносу: {}\n\
-             (место освободится, только если удалить вручную: `derived purge` бандлов не удаляет)",
-            fmt_bytes(grand_removable)
-        );
-    }
+    println!(
+        "\nИтого к переносу: {}\n\
+         (место освободится, только если удалить вручную: `derived purge` бандлов не удаляет)",
+        fmt_bytes(0)
+    );
 }
 
 /// Keep the last three components: enough to identify the catalog.

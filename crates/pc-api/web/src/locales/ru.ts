@@ -634,7 +634,7 @@ export const messages = {
   zaschischat_fayly_iz_katalogov_lightroom:
     "Защищать файлы из каталогов Lightroom",
   prevyu_mozhno_peresozdat_esli_ishodniki_dostupny_smart_previews_p:
-    "Превью можно пересоздать, если исходники доступны. Smart Previews проверяются отдельно. Данные ИИ-масок и Denoise не удаляются.",
+    "Данные Lightroom не трогаются никогда: каталоги, превью, Smart Previews, данные ИИ-масок и Denoise и резервные копии остаются на месте. Системные файлы (.DS_Store, ._*, Thumbs.db, desktop.ini, @eaDir, .thumbnails) тоже не переносятся: ни имя, ни структура не доказывают, что в таком файле нет ничего вашего, а спутник вроде ._* принадлежит своему файлу. Здесь показано, что найдено и почему оно остаётся.",
   proizvodnye_dannye_poka_ne_naydeny: "Производные данные пока не найдены",
   nachat_opis_2: "Начать опись →",
   faylov_2: "файлов · ",

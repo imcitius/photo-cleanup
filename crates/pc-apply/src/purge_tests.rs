@@ -1,7 +1,8 @@
 //! `purge` deletes only what it proves each entry moved (el-3s9kp).
 //!
 //! Every test goes through the real consumer — a real quarantine by
-//! `quarantine_file`/`quarantine`, then `crate::purge`, the function
+//! `quarantine_file` (a bundle: as an earlier version moved it, see
+//! `crate::legacy`), then `crate::purge`, the function
 //! `photo-cleanup derived purge` runs — on disposable files in a temporary
 //! folder. What is put in the way is what another program could leave at a
 //! recorded path: another file, a link, a folder, a quarantine folder
@@ -83,7 +84,7 @@ impl Fx {
     }
 
     /// A folder of previews: three files, two levels of subfolders,
-    /// scanned and moved into quarantine whole by the real apply.
+    /// scanned and moved into quarantine whole as an earlier version did.
     fn bundle(&self, name: &str) -> (i64, PathBuf) {
         // Lightroom's own format: every `.lrprev` starts `AgHg`. The sizes
         // are those the bundle tests count on.
@@ -99,7 +100,7 @@ impl Fx {
     }
 
     /// A bundle of `kind` holding `files`, scanned and moved into
-    /// quarantine by the real apply: the entry and where the bundle is now.
+    /// quarantine as an earlier version did: the entry and where the bundle is now.
     fn bundle_of(
         &self,
         name: &str,
@@ -113,11 +114,11 @@ impl Fx {
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(p, bytes).unwrap();
         }
-        let (count, size, newest) = dir_stats(&dir);
+        let (count, size, newest) = crate::legacy::dir_stats(&dir);
         self.moved_bundle(&dir, true, kind, count as i64, size as i64, newest)
     }
 
-    /// A bundle that is one file (system junk), moved by the real apply.
+    /// A bundle that is one file (system junk), moved as an earlier version did.
     fn junk_file(&self, name: &str, bytes: &[u8]) -> (i64, PathBuf) {
         let path = self.archive.join(name);
         fs::write(&path, bytes).unwrap();
@@ -165,10 +166,10 @@ impl Fx {
             .into_iter()
             .find(|b| b.path == path.display().to_string())
             .unwrap();
-        assert_eq!(
-            quarantine(&self.db, self.run, &b, None).unwrap(),
-            Outcome::Moved
-        );
+        // As an earlier version moved it: Lightroom bundles and unproven
+        // junk are no longer moved at all (el-126jk), but what is already
+        // in quarantine is what purge has to answer for.
+        crate::legacy::moved_by_an_earlier_version(&self.db, self.run, &b).unwrap();
         let id = self
             .db
             .journal_quarantined(None)

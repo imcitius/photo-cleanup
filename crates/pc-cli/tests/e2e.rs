@@ -49,17 +49,19 @@ fn catalog(path: &Path, root: &Path, rel: &str, files: &[&str]) {
     }
 }
 
+#[path = "../../pc-core/src/derived/fixtures.rs"]
+mod junk;
+const EA_DIR: &str = "D/2019/@eaDir";
+
 struct Fixture {
     _tmp: tempfile::TempDir,
     foto: PathBuf,
-    quarantine: PathBuf,
     db: Db,
 }
 
 fn build() -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let foto = tmp.path().join("foto");
-    let quarantine = tmp.path().join("quarantine");
 
     // A live event catalog with ordinary previews and a helper bundle.
     let dog = foto.join("Lightroom_lib/Dogshow");
@@ -97,7 +99,23 @@ fn build() -> Fixture {
     // Real photographs and a backup catalog that must be recognised as one.
     write(&foto.join("D/2019/DSC09999.ARW"), 4096);
     write(&foto.join("D/2019/DSC09999.JPG"), 2048);
-    write(&foto.join(".DS_Store"), 0);
+    // System files, none of which is recorded or moved (el-2rpxq): a
+    // well-formed `.DS_Store`, an empty one, and two `@eaDir` folders — one
+    // of `.DS_Store`s, one holding a JPEG.
+    fs::write(foto.join(".DS_Store"), junk::ds_store()).unwrap();
+    write(&foto.join("D/.DS_Store"), 0);
+    fs::create_dir_all(foto.join("D/2019/@eaDir/DSC09999.JPG")).unwrap();
+    fs::write(
+        foto.join(EA_DIR).join("DSC09999.JPG/.DS_Store"),
+        junk::ds_store(),
+    )
+    .unwrap();
+    fs::create_dir_all(foto.join("E/@eaDir/x")).unwrap();
+    fs::write(
+        foto.join("E/@eaDir/x/SYNOPHOTO_THUMB_XL.jpg"),
+        [0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F'],
+    )
+    .unwrap();
     catalog(
         &work.join("Backups/2015-06-01 2138/Work.lrcat"),
         &work,
@@ -111,7 +129,6 @@ fn build() -> Fixture {
     Fixture {
         _tmp: tmp,
         foto,
-        quarantine,
         db,
     }
 }
@@ -133,28 +150,29 @@ fn gates_classify_every_bundle_correctly() {
     let fx = build();
     let bundles = all(&fx.db);
 
-    let cat_data = by_name(&bundles, "Dogshow.lrcat-data");
-    assert!(!cat_data.regenerable, "данные каталога не регенерируемы");
-    assert!(!cat_data.removable());
-    assert_eq!(cat_data.blocked_code.as_deref(), Some("not-regenerable"));
+    // Nothing of Lightroom's is selectable, whatever its catalogue says:
+    // open, closed, orphaned, smart previews or catalogue data (el-126jk).
+    for name in [
+        "Dogshow.lrcat-data",
+        "Dogshow Previews.lrdata",
+        "Dogshow Helper.lrdata",
+        "Family Previews.lrdata",
+        "Work Previews.lrdata",
+        "Work Smart Previews.lrdata",
+        "Gone Previews.lrdata",
+    ] {
+        let b = by_name(&bundles, name);
+        assert_eq!(b.blocked_code.as_deref(), Some("lightroom"), "{name}");
+        assert!(b.refusal().contains("Lightroom is never touched"));
+    }
+    assert!(!by_name(&bundles, "Dogshow.lrcat-data").regenerable);
 
-    let family = by_name(&bundles, "Family Previews.lrdata");
-    assert_eq!(family.blocked_code.as_deref(), Some("catalog-open"));
-
-    let smart = by_name(&bundles, "Work Smart Previews.lrdata");
-    assert_eq!(smart.blocked_code.as_deref(), Some("originals-missing"));
-    assert!(smart.blocked_detail.as_ref().unwrap().contains("1 of 2"));
-
-    let orphan = by_name(&bundles, "Gone Previews.lrdata");
-    assert!(orphan.removable(), "сирота подлежит переносу");
-
-    let dog = by_name(&bundles, "Dogshow Previews.lrdata");
-    assert!(dog.removable());
-    assert!(dog
-        .rebuild_cost_hint
-        .as_ref()
-        .unwrap()
-        .contains("to rebuild"));
+    // No system file is recorded, proven bytes or not (el-2rpxq): `derived
+    // clean` would move none of it, and `@eaDir` is pruned unrecorded.
+    for b in &bundles {
+        assert_ne!(b.kind, pc_core::DerivedKind::SystemJunk, "{}", b.path);
+        assert!(!b.path.contains("@eaDir"), "{}", b.path);
+    }
 }
 
 #[test]
@@ -186,119 +204,55 @@ fn preview_bundles_are_pruned_not_descended_into() {
     );
 }
 
+/// el-126jk, el-2rpxq, el-1bzcw: `derived clean` moves nothing — every
+/// present bundle of every kind is named as left, with its reason, and
+/// there is no move for a bundle to hand it to. Undo and purge of what an
+/// earlier version moved: pc-apply's purge and Lightroom tests.
 #[test]
-fn quarantine_moves_only_what_is_allowed_and_undo_restores_it() {
+fn derived_clean_leaves_every_bundle_and_says_why() {
     let fx = build();
-    let run_id = fx.db.latest_run().unwrap().unwrap();
+    let kinds = [
+        pc_core::DerivedKind::LrPreviews,
+        pc_core::DerivedKind::LrSmartPreviews,
+        pc_core::DerivedKind::LrHelper,
+        pc_core::DerivedKind::LrDataOther,
+        pc_core::DerivedKind::LrCatalogData,
+        pc_core::DerivedKind::SystemJunk,
+    ];
+    let sel = pc_apply::select_derived(&fx.db, &kinds, None).unwrap();
+    let present: Vec<_> = all(&fx.db)
+        .into_iter()
+        .filter(|b| b.state == BundleState::Present)
+        .collect();
+    assert!(!present.is_empty());
+    assert_eq!(sel.excluded.len(), present.len(), "{:?}", sel.excluded);
+    for b in &present {
+        let (_, why) = sel
+            .excluded
+            .iter()
+            .find(|(p, _)| *p == b.path)
+            .unwrap_or_else(|| panic!("{} not named", b.path));
+        assert_eq!(*why, b.refusal());
+    }
+    assert!(fx.db.journal_quarantined(None).unwrap().is_empty());
 
-    let removable = fx
-        .db
-        .list_bundles(&pc_db::model::BundleFilter {
-            kind: Some(pc_core::DerivedKind::LrPreviews),
-            state: Some(BundleState::Present),
-            removable_only: true,
-            ..Default::default()
-        })
-        .unwrap();
-    assert_eq!(removable.len(), 3, "Dogshow, Work и сирота");
-
-    let totals =
-        pc_apply::quarantine_many(&fx.db, run_id, &removable, Some(&fx.quarantine)).unwrap();
-    assert_eq!(totals.done.bundles, 3);
-    assert!(totals.skipped.is_empty(), "{:?}", totals.skipped);
-
-    // Gone from the archive, present in quarantine.
-    assert!(!fx
-        .foto
-        .join("Lightroom_lib/Dogshow/Dogshow Previews.lrdata")
-        .exists());
-    assert!(fx.quarantine.exists());
-
-    // Everything protected is still exactly where it was.
     for keep in [
+        ".DS_Store",
         "D/2019/DSC09999.ARW",
         "D/2019/DSC09999.JPG",
+        "D/.DS_Store",
+        "D/2019/@eaDir/DSC09999.JPG/.DS_Store",
+        "E/@eaDir/x/SYNOPHOTO_THUMB_XL.jpg",
         "Lightroom_lib/Dogshow/Dogshow.lrcat",
         "Lightroom_lib/Dogshow/Dogshow.lrcat-data",
+        "Lightroom_lib/Dogshow/Dogshow Previews.lrdata",
+        "Lightroom_lib/Dogshow/Dogshow Helper.lrdata",
+        "E/Old/Gone Previews.lrdata",
         "F/Lightroom Libraries/Family/Family Previews.lrdata",
+        "F/Lightroom Libraries/Work/Work Previews.lrdata",
         "F/Lightroom Libraries/Work/Work Smart Previews.lrdata",
         "F/Lightroom Libraries/Work/masters/a.arw",
     ] {
         assert!(fx.foto.join(keep).exists(), "пропало: {keep}");
     }
-
-    // Undo puts every bundle back.
-    let entries = fx.db.journal_quarantined(None).unwrap();
-    assert_eq!(entries.len(), 3);
-    for e in &entries {
-        pc_apply::undo(&fx.db, e.id).unwrap();
-        assert!(Path::new(&e.src).exists(), "не восстановлено: {}", e.src);
-    }
-    assert!(all(&fx.db).iter().all(|b| b.state == BundleState::Present));
-}
-
-#[test]
-fn quarantine_refuses_a_destination_on_another_filesystem() {
-    let fx = build();
-    let bundles = all(&fx.db);
-    let dog = by_name(&bundles, "Dogshow Previews.lrdata");
-    // /dev is a different filesystem on both macOS and Linux.
-    let err = pc_apply::quarantine_dest(dog, Some(Path::new("/dev"))).unwrap_err();
-    assert!(err.to_string().contains("different filesystem"), "{err}");
-}
-
-#[test]
-fn a_bundle_that_changed_since_the_scan_is_skipped() {
-    let fx = build();
-    let run_id = fx.db.latest_run().unwrap().unwrap();
-    let bundles = all(&fx.db);
-    let dog = by_name(&bundles, "Dogshow Previews.lrdata").clone();
-
-    // Lightroom wrote a new preview after we scanned.
-    write(
-        &fx.foto
-            .join("Lightroom_lib/Dogshow/Dogshow Previews.lrdata/1/2/extra"),
-        99,
-    );
-
-    let out = pc_apply::quarantine(&fx.db, run_id, &dog, Some(&fx.quarantine)).unwrap();
-    assert_eq!(out, pc_apply::Outcome::Skipped);
-    assert!(fx
-        .foto
-        .join("Lightroom_lib/Dogshow/Dogshow Previews.lrdata")
-        .exists());
-}
-
-/// Purge never deletes a bundle (el-3s9kp, the user's decision of
-/// 2026-10-06): inside the holding period it is not even looked at, past it
-/// it is named as kept — and it stays quarantined and undoable.
-#[test]
-fn purge_keeps_a_preview_bundle_before_and_after_the_retention_window() {
-    let fx = build();
-    let run_id = fx.db.latest_run().unwrap().unwrap();
-    let bundles = all(&fx.db);
-    let dog = by_name(&bundles, "Dogshow Previews.lrdata").clone();
-
-    pc_apply::quarantine(&fx.db, run_id, &dog, Some(&fx.quarantine)).unwrap();
-
-    // Nothing is old enough for a seven-day window yet.
-    let held = pc_apply::purge(&fx.db, 7 * 86_400).unwrap();
-    assert_eq!(held.bundles, 0);
-    assert!(held.kept.is_empty(), "{:?}", held.kept);
-    assert_eq!(pc_apply::quarantined_totals(&fx.db).unwrap().bundles, 1);
-
-    // With a zero window it is kept, named, and nothing of it goes.
-    let kept = pc_apply::purge(&fx.db, 0).unwrap();
-    assert_eq!((kept.bundles, kept.files, kept.bytes), (0, 0, 0));
-    assert_eq!(kept.kept.len(), 1, "{kept:?}");
-    assert!(kept.kept[0].contains("Dogshow Previews.lrdata"), "{kept:?}");
-    assert_eq!(
-        fx.db.bundle(dog.id).unwrap().unwrap().state,
-        BundleState::Quarantined
-    );
-    pc_apply::undo(&fx.db, 1).unwrap();
-    assert!(fx
-        .foto
-        .join("Lightroom_lib/Dogshow/Dogshow Previews.lrdata/1/2")
-        .is_dir());
 }

@@ -49,16 +49,10 @@ pub use recovery::{
 pub use roots::RunRoots;
 
 use anyhow::{bail, Context, Result};
-use pc_core::{fmt_bytes, Disk};
-use pc_db::{Bundle, BundleState, Db, JournalStatus};
+use pc_core::fmt_bytes;
+use pc_db::{BundleState, Db, JournalStatus};
 use std::fs;
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
-    Moved,
-    Skipped,
-}
 
 #[derive(Debug, Default)]
 pub struct Totals {
@@ -93,14 +87,6 @@ impl Totals {
             ),
             fmt_bytes(self.bytes)
         )
-    }
-}
-
-fn disk_of(b: &Bundle) -> Disk {
-    Disk {
-        dev: b.dev as u64,
-        mount: PathBuf::from(&b.mount),
-        label: b.disk.clone(),
     }
 }
 
@@ -203,31 +189,6 @@ pub(crate) fn admit(t: &Target) -> Result<()> {
     })
 }
 
-fn bundle_target(b: &Bundle, override_root: Option<&Path>) -> Result<Target> {
-    let disk = disk_of(b);
-    let src = PathBuf::from(&b.path);
-    let rel = disk.relative(&src);
-
-    match override_root {
-        None => Target::beside(&src),
-        Some(root) => {
-            let dev = pc_core::dev_of_nearest_existing(root)?;
-            if dev != b.dev as u64 {
-                bail!(
-                    "{}",
-                    pc_core::tf!(
-                        "карантин {0} находится на другой файловой системе, чем {1} — перенос превратился бы в полное копирование. Укажите путь на том же диске.",
-                        "quarantine {0} is on a different filesystem from {1} — the move would become a full copy. Give a path on the same disk.",
-                        root.display(),
-                        b.path
-                    )
-                );
-            }
-            Ok(gathered(root, &b.disk, &disk.mount, rel))
-        }
-    }
-}
-
 fn file_target(path: &str, override_root: Option<&Path>) -> Result<Target> {
     let src = PathBuf::from(path);
     let Some(root) = override_root else {
@@ -251,16 +212,6 @@ fn file_target(path: &str, override_root: Option<&Path>) -> Result<Target> {
     Ok(gathered(root, &disk.label, &disk.mount, rel))
 }
 
-/// Where a bundle goes when quarantined. Only reads.
-///
-/// Beside itself by default, so the move is a rename and the directory is one
-/// that already takes writes. `override_root` gathers everything in one place
-/// instead, and is rejected unless it lives on the same device, because a
-/// cross-device "move" would silently become a copy of the whole bundle.
-pub fn quarantine_dest(b: &Bundle, override_root: Option<&Path>) -> Result<PathBuf> {
-    Ok(bundle_target(b, override_root)?.dst)
-}
-
 /// Where an indexed file goes when quarantined. Only reads.
 ///
 /// Beside itself by default; under `override_root`, mirroring its path from
@@ -276,52 +227,6 @@ pub fn quarantine_dest_for(
 
 pub(crate) fn quarantine_target_for(path: &str, override_root: Option<&Path>) -> Result<Target> {
     file_target(path, override_root)
-}
-
-/// Re-check that what is on disk still matches what was scanned.
-///
-/// A bundle that changed since the scan is skipped rather than moved: the
-/// user may have reopened the catalog and Lightroom may be writing into it.
-fn unchanged(b: &Bundle) -> Result<bool> {
-    let path = Path::new(&b.path);
-    if !path.exists() {
-        return Ok(false);
-    }
-    if b.is_dir {
-        let (count, size, newest) = dir_stats(path);
-        Ok(count as i64 == b.file_count && size as i64 == b.size && newest == b.newest_mtime)
-    } else {
-        let md = fs::metadata(path)?;
-        Ok(md.len() as i64 == b.size && pc_core::time::mtime_unix(&md) == b.newest_mtime)
-    }
-}
-
-fn dir_stats(root: &Path) -> (u64, u64, i64) {
-    let mut count = 0u64;
-    let mut size = 0u64;
-    let mut newest = 0i64;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = fs::read_dir(&dir) else { continue };
-        for e in rd.flatten() {
-            let Ok(ft) = e.file_type() else { continue };
-            if ft.is_symlink() {
-                continue;
-            }
-            let Ok(md) = e.metadata() else { continue };
-            newest = newest.max(pc_core::time::mtime_unix(&md));
-            if ft.is_dir() {
-                stack.push(e.path());
-            } else if ft.is_file() {
-                count += 1;
-                size += md.len();
-            }
-        }
-    }
-    if let Ok(md) = fs::metadata(root) {
-        newest = newest.max(pc_core::time::mtime_unix(&md));
-    }
-    (count, size, newest)
 }
 
 /// The nearest existing folder of `path` (itself, if it exists).
@@ -399,28 +304,11 @@ pub(crate) fn check_all<'a>(dsts: impl IntoIterator<Item = &'a Path>) -> Result<
     Ok(())
 }
 
-/// Before a quarantine of bundles: every destination volume can move
-/// without replacing. The command line and the web preview ask the same.
-///
-/// Only reads (el-23goa B1). A destination that cannot be worked out is the
-/// answer, not something to skip: it refuses the run before the first move.
-/// Bundles that never reach a move — kept by their kind, blocked, no longer
-/// present — are left to `quarantine`, which says why for each.
-pub fn check_bundles(bundles: &[Bundle], override_root: Option<&Path>) -> Result<()> {
-    let mut dsts = Vec::new();
-    for b in bundles {
-        if !b.regenerable || b.blocked_code.is_some() || b.state != BundleState::Present {
-            continue;
-        }
-        dsts.push(bundle_target(b, override_root)?.dst);
-    }
-    check_all(dsts.iter().map(PathBuf::as_path))
-}
-
-/// Before an apply of photographs: as [`check_bundles`]. Sidecars land
-/// beside their photograph, in the same folder. A photograph that is already
-/// gone is refused on its own by `quarantine_file`; any other doubt about a
-/// destination refuses the run.
+/// Before an apply of photographs: every destination volume can move
+/// without replacing. Only reads (el-23goa B1). Sidecars land beside their
+/// photograph, in the same folder. A photograph that is already gone is
+/// refused on its own by `quarantine_file`; any other doubt about a
+/// destination refuses the run before the first move.
 pub fn check_candidates(
     _db: &Db,
     candidates: &[pc_family::plan::Candidate],
@@ -444,7 +332,7 @@ pub fn check_candidates(
     check_all(dsts.iter().map(PathBuf::as_path))
 }
 
-/// Before a reorganisation: as [`check_bundles`].
+/// Before a reorganisation: as [`check_candidates`].
 pub fn check_organize(moves: &[pc_organize::Move]) -> Result<()> {
     check_all(moves.iter().map(|m| Path::new(&m.dst)))
 }
@@ -692,6 +580,9 @@ pub mod race {
 }
 
 #[cfg(test)]
+mod legacy;
+
+#[cfg(test)]
 mod race_tests;
 
 #[cfg(all(test, unix))]
@@ -703,195 +594,50 @@ mod purge_tests;
 #[cfg(all(test, unix))]
 mod abandon_tests;
 
-/// The catalogue's own answer, asked at the moment of the move.
+/// What `derived clean` leaves, with the reason — the one answer the
+/// command line and the web preview both print.
 ///
-/// A scan writes down what it found — and by the time a plan is carried out,
-/// Lightroom may have been opened, or the originals a smart preview stands in
-/// for may have gone. The saved verdict cannot know that; only the disk can.
-/// This is the check every path takes, HTTP and command line alike, so that
-/// "the catalogue is open" is a property of the operation and not of one
-/// interface to it.
-pub fn lightroom_gate(b: &Bundle) -> Result<()> {
-    let Some(owner) = &b.owner_ref else {
-        return Ok(());
-    };
-    if Path::new(&format!("{owner}.lock")).exists() {
-        bail!(
-            "{}",
-            pc_core::tf!(
-                "Каталог Lightroom открыт: {0}",
-                "The Lightroom catalogue is open: {0}",
-                owner
-            )
-        );
-    }
-    // A smart preview is the only copy of a frame whose original is not
-    // there. Standing in for nothing, it stops being derived data.
-    if b.kind == pc_core::DerivedKind::LrSmartPreviews && Path::new(owner).exists() {
-        let check = pc_lightroom::check_originals(Path::new(owner))?;
-        if !check.all_present() {
-            bail!(
-                "{}",
-                pc_core::tf!(
-                    "Отсутствуют оригиналы: {0} из {1} — {2}",
-                    "Originals are missing: {0} of {1} — {2}",
-                    check.missing,
-                    check.total,
-                    owner
-                )
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Move one bundle into quarantine, journalling before touching the filesystem.
-pub fn quarantine(
-    db: &Db,
-    run_id: i64,
-    b: &Bundle,
-    override_root: Option<&Path>,
-) -> Result<Outcome> {
-    if !b.regenerable {
-        bail!(
-            "{}",
-            pc_core::tf!(
-                "{0} относится к виду «{1}», удаление запрещено",
-                "{0} is of kind “{1}”, which is never removed",
-                b.path,
-                b.kind.label()
-            )
-        );
-    }
-    if let Some(code) = &b.blocked_code {
-        bail!(
-            "{}",
-            pc_core::tf!("{0} заблокирован: {1}", "{0} is blocked: {1}", b.path, code)
-        );
-    }
-    if b.state != BundleState::Present {
-        return Ok(Outcome::Skipped);
-    }
-    if !unchanged(b)? {
-        return Ok(Outcome::Skipped);
-    }
-    lightroom_gate(b)?;
-
-    let target = bundle_target(b, override_root)?;
-    admit(&target)?;
-    let dst = target.dst;
-    let dst_str = dst.to_string_lossy().into_owned();
-    // A bundle moves as one directory: one entry, with the evidence of which
-    // directory it is, so its undo does not take a stranger for it either.
-    // Purge never deletes it: a bundle in quarantine is a person's to delete
-    // (el-3s9kp, the user's decision of 2026-10-06).
-    let manifest = [pc_db::Moved {
-        src: b.path.clone(),
-        dst: dst_str.clone(),
-        proof: files::evidence(Path::new(&b.path))?,
-    }];
-    let jid = db.journal_begin(&pc_db::NewJournalEntry {
-        run_id,
-        op: "quarantine",
-        target_id: Some(b.id),
-        src: &b.path,
-        dst: Some(&dst_str),
-        size: b.size,
-        file_count: b.file_count,
-        manifest: &manifest,
-    })?;
-
-    // One member: the bundle is one object (a folder of previews, or one
-    // file), moved through the same unit as everything else.
-    let unit = unit::move_unit(
-        &[unit::Member::forward(&manifest[0])],
-        located::Way::Forward,
-        None,
-        &[],
-    );
-    let unit::Unit::Moved(arrived) = unit else {
-        let r = unit::close_forward(db, jid, "forward", Route::Quarantine, unit)?;
-        if let Some(stop) = r.stop {
-            return Err(outcome::with_placed(
-                stop.into(),
-                r.placed,
-                Route::Quarantine,
-            ));
-        }
-        return Err(outcome::with_placed(
-            anyhow::anyhow!("{}", r.why),
-            r.placed,
-            Route::Quarantine,
-        ));
-    };
-    let closed = db.journal_close(
-        jid,
-        JournalStatus::Done,
-        &pc_db::Event {
-            moved: &manifest,
-            ..pc_db::Event::new("forward", "done")
-        },
-    );
-    drop(arrived);
-    if let Err(e) = closed {
-        let e = e.context(pc_core::tf!(
-            "{0} перенесён, но журнал не дописан: запись {1} осталась незавершённой — сверьте её",
-            "{0} moved, but the journal was not completed: entry {1} is left pending — reconcile it",
-            b.path,
-            jid
-        ));
-        let e = stop_run(e, &Tally::bundle(b), Route::Quarantine, Vec::new());
-        return Err(outcome::left_pending(e, jid, Route::Quarantine));
-    }
-    if let Err(e) = db.set_bundle_state(b.id, BundleState::Quarantined) {
-        let e = e.context(pc_core::tf!(
-            "{0} перенесён и записан в журнал, но индекс не обновлён",
-            "{0} moved and is in the journal, but the index did not follow",
-            b.path
-        ));
-        return Err(stop_run(
-            e,
-            &Tally::bundle(b),
-            Route::Quarantine,
-            Vec::new(),
-        ));
-    }
-    Ok(Outcome::Moved)
-}
-
-/// What a quarantine of bundles did.
+/// There is no "selected" half: `derived clean` moves nothing — nothing of
+/// Lightroom's (the user's decision of 2026-10-06), no system file and no
+/// companion (the contract narrowed after el-2rpxq) — and this crate has no
+/// forward move for a bundle at all (el-1bzcw: a refusal standing in front
+/// of a working move is a move one edit away). What earlier versions put in
+/// quarantine still comes home through `undo`; `purge` keeps it.
 #[derive(Debug, Default)]
-pub struct BundleReport {
-    pub done: Tally,
-    pub skipped: Vec<String>,
+pub struct DerivedSelection {
+    /// `(path, why)` for every bundle asked for, each left where it is.
+    pub excluded: Vec<(String, String)>,
+    /// `(what, why)` for what was asked for and is not even recorded.
+    pub notes: Vec<(String, String)>,
 }
 
-pub fn quarantine_many(
+/// Every present bundle of the asked kinds, at least `min_size` bytes, each
+/// with why it stays. The reason is read from the kind and the path, never
+/// from what a scan wrote down: a database scanned by an earlier version
+/// holds bundles with nothing written against them (see `pc_core::derived`).
+/// Asking for system junk adds one line that says why there is none: the
+/// scan no longer records it, so without the line a person would see an
+/// empty plan and no reason (el-2rpxq).
+pub fn select_derived(
     db: &Db,
-    run_id: i64,
-    bundles: &[Bundle],
-    override_root: Option<&Path>,
-) -> Result<BundleReport> {
-    let mut t = BundleReport::default();
-    // A volume that cannot move without replacing stops the run before its
-    // first move, not halfway through it.
-    check_bundles(bundles, override_root)?;
-    for b in bundles {
-        match quarantine(db, run_id, b, override_root) {
-            Ok(Outcome::Moved) => t.done.add(&Tally::bundle(b)),
-            Ok(Outcome::Skipped) => t.skipped.push(pc_core::tf!(
-                "{0} — изменился с момента сканирования",
-                "{0} — changed since the scan",
-                b.path
-            )),
-            Err(e) if is_run_stop(&e) || stopped_run(&e).is_some() => {
-                let refused = t.skipped.clone();
-                return Err(stop_run(e, &t.done, Route::Quarantine, refused));
-            }
-            Err(e) => t.skipped.push(format!("{} — {e}", b.path)),
+    kinds: &[pc_core::DerivedKind],
+    min_size: Option<i64>,
+) -> Result<DerivedSelection> {
+    let mut out = DerivedSelection::default();
+    for k in kinds {
+        if *k == pc_core::DerivedKind::SystemJunk {
+            out.notes.push(pc_core::derived::system_junk_note());
+        }
+        let f = pc_db::model::BundleFilter {
+            kind: Some(*k),
+            state: Some(BundleState::Present),
+            min_size,
+        };
+        for b in db.list_bundles(&f)? {
+            out.excluded.push((b.path.clone(), b.refusal()));
         }
     }
-    Ok(t)
+    Ok(out)
 }
 
 /// Carry a file the journal never claimed back out of quarantine.
@@ -1076,8 +822,8 @@ mod lightroom_tests {
     use super::*;
     use pc_db::{model::NewBundle, Db};
 
-    /// A bundle of previews recorded by a scan, exactly as the walk writes it.
-    fn scanned(db: &Db, run: i64, dir: &Path, owner: &Path) -> pc_db::Bundle {
+    /// A bundle as an earlier scan recorded it: nothing written against it.
+    fn scanned(db: &Db, run: i64, dir: &Path, kind: pc_core::DerivedKind) -> pc_db::Bundle {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("cache"), b"cached").unwrap();
         db.upsert_bundle(
@@ -1087,8 +833,8 @@ mod lightroom_tests {
                 disk: "root".into(),
                 dev: 0,
                 mount: dir.parent().unwrap().display().to_string(),
-                kind: pc_core::DerivedKind::LrPreviews,
-                owner_ref: Some(owner.display().to_string()),
+                kind,
+                owner_ref: None,
                 file_count: 1,
                 size: 6,
                 newest_mtime: pc_core::time::mtime_unix(&fs::metadata(dir).unwrap()),
@@ -1104,32 +850,91 @@ mod lightroom_tests {
     }
 
     #[test]
-    fn a_catalogue_opened_after_the_scan_stops_the_move_in_the_core() {
-        // The scan wrote down that nothing blocked these previews. Lightroom
-        // was opened afterwards, and rebuilding previews it is holding is not
-        // the tool's decision to make. The web preview used to be the only
-        // place that looked again — the command line went straight past it.
+    fn a_lightroom_bundle_an_old_scan_left_unblocked_is_left_and_named_by_the_core() {
+        // A database scanned before el-126jk: previews with no block. Neither
+        // the listing nor the move takes the saved verdict at its word.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("archive");
-        let previews = root.join("Library Previews.lrdata");
-        let owner = root.join("Library.lrcat");
         let db = Db::open(&tmp.path().join("test.db")).unwrap();
         let run = db.start_run(&[root.display().to_string()], "test").unwrap();
-        let b = scanned(&db, run, &previews, &owner);
-        assert!(
-            b.removable(),
-            "сценарий не тот: скан уже что-то заблокировал"
+        for (name, kind) in [
+            ("Library Previews.lrdata", pc_core::DerivedKind::LrPreviews),
+            ("PREVIEWS.LRDATA", pc_core::DerivedKind::LrDataOther),
+            // Filed as junk by a bug or a hand: the path still says whose.
+            ("Library Helper.lrdata", pc_core::DerivedKind::SystemJunk),
+        ] {
+            let dir = root.join(name);
+            let b = scanned(&db, run, &dir, kind);
+            assert!(b.blocked_code.is_none(), "{name}: scenario is wrong");
+            let sel = select_derived(&db, &[kind], None).unwrap();
+            let (_, why) = sel
+                .excluded
+                .iter()
+                .find(|(p, _)| *p == b.path)
+                .unwrap_or_else(|| panic!("{name}: not named as left"));
+            assert!(why.contains("Lightroom is never touched"), "{why}");
+            assert!(dir.join("cache").exists(), "{name} moved");
+        }
+        assert!(db.journal_quarantined(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn system_junk_an_old_scan_recorded_is_left_and_named_whatever_its_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("archive");
+        fs::create_dir_all(&root).unwrap();
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[root.display().to_string()], "test").unwrap();
+        let path = root.join(".DS_Store");
+        // A database scanned by an earlier version, which recorded junk;
+        // the bytes are a JPEG's. Neither they nor the row are asked.
+        fs::write(&path, b"\xFF\xD8\xFF\xE0synthetic").unwrap();
+        let md = fs::metadata(&path).unwrap();
+        db.upsert_bundle(
+            &NewBundle {
+                path: path.display().to_string(),
+                is_dir: false,
+                disk: "root".into(),
+                dev: 0,
+                mount: root.display().to_string(),
+                kind: pc_core::DerivedKind::SystemJunk,
+                owner_ref: None,
+                file_count: 1,
+                size: md.len() as i64,
+                newest_mtime: pc_core::time::mtime_unix(&md),
+            },
+            run,
+        )
+        .unwrap();
+        let b = db.list_bundles(&Default::default()).unwrap().pop().unwrap();
+        let sel = select_derived(&db, &[pc_core::DerivedKind::SystemJunk], None).unwrap();
+        let (_, refused) = sel.excluded.iter().find(|(p, _)| *p == b.path).unwrap();
+        assert!(refused.contains("moves no system files"), "{refused}");
+        assert!(path.exists());
+        assert!(db.journal_quarantined(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_lightroom_bundle_moved_by_an_earlier_version_still_comes_home() {
+        // Returning is putting back: the rule that keeps Lightroom where it
+        // is must not keep it in quarantine either (el-126jk, decision 3).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("archive");
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[root.display().to_string()], "test").unwrap();
+        let dir = root.join("Library Previews.lrdata");
+        let b = scanned(&db, run, &dir, pc_core::DerivedKind::LrPreviews);
+        let jid = legacy::moved_by_an_earlier_version(&db, run, &b).unwrap();
+        assert!(!dir.exists());
+        let entry = db.journal_quarantined(None).unwrap().pop().unwrap();
+        assert_eq!(entry.id, jid);
+
+        undo(&db, entry.id).unwrap();
+        assert_eq!(fs::read(dir.join("cache")).unwrap(), b"cached");
+        assert_eq!(
+            db.journal_entry(entry.id).unwrap().unwrap().status,
+            pc_db::JournalStatus::Undone
         );
-
-        fs::write(root.join("Library.lrcat.lock"), b"open").unwrap();
-        let refused = quarantine(&db, run, &b, None).unwrap_err().to_string();
-        assert!(refused.contains("Library.lrcat"), "{refused}");
-        assert!(previews.exists(), "превью уехали при открытом каталоге");
-
-        // Closed again, and the same call goes through.
-        fs::remove_file(root.join("Library.lrcat.lock")).unwrap();
-        assert_eq!(quarantine(&db, run, &b, None).unwrap(), Outcome::Moved);
-        assert!(!previews.exists());
     }
 }
 

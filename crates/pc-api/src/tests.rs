@@ -145,7 +145,19 @@ impl Fixture {
         // deletes it (el-3s9kp): it is kept, for a person to delete.
         std::fs::write(dir.join("preview.lrprev"), b"AgHg rebuildable pv").unwrap();
     }
+    /// A folder of system junk, `<name>/@eaDir`, which nothing moves
+    /// (el-126jk, el-2rpxq).
+    fn junk(&self, name: &str) -> PathBuf {
+        let dir = self.archive.join(name).join("@eaDir");
+        std::fs::create_dir_all(dir.join("IMG_1.JPG")).unwrap();
+        std::fs::write(dir.join("IMG_1.JPG/.DS_Store"), junk::ds_store()).unwrap();
+        dir
+    }
 }
+
+/// A complete synthetic Finder `.DS_Store` (el-126jk: a prefix is not one).
+#[path = "../../pc-core/src/derived/fixtures.rs"]
+mod junk;
 #[tokio::test]
 async fn api_contract_and_embedded_production_assets() {
     let f = Fixture::new();
@@ -201,102 +213,131 @@ async fn one_writer_and_legacy_urls_cannot_bypass_review() {
         .await;
     assert_eq!(s, 400);
 }
+/// el-126jk, el-2rpxq: the derived-clean preview offers nothing — Lightroom
+/// is named with its reason, system junk with one line saying why none is
+/// recorded — and carrying the empty plan out moves nothing and journals
+/// nothing.
 #[tokio::test]
-async fn reviewed_derived_cycle_undo_and_purge_and_stale_plan() {
+async fn reviewed_derived_clean_offers_nothing_and_says_why() {
     let f = Fixture::new();
-    f.bundle("First");
+    let first = f.junk("First");
+    f.bundle("Library");
     f.scan().await;
-    let params = json!({"kinds":["lr-previews"],"min_size":0});
-    let old = f.preview("derived-clean", params.clone()).await;
-    assert_eq!(old["total_files"], 1);
-    f.bundle("Second");
-    f.scan().await;
-    let j = f.apply(&old).await;
-    assert_eq!(j["state"], "failed");
-    assert!(j["error"].as_str().unwrap().contains("plan has changed"));
-    assert!(f.archive.join("First Previews.lrdata").exists());
+    let params = json!({"kinds":["lr-previews","system-junk"],"min_size":0});
     let plan = f.preview("derived-clean", params.clone()).await;
-    assert_eq!(plan["items"].as_array().unwrap().len(), 2);
-    assert!(plan["items"][0]["dst"]
-        .as_str()
-        .unwrap()
-        .starts_with(f.quarantine.to_str().unwrap()));
+    assert!(plan["items"].as_array().unwrap().is_empty(), "{plan}");
+    assert_eq!(plan["total_files"], 0);
+    let refused = plan["refusals"].as_array().unwrap();
+    assert_eq!(refused.len(), 2, "{plan}");
+    let lr = refused
+        .iter()
+        .find(|r| {
+            r["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("Library Previews.lrdata")
+        })
+        .unwrap_or_else(|| panic!("{plan}"));
+    assert!(
+        lr["why"]
+            .as_str()
+            .unwrap()
+            .contains("Lightroom is never touched"),
+        "{plan}"
+    );
+    assert!(plan["refusals"]
+        .to_string()
+        .contains("moves no system files"));
     let j = f.apply(&plan).await;
     assert_eq!(j["state"], "done", "{j}");
-    assert!(!f.archive.join("First Previews.lrdata").exists());
+    assert!(first.join("IMG_1.JPG/.DS_Store").is_file());
+    assert!(f
+        .archive
+        .join("Library Previews.lrdata/preview.lrprev")
+        .exists());
+    if f.quarantine.exists() {
+        let held = walk(&f.quarantine);
+        assert!(
+            !held
+                .iter()
+                .any(|p| p.ends_with(".DS_Store") || p.ends_with("preview.lrprev")),
+            "{held:?}"
+        );
+    }
     let (_, entries) = f.req("GET", "/api/journal", Value::Null).await;
-    let id = entries[0]["id"].as_i64().unwrap();
-    let undo = f.preview("journal-undo", json!({"journal_id":id})).await;
-    assert_eq!(f.apply(&undo).await["state"], "done");
-    let p = f.preview("derived-clean", params).await;
-    assert_eq!(f.apply(&p).await["state"], "done");
+    assert!(entries.as_array().unwrap().is_empty(), "{entries}");
+}
+/// el-2rpxq and the narrowed contract after it, through the HTTP preview:
+/// no system file and no companion is ever offered — the reviewer's
+/// malformed `Thumbs.db` and `.DS_Store`, an AppleDouble file whose frame is
+/// in the other Unicode normal form, and well-formed ones alike — and the
+/// preview says why, in the words `derived clean` prints.
+#[tokio::test]
+async fn reviewer_el_2rpxq_preview_offers_no_system_file_or_companion() {
+    let f = Fixture::new();
+    let a = &f.archive;
+    let put = |rel: &str, bytes: &[u8]| {
+        let p = a.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+    };
+    put("b3cfb/Thumbs.db", &junk::thumbs_db_missing_mini_stream());
+    put("b3ds/.DS_Store", &junk::ds_store_impossible_node());
+    put("b2/caf\u{e9}.png", b"frame");
+    put("b2/._cafe\u{301}.png", &junk::apple_double());
+    put("v/.DS_Store", &junk::ds_store());
+    put("v/Thumbs.db", &junk::thumbs_db());
+    put("v/._orphan", &junk::apple_double());
+    put("e/@eaDir/gone.png@SynoEAStream", &junk::apple_double());
+    f.scan().await;
+    let p = f
+        .preview("derived-clean", json!({"kinds":["system-junk"]}))
+        .await;
+    assert!(p["items"].as_array().unwrap().is_empty(), "{p}");
+    assert_eq!(p["total_files"], 0, "{p}");
+    assert!(
+        p["refusals"].to_string().contains("moves no system files"),
+        "{p}"
+    );
+}
+/// el-126jk: nothing of Lightroom's is offered, even from a database
+/// scanned before the rule existed — the preview asks the core, not the
+/// saved verdict — and the listing says why.
+#[tokio::test]
+async fn lightroom_previews_are_never_offered_even_from_an_old_scan() {
+    let f = Fixture::new();
+    f.bundle("Library");
+    f.scan().await;
+    // As an earlier version's scan left it: nothing written against it.
     f.state
         .db
         .lock()
         .unwrap()
         .conn
-        .execute("UPDATE journal SET applied_at=1 WHERE status='done'", [])
-        .unwrap();
-    let (_, before) = f.req("GET", "/api/status", Value::Null).await;
-    let purge = f
-        .preview("derived-purge", json!({"older_than_secs":604800}))
-        .await;
-    let (s, _) = f
-        .req(
-            "POST",
-            "/api/jobs",
-            json!({"kind":"derived-purge","params":purge["params"],"plan_token":purge["token"]}),
+        .execute(
+            "UPDATE derived_bundles SET blocked_code=NULL, blocked_detail=NULL",
+            [],
         )
-        .await;
-    assert_eq!(s, 400);
-    // Bundles are never deleted by purge (el-3s9kp): nothing to delete is
-    // offered, each is named as kept in pc-apply's words — the words the
-    // command line prints — and running it records that, deleting nothing.
-    assert_eq!(purge["items"].as_array().unwrap().len(), 0, "{purge}");
-    assert_eq!(purge["total_bytes"], 0, "{purge}");
-    let kept = purge["refusals"].as_array().unwrap();
-    assert_eq!(kept.len(), 2, "{purge}");
-    for k in kept {
-        let why = k["why"].as_str().unwrap();
-        assert!(why.contains("delete it by hand if you are sure"), "{why}");
-        assert!(why.contains(k["path"].as_str().unwrap()), "{why}");
-    }
-    let done = f.apply(&purge).await;
-    assert_eq!(done["state"], "done", "{done}");
-    assert!(
-        done["progress"]["refusals"]
-            .to_string()
-            .contains("delete it by hand if you are sure"),
-        "{done}"
-    );
-    let (_, status) = f.req("GET", "/api/status", Value::Null).await;
-    assert_eq!(status["quarantined_bytes"], before["quarantined_bytes"]);
-    assert_ne!(status["quarantined_bytes"], 0);
-    let db = f.state.db.lock().unwrap();
-    for e in db.journal_quarantined(None).unwrap() {
-        assert!(Path::new(e.dst.as_deref().unwrap())
-            .join("preview.lrprev")
-            .exists());
-        let events = db.journal_events(e.id).unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|ev| ev.phase == "purge" && ev.kind == "kept"),
-            "{events:?}"
-        );
-    }
-}
-#[tokio::test]
-async fn open_lightroom_at_apply_time_invalidates_a_preview() {
-    let f = Fixture::new();
-    f.bundle("Library");
-    f.scan().await;
+        .unwrap();
     let p = f
         .preview("derived-clean", json!({"kinds":["lr-previews"]}))
         .await;
-    std::fs::write(f.archive.join("Library.lrcat.lock"), b"open").unwrap();
-    assert_eq!(f.apply(&p).await["state"], "failed");
-    assert!(f.archive.join("Library Previews.lrdata").exists());
+    assert!(p["items"].as_array().unwrap().is_empty(), "{p}");
+    assert!(p["refusals"]
+        .to_string()
+        .contains("Lightroom is never touched"));
+    let (_, listed) = f.req("GET", "/api/derived", Value::Null).await;
+    assert_eq!(listed[0]["removable"], false, "{listed}");
+    assert!(listed[0]["blocked"]
+        .as_str()
+        .unwrap()
+        .contains("Lightroom is never touched"));
+    let (_, status) = f.req("GET", "/api/status", Value::Null).await;
+    assert_eq!(status["derived_removable_bytes"], 0);
+    assert!(f
+        .archive
+        .join("Library Previews.lrdata/preview.lrprev")
+        .exists());
 }
 #[tokio::test]
 async fn recovery_and_directory_boundaries() {
@@ -1967,9 +2008,17 @@ async fn exfat_is_refused_in_the_preview_and_the_job_like_the_command_line() {
     let mount = mount.canonicalize().unwrap();
     let _detach = Detach(mount.clone());
     let archive = mount.join("archive");
-    let previews = archive.join("Library Previews.lrdata");
-    std::fs::create_dir_all(&previews).unwrap();
-    std::fs::write(previews.join("preview.jpg"), b"rebuildable preview").unwrap();
+    // A photograph and its exact copy: `derived clean` moves nothing any
+    // more (el-126jk, el-2rpxq), so the plan of copies is what reaches the
+    // volume's rename.
+    std::fs::create_dir_all(&archive).unwrap();
+    let img = image::RgbImage::from_fn(64, 64, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 9])
+    });
+    let home = archive.join("frame.png");
+    img.save(&home).unwrap();
+    let copy = archive.join("frame copy.png");
+    std::fs::copy(&home, &copy).unwrap();
     let state = Arc::new(
         AppState::new(
             &tmp.path().join("test.db"),
@@ -1984,14 +2033,19 @@ async fn exfat_is_refused_in_the_preview_and_the_job_like_the_command_line() {
         archive: archive.clone(),
         quarantine: archive.join(pc_core::QUARANTINE_DIR),
     };
-    f.scan().await;
+    let id = f
+        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+    let id = f.start("families", json!({})).await;
+    assert_eq!(f.wait(id).await["state"], "done");
 
-    let params = json!({"kinds":["lr-previews"],"min_size":0});
+    let params = json!({"roles":["copy"]});
     let (status, web) = f
         .req(
             "POST",
             "/api/preview",
-            json!({"kind":"derived-clean","params":params}),
+            json!({"kind":"plan-apply","params":params}),
         )
         .await;
     assert_eq!(status, 400, "{web}");
@@ -2002,7 +2056,7 @@ async fn exfat_is_refused_in_the_preview_and_the_job_like_the_command_line() {
         .req(
             "POST",
             "/api/jobs",
-            json!({"kind":"derived-clean","params":params,"plan_token":"any","confirmation":"DELETE"}),
+            json!({"kind":"plan-apply","params":params,"plan_token":"any","confirmation":"DELETE"}),
         )
         .await;
     assert_eq!(s, 202, "{v}");
@@ -2012,13 +2066,14 @@ async fn exfat_is_refused_in_the_preview_and_the_job_like_the_command_line() {
         job["error"].as_str().unwrap().contains("RENAME_EXCL"),
         "{job}"
     );
-    assert!(previews.join("preview.jpg").is_file());
+    assert!(home.is_file() && copy.is_file());
     assert!(!f.quarantine.exists(), "карантин создан на томе");
 
     // The command line's answer, from the same function.
     let db = f.state.db.lock().unwrap();
-    let bundles = db.list_bundles(&Default::default()).unwrap();
-    let cli = pc_apply::quarantine_many(&db, 0, &bundles, None).unwrap_err();
+    let plan = pc_family::plan::compute(&db, &pc_family::Policy::default()).unwrap();
+    assert!(!plan.candidates.is_empty());
+    let cli = pc_apply::check_candidates(&db, &plan.candidates, None).unwrap_err();
     assert!(pc_apply::is_no_exclusive_rename(&cli));
     assert!(
         web.contains(&cli.to_string().replace('"', "\\\"")),

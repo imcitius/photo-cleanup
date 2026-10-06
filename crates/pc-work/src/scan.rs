@@ -1,35 +1,10 @@
 //! `scan` — build the inventory and evaluate the safety gates.
 
 use anyhow::Result;
-use pc_core::{fmt_bytes, BlockReason, DerivedKind};
+use pc_core::fmt_bytes;
 use pc_db::{Db, NewBundle, NewCatalog};
 use pc_lightroom::CatalogReader;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-/// Standard previews render at roughly three images per second on a modern
-/// desktop CPU. Deliberately pessimistic: the hint exists to set expectations,
-/// and an over-estimate is the harmless direction.
-const PREVIEWS_PER_SECOND: i64 = 3;
-
-fn rebuild_hint(file_count: i64) -> String {
-    let minutes = (file_count / PREVIEWS_PER_SECOND / 60).max(1);
-    if minutes < 60 {
-        pc_core::tf!("~{0} мин пересборки", "~{0} min to rebuild", minutes)
-    } else {
-        pc_core::tf!(
-            "~{0:.1} ч пересборки",
-            "~{0:.1} h to rebuild",
-            minutes as f64 / 60.0
-        )
-    }
-}
-
-struct CatalogInfo {
-    is_locked: bool,
-    file_count: Option<i64>,
-    read_error: Option<String>,
-}
+use std::path::PathBuf;
 
 pub fn run(db: &Db, roots: &[PathBuf], version: &str) -> Result<()> {
     run_controlled(db, roots, version, &pc_core::work::Control::default())
@@ -68,7 +43,6 @@ pub fn run_controlled(
     }
 
     // ---- catalogs ---------------------------------------------------------
-    let mut catalogs: HashMap<String, CatalogInfo> = HashMap::new();
     control.begin(
         pc_core::tr!("Чтение каталогов Lightroom", "Reading Lightroom catalogues"),
         result.catalogs.len() as u64,
@@ -114,15 +88,6 @@ pub fn run_controlled(
                 .collect();
             db.replace_catalog_files(catalog_id, &rows)?;
         }
-
-        catalogs.insert(
-            key,
-            CatalogInfo {
-                is_locked: c.is_locked,
-                file_count,
-                read_error,
-            },
-        );
     }
 
     // ---- bundles and gates ------------------------------------------------
@@ -152,9 +117,11 @@ pub fn run_controlled(
             run_id,
         )?;
 
-        let (block, hint) = evaluate(b.kind, owner_key.as_deref(), &catalogs);
-        db.set_block(id, block.as_ref())?;
-        db.set_rebuild_hint(id, hint.as_deref())?;
+        // Nothing derived is moved (el-126jk): every bundle is kept, with
+        // the reason shown, and asked again at the moment of any move.
+        let block = pc_core::derived::refusal(b.kind, &b.path);
+        db.set_block(id, Some(&block))?;
+        db.set_rebuild_hint(id, None)?;
     }
 
     for e in &result.errors {
@@ -168,154 +135,15 @@ pub fn run_controlled(
     Ok(())
 }
 
-/// Decide whether a bundle may be removed, and what to tell the user about it.
-fn evaluate(
-    kind: DerivedKind,
-    owner: Option<&str>,
-    catalogs: &HashMap<String, CatalogInfo>,
-) -> (Option<BlockReason>, Option<String>) {
-    // Enforced by kind, not by policy: no gate can unlock it.
-    if !kind.regenerable() {
-        return (Some(BlockReason::NotRegenerable), None);
-    }
-
-    let Some(owner) = owner else {
-        return (None, None);
-    };
-
-    let info = catalogs.get(owner);
-    let owner_exists = Path::new(owner).exists();
-
-    // Orphaned previews: the catalog they belong to is gone, so they can never
-    // be used again by anything.
-    if info.is_none() && !owner_exists {
-        return (
-            None,
-            Some(
-                pc_core::tr!(
-                    "каталог не найден — сирота",
-                    "catalogue not found — orphaned"
-                )
-                .to_string(),
-            ),
-        );
-    }
-
-    if let Some(info) = info {
-        if info.is_locked {
-            return (Some(BlockReason::CatalogOpen), None);
-        }
-
-        if kind == DerivedKind::LrSmartPreviews {
-            // Smart previews are only regenerable while their masters are
-            // reachable; with the originals offline they are the only editable
-            // copy that exists.
-            return match pc_lightroom::check_originals(Path::new(owner)) {
-                Ok(c) if c.all_present() => (
-                    None,
-                    Some(pc_core::tf!(
-                        "{0} оригиналов на месте",
-                        "{0} originals all present",
-                        c.total
-                    )),
-                ),
-                Ok(c) => (
-                    Some(BlockReason::OriginalsMissing {
-                        missing: c.missing,
-                        total: c.total,
-                    }),
-                    None,
-                ),
-                Err(e) => (
-                    Some(BlockReason::OwnerUnreadable {
-                        detail: e.to_string(),
-                    }),
-                    None,
-                ),
-            };
-        }
-
-        if kind == DerivedKind::LrPreviews {
-            if let Some(n) = info.file_count {
-                return (None, Some(rebuild_hint(n)));
-            }
-            if let Some(e) = &info.read_error {
-                // Readable-ness of the catalog does not gate ordinary previews:
-                // they are rebuildable regardless. Only the hint is lost.
-                tracing::debug!("каталог {owner} не прочитан: {e}");
-            }
-        }
-    }
-
-    (None, None)
-}
-
 fn report(db: &Db) -> Result<()> {
     let all = db.list_bundles(&pc_db::model::BundleFilter::default())?;
-    let removable: u64 = all
-        .iter()
-        .filter(|b| b.removable())
-        .map(|b| b.size as u64)
-        .sum();
+    // Nothing in the inventory can be moved (el-126jk, el-2rpxq); the line
+    // keeps its old shape, at zero.
     println!(
         "\nInventory done: {} bundles, {} of it can be moved.\n\
          Details: photo-cleanup derived list",
         all.len(),
-        fmt_bytes(removable)
+        fmt_bytes(0)
     );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cat(is_locked: bool, file_count: Option<i64>) -> CatalogInfo {
-        CatalogInfo {
-            is_locked,
-            file_count,
-            read_error: None,
-        }
-    }
-
-    #[test]
-    fn catalog_data_is_always_blocked() {
-        let (block, _) = evaluate(DerivedKind::LrCatalogData, None, &HashMap::new());
-        assert_eq!(block, Some(BlockReason::NotRegenerable));
-    }
-
-    #[test]
-    fn an_open_catalog_blocks_its_previews() {
-        let mut m = HashMap::new();
-        m.insert("/x/Family.lrcat".to_string(), cat(true, Some(9000)));
-        let (block, _) = evaluate(DerivedKind::LrPreviews, Some("/x/Family.lrcat"), &m);
-        assert_eq!(block, Some(BlockReason::CatalogOpen));
-    }
-
-    #[test]
-    fn previews_get_a_rebuild_hint() {
-        let mut m = HashMap::new();
-        m.insert("/x/Family.lrcat".to_string(), cat(false, Some(9000)));
-        let (block, hint) = evaluate(DerivedKind::LrPreviews, Some("/x/Family.lrcat"), &m);
-        assert!(block.is_none());
-        assert_eq!(hint.as_deref(), Some("~50 min to rebuild"));
-    }
-
-    #[test]
-    fn orphaned_previews_are_removable() {
-        let (block, hint) = evaluate(
-            DerivedKind::LrPreviews,
-            Some("/nowhere/Gone.lrcat"),
-            &HashMap::new(),
-        );
-        assert!(block.is_none());
-        assert!(hint.unwrap().contains("orphaned"));
-    }
-
-    #[test]
-    fn rebuild_hint_scales_to_hours() {
-        assert_eq!(rebuild_hint(180), "~1 min to rebuild");
-        assert_eq!(rebuild_hint(9000), "~50 min to rebuild");
-        assert!(rebuild_hint(100_000).contains("h to rebuild"));
-    }
 }

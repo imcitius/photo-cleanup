@@ -239,6 +239,14 @@ fn walk_dir(
             continue;
         }
 
+        // System files first: `._Cat.lrcat` is an AppleDouble file, not a
+        // catalogue. Neither indexed nor recorded: `derived clean` moves no
+        // system file and no companion (el-126jk, el-2rpxq), so there is
+        // nothing to offer, and a companion travels with its frame.
+        if pc_core::is_system_junk_name(&name) {
+            continue;
+        }
+
         if name.ends_with(".lrcat") {
             let md = entry.metadata().ok();
             let lock = path.with_file_name(format!("{name}.lock"));
@@ -248,21 +256,6 @@ fn walk_dir(
                 is_locked: lock.exists(),
                 size: md.as_ref().map(|m| m.len()).unwrap_or(0),
                 path,
-                disk: disk.clone(),
-            });
-            continue;
-        }
-
-        if pc_core::is_system_junk_name(&name) {
-            let md = entry.metadata().ok();
-            out.bundles.push(BundleHit {
-                path,
-                is_dir: false,
-                kind: DerivedKind::SystemJunk,
-                owner_ref: None,
-                file_count: 1,
-                size: md.as_ref().map(|m| m.len()).unwrap_or(0),
-                newest_mtime: md.as_ref().map(pc_core::time::mtime_unix).unwrap_or(0),
                 disk: disk.clone(),
             });
             continue;
@@ -377,5 +370,43 @@ mod walk_tests {
             vec!["loose.jpg"],
             "внутрь библиотеки заходить нельзя"
         );
+    }
+
+    /// el-126jk, el-2rpxq: no system file and no companion is recorded as
+    /// derived data, nor indexed as a photograph; `@eaDir` and
+    /// `.thumbnails` stay pruned. A frame beside them is still seen.
+    #[test]
+    fn system_files_and_companions_are_neither_recorded_nor_indexed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let big = vec![0u8; 200_000];
+        std::fs::write(d.join("caf\u{e9}.jpg"), &big).unwrap();
+        for name in [
+            ".DS_Store",
+            "Thumbs.db",
+            "desktop.ini",
+            "._cafe\u{301}.jpg",
+            "._orphan",
+        ] {
+            std::fs::write(d.join(name), &big).unwrap();
+        }
+        for dir in ["@eaDir/caf\u{e9}.jpg", ".thumbnails/large"] {
+            std::fs::create_dir_all(d.join(dir)).unwrap();
+            std::fs::write(d.join(dir).join("thumb.jpg"), &big).unwrap();
+        }
+        std::fs::write(d.join("@eaDir/caf\u{e9}.jpg@SynoEAStream"), &big).unwrap();
+
+        let r = scan_with(
+            &[d.to_path_buf()],
+            &Options {
+                collect_files: true,
+                min_file_size: 1024,
+            },
+        )
+        .unwrap();
+
+        assert!(r.bundles.is_empty(), "{:?}", r.bundles.len());
+        let names: Vec<_> = r.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["caf\u{e9}.jpg"]);
     }
 }

@@ -3,6 +3,7 @@
 #[cfg(unix)]
 pub mod anchored;
 pub mod bytes;
+pub mod derived;
 pub mod disk;
 pub mod lang;
 pub mod lock;
@@ -39,6 +40,11 @@ pub enum DerivedKind {
     /// Not regenerable, never removable.
     LrCatalogData,
     /// macOS `.DS_Store`, AppleDouble `._*`, Windows `Thumbs.db`, `@eaDir`, ...
+    ///
+    /// Kept so that rows an earlier version's scan wrote can still be read
+    /// and refused; the walk records nothing of this kind any more, and
+    /// nothing of it is ever moved (el-126jk, el-2rpxq — see
+    /// [`crate::derived`]).
     SystemJunk,
 }
 
@@ -74,6 +80,12 @@ impl DerivedKind {
         !matches!(self, Self::LrCatalogData)
     }
 
+    /// Lightroom's own data. Never moved, whatever its gates say: the
+    /// user's decision of 2026-10-06 (el-126jk). See [`crate::derived`].
+    pub fn is_lightroom(self) -> bool {
+        !matches!(self, Self::SystemJunk)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::LrPreviews => crate::tr!("Превью Lightroom", "Lightroom previews"),
@@ -99,6 +111,19 @@ pub enum BlockReason {
     OriginalsMissing { missing: u64, total: u64 },
     /// The owning catalog could not be read, so the gate cannot be evaluated.
     OwnerUnreadable { detail: String },
+    /// Something of Lightroom's: never touched (el-126jk).
+    Lightroom { part: String },
+    /// A system file — `.DS_Store`, `Thumbs.db`, `desktop.ini`, `@eaDir`,
+    /// `.thumbnails` — which `derived clean` no longer moves: neither a name
+    /// nor a structure proves it holds nothing of a person's (el-126jk,
+    /// el-2rpxq).
+    SystemFile { file: String },
+    /// A library that owns its contents, such as `.photoslibrary` (el-126jk).
+    ProtectedLibrary { part: String },
+    /// A companion of another file — `._X`, `X@SynoEAStream`,
+    /// `X@SynoResource`: it travels with that file, never alone, whether the
+    /// file is there or not (invariant 8, el-126jk, el-2rpxq).
+    Companion { file: String },
 }
 
 impl BlockReason {
@@ -108,6 +133,10 @@ impl BlockReason {
             Self::CatalogOpen => "catalog-open",
             Self::OriginalsMissing { .. } => "originals-missing",
             Self::OwnerUnreadable { .. } => "owner-unreadable",
+            Self::Lightroom { .. } => "lightroom",
+            Self::SystemFile { .. } => "system-file",
+            Self::ProtectedLibrary { .. } => "protected-library",
+            Self::Companion { .. } => "companion",
         }
     }
 
@@ -133,6 +162,26 @@ impl BlockReason {
                 "каталог не прочитан: {0}",
                 "the catalogue could not be read: {0}",
                 detail
+            ),
+            Self::Lightroom { part } => crate::tf!(
+                "данные Lightroom не трогаются никогда: {0}",
+                "Lightroom is never touched: {0}",
+                part
+            ),
+            Self::SystemFile { file } => crate::tf!(
+                "derived clean не переносит системные файлы: {0} — ни имя, ни структура не доказывают, что в нём нет ничего вашего",
+                "derived clean moves no system files: {0} — neither its name nor its structure proves it holds nothing of yours",
+                file
+            ),
+            Self::ProtectedLibrary { part } => crate::tf!(
+                "библиотека владеет своим содержимым, внутрь не заходим: {0}",
+                "a library owns its contents and is never entered: {0}",
+                part
+            ),
+            Self::Companion { file } => crate::tf!(
+                "derived clean не переносит системные файлы: {0} — спутник другого файла (._*, @SynoEAStream, @SynoResource) и в одиночку не переносится никогда",
+                "derived clean moves no system files: {0} is a companion of another file (._*, @SynoEAStream, @SynoResource) and never moves on its own",
+                file
             ),
         }
     }
@@ -315,6 +364,9 @@ pub fn is_system_junk_name(name: &str) -> bool {
 /// These are pruned outright for now. Indexing them read-only — so that loose
 /// copies of photographs they already hold can be removed safely — is a
 /// separate piece of work.
+///
+/// Compared folded ([`derived::fold_name`]): `LIBRARY.PHOTOSLIBRARY` and a
+/// share's `Library.photoslibrary. ` are the same library.
 pub fn is_protected_bundle(name: &str) -> bool {
     const SUFFIXES: [&str; 5] = [
         ".photoslibrary",
@@ -323,7 +375,8 @@ pub fn is_protected_bundle(name: &str) -> bool {
         ".aplibrary",
         ".pvm",
     ];
-    SUFFIXES.iter().any(|s| name.ends_with(s)) || name == "Photo Booth Library"
+    let folded = derived::fold_name(name);
+    SUFFIXES.iter().any(|s| folded.ends_with(s)) || folded == "photo booth library"
 }
 
 /// Directories that are pruned during the walk and never indexed.

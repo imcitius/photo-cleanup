@@ -851,7 +851,10 @@ export function Derived({
 }) {
   const r = useResource<Bundle[]>("/derived", revision),
     catalogs = useResource<Catalog[]>("/catalogs", revision),
-    [kinds, setKinds] = useState(["lr-previews", "lr-helper", "system-junk"]),
+    // Nothing of Lightroom's is ever moved (el-126jk), and no system file
+    // (el-2rpxq): asking for junk, as the command line does by default,
+    // brings back the line that says why nothing is offered.
+    [kinds, setKinds] = useState(["system-junk"]),
     [min, setMin] = useState(0),
     [review, setReview] = useState(false);
   const groups = Map.groupBy(
@@ -876,7 +879,7 @@ export function Derived({
                 <label className="check">
                   <input
                     type="checkbox"
-                    disabled={!rows.some((b) => b.regenerable)}
+                    disabled={!rows.some((b) => b.removable)}
                     checked={kinds.includes(kind)}
                     onChange={(e) => {
                       setKinds(

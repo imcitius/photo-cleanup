@@ -8,6 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+#[path = "../../pc-core/src/derived/fixtures.rs"]
+mod junk;
+
 struct Cli {
     _tmp: tempfile::TempDir,
     db: PathBuf,
@@ -68,6 +71,56 @@ fn quarantined(dir: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+/// Put a scanned bundle into quarantine as a version before el-126jk did:
+/// the same journal entry, the same rename beside it. This version moves
+/// nothing of Lightroom's, but what an earlier one moved is still there,
+/// and purge and undo have to answer for it.
+fn moved_by_an_earlier_version(cli: &Cli, rel: &str) -> PathBuf {
+    let src = cli.archive.join(rel);
+    let src_s = src.display().to_string();
+    let db = pc_db::Db::open(&cli.db).unwrap();
+    let b = db
+        .list_bundles(&Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|b| b.path == src_s)
+        .unwrap_or_else(|| panic!("{rel} was not scanned"));
+    let hidden = cli.archive.join(pc_core::QUARANTINE_DIR);
+    std::fs::create_dir_all(&hidden).unwrap();
+    let dst = hidden.join(src.file_name().unwrap());
+    let manifest = [pc_db::Moved {
+        src: src_s.clone(),
+        dst: dst.display().to_string(),
+        proof: pc_core::proof::Proof::of(&std::fs::symlink_metadata(&src).unwrap()),
+    }];
+    let run = db.latest_run().unwrap().unwrap();
+    let jid = db
+        .journal_begin(&pc_db::NewJournalEntry {
+            run_id: run,
+            op: "quarantine",
+            target_id: Some(b.id),
+            src: &src_s,
+            dst: Some(&manifest[0].dst),
+            size: b.size,
+            file_count: b.file_count,
+            manifest: &manifest,
+        })
+        .unwrap();
+    std::fs::rename(&src, &dst).unwrap();
+    db.journal_close(
+        jid,
+        pc_db::JournalStatus::Done,
+        &pc_db::Event {
+            moved: &manifest,
+            ..pc_db::Event::new("forward", "done")
+        },
+    )
+    .unwrap();
+    db.set_bundle_state(b.id, pc_db::BundleState::Quarantined)
+        .unwrap();
+    dst
 }
 
 #[test]
@@ -146,27 +199,26 @@ fn deleting_for_good_needs_the_flag_and_the_holding_period() {
 }
 
 #[test]
-fn an_open_catalogue_between_scan_and_clean_stops_the_command_line_too() {
-    // The web interface checks the catalogue again at the moment of the move.
-    // The command line calls the core directly, and for a long time went
-    // straight past that check.
+fn previews_stay_whether_their_catalogue_is_open_or_closed() {
+    // The command line once went straight past the open-catalogue check the
+    // web made. Now there is nothing to check: nothing of Lightroom's moves
+    // (el-126jk), open or closed, and the command says why.
     let cli = Cli::new();
     let previews = cli.archive.join("Library Previews.lrdata");
     std::fs::create_dir_all(&previews).unwrap();
     std::fs::write(previews.join("cache"), vec![b'x'; 4096]).unwrap();
 
     cli.run(&["scan", "--root", cli.archive.to_str().unwrap()]);
-    std::fs::write(cli.archive.join("Library.lrcat.lock"), b"open").unwrap();
-
-    let said = cli.said(&["derived", "clean", "--yes"]);
-    assert!(
-        previews.exists(),
-        "превью уехали при открытом каталоге Lightroom"
-    );
-    assert!(
-        said.contains("catalogue is open") || said.contains("каталог"),
-        "отказ не объяснён: {said}"
-    );
+    for lock in [false, true] {
+        if lock {
+            std::fs::write(cli.archive.join("Library.lrcat.lock"), b"open").unwrap();
+        }
+        let said = cli.said(&["derived", "clean", "--kind", "lr-previews", "--yes"]);
+        assert!(previews.join("cache").exists(), "previews moved: {said}");
+        assert!(said.contains("Lightroom is never touched"), "{said}");
+        assert!(said.contains("Nothing matches"), "{said}");
+    }
+    assert!(quarantined(&cli.archive).is_empty());
 }
 
 /// B3 (el-1y8uo), the command-line half of
@@ -236,25 +288,17 @@ fn a_database_failure_after_a_move_prints_the_receipt() {
 
 #[test]
 fn reviewer_photo_in_named_bundle_is_not_regenerable_data() {
+    // Before el-126jk this photograph went to quarantine with the bundle
+    // and only purge's allowlist kept it. Now it never leaves.
     let cli = Cli::new();
     let bundle = cli.archive.join("Cat Previews.lrdata");
     std::fs::create_dir_all(&bundle).unwrap();
     let original = cli.photo("Cat Previews.lrdata/original.jpg", 37);
     let bytes = std::fs::read(&original).unwrap();
     cli.run(&["scan", "--root", cli.archive.to_str().unwrap()]);
-    let cleaned = cli.said(&["derived", "clean", "--yes"]);
-    let at = cli
-        .archive
-        .join(pc_core::QUARANTINE_DIR)
-        .join("Cat Previews.lrdata/original.jpg");
-    assert!(at.exists(), "fixture did not reach quarantine: {cleaned}");
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    let said = cli.said(&["derived", "purge", "--older-than", "0d", "--yes"]);
-    assert!(
-        at.exists(),
-        "valid synthetic JPEG deleted as regenerable preview: {said}"
-    );
-    assert_eq!(std::fs::read(at).unwrap(), bytes);
+    let cleaned = cli.said(&["derived", "clean", "--kind", "lr-previews", "--yes"]);
+    assert_eq!(std::fs::read(&original).unwrap(), bytes, "{cleaned}");
+    assert!(quarantined(&cli.archive).is_empty(), "{cleaned}");
 }
 
 #[test]
@@ -264,11 +308,7 @@ fn reviewer_missing_purge_confirmation_leaves_the_fixture_intact() {
     std::fs::create_dir_all(&bundle).unwrap();
     std::fs::write(bundle.join("cache.lrprev"), b"synthetic cache").unwrap();
     cli.run(&["scan", "--root", cli.archive.to_str().unwrap()]);
-    cli.run(&["derived", "clean", "--yes"]);
-    let at = cli
-        .archive
-        .join(pc_core::QUARANTINE_DIR)
-        .join("Cat Previews.lrdata/cache.lrprev");
+    let at = moved_by_an_earlier_version(&cli, "Cat Previews.lrdata").join("cache.lrprev");
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let out = cli.said(&["derived", "purge", "--older-than", "0d"]);
     assert!(out.contains("cannot be undone"), "{out}");
@@ -325,57 +365,40 @@ fn a_journal_failure_after_purge_prints_what_went_and_fails() {
     assert!(err.contains("stopped after deleting"), "{err}");
 }
 
-/// el-wffu8 B1-R2b through the real command line: system junk whose format
-/// has no reliable signature is never deleted for good, whatever its bytes
-/// — not even when they start the way the real format starts. `scan`,
-/// `derived clean`, `derived purge` as a person runs them; each payload is
-/// still there, byte for byte, and the command says it is kept: purge
-/// deletes no bundle at all (el-3s9kp), a lone junk file included.
+/// el-wffu8 B1-R2b through the real command line, under the contract
+/// narrowed after el-2rpxq: system junk is never moved, so never deleted
+/// for good either. `scan`, `derived clean`, `derived purge` as a person
+/// runs them; each file is still at home, byte for byte and inode for
+/// inode, nothing reaches a quarantine, and the command says why.
+#[cfg(unix)]
 #[test]
 fn junk_without_a_reliable_signature_survives_scan_clean_and_purge() {
     let cli = Cli::new();
-    let arbitrary: Vec<u8> = (0..=255).collect();
-    let with_head = |head: &[u8]| {
-        let mut v = head.to_vec();
-        v.extend_from_slice(&arbitrary);
-        v
-    };
     let fixtures = [
-        ("desktop.ini", arbitrary.clone()),
-        (
-            "Thumbs.db",
-            with_head(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]),
-        ),
-        (".DS_Store", with_head(b"\0\0\0\x01Bud1")),
+        ("desktop.ini", junk::desktop_ini_text()),
+        ("Thumbs.db", junk::thumbs_db()),
+        (".DS_Store", junk::ds_store()),
     ];
     for (name, bytes) in &fixtures {
         std::fs::write(cli.archive.join(name), bytes).unwrap();
     }
+    let prints: Vec<_> = fixtures
+        .iter()
+        .map(|(n, _)| fingerprint(&cli.archive.join(n)))
+        .collect();
     cli.run(&["scan", "--root", cli.archive.to_str().unwrap()]);
     let cleaned = cli.said(&["derived", "clean", "--kind", "system-junk", "--yes"]);
-    let q = cli.archive.join(pc_core::QUARANTINE_DIR);
-    for (name, bytes) in &fixtures {
-        let at = q.join(name);
-        assert_eq!(
-            std::fs::read(&at).ok().as_ref(),
-            Some(bytes),
-            "{name} did not reach quarantine: {cleaned}"
-        );
-    }
+    assert!(cleaned.contains("moves no system files"), "{cleaned}");
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let said = cli.said(&["derived", "purge", "--older-than", "0d", "--yes"]);
-    for (name, bytes) in &fixtures {
+    for ((name, _), before) in fixtures.iter().zip(&prints) {
         assert_eq!(
-            std::fs::read(q.join(name)).ok().as_ref(),
-            Some(bytes),
-            "{name} was deleted for good: {said}"
+            &fingerprint(&cli.archive.join(name)),
+            before,
+            "{name}: {cleaned}\n{said}"
         );
     }
-    assert!(
-        said.contains("kept — delete it by hand if you are sure"),
-        "{said}"
-    );
-    assert!(said.contains("Deleted: 0 objects"), "{said}");
+    assert!(quarantined(&cli.archive).is_empty(), "{cleaned}\n{said}");
 }
 
 /// Everything that says a file is the same file, untouched: where it lives,
@@ -510,12 +533,19 @@ fn lightroom_cell(kind: &str, bundle: &str, name: &str, payload: &[u8]) {
             held.push("innocent.lrprev".into());
         }
         cli.run(&["scan", "--root", cli.archive.to_str().unwrap()]);
+        // This version moves none of it (el-126jk)...
         let cleaned = cli.said(&["derived", "clean", "--kind", kind, "--yes"]);
-        let q = cli.archive.join(pc_core::QUARANTINE_DIR).join(bundle);
         assert!(
-            q.join(name).exists(),
-            "{cell}: not in quarantine: {cleaned}"
+            cli.archive.join(bundle).join(name).exists(),
+            "{cell}: moved: {cleaned}"
         );
+        assert!(
+            cleaned.contains("Lightroom is never touched"),
+            "{cell}: {cleaned}"
+        );
+        // ...but what an earlier version moved is still kept by purge.
+        let q = moved_by_an_earlier_version(&cli, bundle);
+        assert!(q.join(name).exists(), "{cell}: not in quarantine");
         let before: Vec<_> = held.iter().map(|h| fingerprint(&q.join(h))).collect();
         let bundle_before = fingerprint_dir(&q);
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -566,4 +596,230 @@ fn fingerprint_dir(dir: &Path) -> Vec<(PathBuf, u64, u32)> {
         .collect();
     out.sort();
     out
+}
+
+/// el-126jk, the user's decision of 2026-10-06 ("Lightroom catalogues are
+/// not to be touched at all"), through the real command line: `scan`, then
+/// `derived clean --yes` for every kind as a person runs it. Nothing of
+/// Lightroom moves — in any case, in either Unicode normal form, under any
+/// ancestor — and neither does a photograph inside a folder that is only
+/// called derived. Each refusal is said, with its reason. Since el-2rpxq
+/// no system file moves either, a well-formed `.DS_Store` included.
+#[test]
+fn derived_clean_moves_nothing_of_lightroom_and_no_photograph_in_a_named_bundle() {
+    let cli = Cli::new();
+    let a = &cli.archive;
+    let put = |rel: &str, bytes: &[u8]| {
+        let p = a.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+        p
+    };
+    let jpeg = std::fs::read(cli.photo("seed.jpg", 61)).unwrap();
+    std::fs::remove_file(a.join("seed.jpg")).unwrap();
+    let ds_store = junk::ds_store();
+    // "Ёлка" precomposed (NFC) and "Йод" decomposed (NFD: И + U+0306).
+    let nfc = "\u{401}\u{43b}\u{43a}\u{430}";
+    let nfd = "\u{418}\u{306}\u{43e}\u{434}";
+    let kept = [
+        put("Cat Previews.lrdata/root-pyramid.lrprev", b"AgHg synthetic"),
+        put("Cat Previews.lrdata/previews.db", b"SQLite format 3\0syn"),
+        put("Cat Smart Previews.lrdata/A/frame.dng", b"II*\0synthetic"),
+        put("Cat Helper.lrdata/helper.db", b"SQLite format 3\0syn"),
+        put("Other.lrdata/x.bin", b"synthetic"),
+        put("X.lrcat-data/masks.db", b"SQLite format 3\0syn"),
+        put("PREVIEWS.LRDATA/upper.lrprev", b"AgHg synthetic"),
+        put("Mixed Previews.LrData/m.lrprev", b"AgHg synthetic"),
+        put("Shout.LRCAT-DATA/m.db", b"SQLite format 3\0syn"),
+        put(&format!("{nfc} Previews.lrdata/c.lrprev"), b"AgHg nfc"),
+        put(&format!("{nfd} Previews.lrdata/d.lrprev"), b"AgHg nfd"),
+        // Junk inside anything of Lightroom's stays with it.
+        put("Lightroom/Backups/2026-01-01 1200/.DS_Store", &ds_store),
+        put("Cat Previews.lrdata/.DS_Store", &ds_store),
+        put("._Cat.lrcat", b"\0\x05\x16\x07synthetic appledouble"),
+        // A photograph in a folder called derived is a photograph.
+        put("@eaDir/IMG_0001.JPG/real.jpg", &jpeg),
+        put(".thumbnails/mystery.bin", b"unknown synthetic"),
+        // A photograph under a junk file name is a photograph.
+        put("desktop.ini", &jpeg),
+    ];
+    let junk = put(".DS_Store", &ds_store);
+    let junk_print = fingerprint(&junk);
+
+    cli.run(&["scan", "--root", a.to_str().unwrap()]);
+    let mut said = String::new();
+    for kind in [
+        "lr-previews",
+        "lr-smart-previews",
+        "lr-helper",
+        "lr-lrdata-other",
+        "system-junk",
+    ] {
+        let out = cli.run(&["derived", "clean", "--kind", kind, "--yes"]);
+        said.push_str(&String::from_utf8_lossy(&out.stdout));
+        said.push_str(&String::from_utf8_lossy(&out.stderr));
+    }
+    let moved: Vec<_> = kept.iter().filter(|p| !p.exists()).collect();
+    assert!(moved.is_empty(), "moved: {moved:?}\n{said}");
+    assert_eq!(fingerprint(&junk), junk_print, "{said}");
+    assert!(quarantined(a).is_empty(), "{said}");
+    assert!(said.contains("Lightroom is never touched"), "{said}");
+    assert!(said.contains("moves no system files"), "{said}");
+}
+
+/// el-wda81, the independent review of 9b785bf, through the real command
+/// line: scan, then `derived clean --yes`. A protected folder anywhere below
+/// a junk folder (B1), a satellite whose file is there — including one that
+/// arrived after the scan (B2), and a magic prefix or broken text (B3) all
+/// stay where they are. Since the contract narrowed after el-2rpxq so do
+/// the orphans and complete structures that used to move: no system file
+/// and no companion is ever moved, and the command says why.
+#[cfg(unix)]
+#[test]
+fn reviewer_el_wda81_matrix_keeps_protected_satellites_and_prefixes() {
+    let cli = Cli::new();
+    let a = &cli.archive;
+    let put = |rel: &str, bytes: &[u8]| {
+        let p = a.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+        p
+    };
+    let ds = junk::ds_store();
+    let ad = junk::apple_double();
+    let jpeg = std::fs::read(cli.photo("seed.jpg", 17)).unwrap();
+    std::fs::remove_file(a.join("seed.jpg")).unwrap();
+    let mut kept = vec![
+        // B1
+        put("n1/@eaDir/X.lrcat-data/.DS_Store", &ds),
+        put("n2/@eaDir/Cat.lrdata/.DS_Store", &ds),
+        put("n3/@eaDir/Backups/.DS_Store", &ds),
+        put("n4/@eaDir/Library.photoslibrary/.DS_Store", &ds),
+        put("n5/Backups. /.DS_Store", &ds),
+        put(
+            "n6/.thumbnails/deep/er/Old Lightroom Catalogs/.DS_Store",
+            &ds,
+        ),
+        // B2
+        put("s1/photo.png", &jpeg),
+        put("s1/._photo.png", &ad),
+        put("s2/photo.xmp", b"<x:xmpmeta/>"),
+        put("s2/._photo.xmp", &ad),
+        put("s3/photo.png", &jpeg),
+        put("s3/@eaDir/photo.png/photo.png@SynoEAStream", &ad),
+        // B3
+        put("m1/._orphan", &ad[..4]),
+        put("m2/.DS_Store", &ds[..8]),
+        put("m3/Thumbs.db", &junk::thumbs_db()[..8]),
+    ];
+    let mut bad_utf16 = vec![0xFF, 0xFE];
+    for _ in 0..8 {
+        bad_utf16.extend_from_slice(&[0x00, 0xD8]);
+    }
+    kept.push(put("m4/desktop.ini", &bad_utf16));
+    let empty_lr = a.join("e1/@eaDir/X.lrcat-data");
+    let empty_photos = a.join("e2/.thumbnails/Library.photoslibrary");
+    std::fs::create_dir_all(&empty_lr).unwrap();
+    std::fs::create_dir_all(&empty_photos).unwrap();
+    let late_sat = put("late/._frame.png", &ad);
+    let controls = [
+        put("ok/._orphan", &ad),
+        put("ok/.DS_Store", &ds),
+        put("ok/Thumbs.db", &junk::thumbs_db()),
+        put("ok/desktop.ini", &junk::desktop_ini_utf16()),
+    ];
+
+    cli.run(&["scan", "--root", a.to_str().unwrap()]);
+    // The counterpart arrives after the scan: the move must see it.
+    let late = put("late/frame.png", &jpeg);
+    let prints: Vec<_> = kept
+        .iter()
+        .chain(&controls)
+        .chain([&late_sat, &late])
+        .map(|p| (p.clone(), fingerprint(p)))
+        .collect();
+    let dry = cli.said(&["derived", "clean", "--dry-run"]);
+    let out = cli.run(&["derived", "clean", "--yes"]);
+    let said = format!(
+        "{dry}\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for (p, before) in &prints {
+        assert!(p.exists(), "{} moved:\n{said}", p.display());
+        assert_eq!(&fingerprint(p), before, "{} changed", p.display());
+    }
+    assert!(empty_lr.is_dir() && empty_photos.is_dir(), "{said}");
+    assert!(quarantined(a).is_empty(), "{said}");
+    assert!(!said.contains("Moved:"), "{said}");
+    assert!(said.contains("moves no system files"), "{said}");
+}
+
+/// el-2rpxq, the independent review of 9759581, and the contract the
+/// director narrowed after it: `derived clean` moves no system file and no
+/// companion, through the real command line. The reviewer's malformed
+/// `Thumbs.db` and `.DS_Store` (B3-R2), an AppleDouble file whose frame is
+/// spelled in the other Unicode normal form (B2-R2), and — under the
+/// narrowed contract — every well-formed control too: an orphan `._*`, a
+/// Synology stream, `@eaDir`, `.thumbnails`, `Thumbs.db`, `desktop.ini`,
+/// `.DS_Store`. Each stays byte for byte and inode for inode, nothing
+/// reaches a quarantine, and the command says why.
+#[cfg(unix)]
+#[test]
+fn reviewer_el_2rpxq_no_system_file_or_companion_ever_moves() {
+    let cli = Cli::new();
+    let a = &cli.archive;
+    let put = |rel: &str, bytes: &[u8]| {
+        let p = a.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+        p
+    };
+    let ad = junk::apple_double();
+    let ds = junk::ds_store();
+    let jpeg = std::fs::read(cli.photo("seed.jpg", 23)).unwrap();
+    std::fs::remove_file(a.join("seed.jpg")).unwrap();
+    let kept = [
+        // B3-R2
+        put("b3cfb/Thumbs.db", &junk::thumbs_db_missing_mini_stream()),
+        put("b3ds/.DS_Store", &junk::ds_store_impossible_node()),
+        // B2-R2: NFC frame, NFD satellite.
+        put("b2/caf\u{e9}.png", &jpeg),
+        put("b2/._cafe\u{301}.png", &ad),
+        // Well-formed: none of it moves either.
+        put("v/.DS_Store", &ds),
+        put("v/Thumbs.db", &junk::thumbs_db()),
+        put("v/desktop.ini", &junk::desktop_ini_utf16()),
+        put("v/._orphan", &ad),
+        put("v/._.DS_Store", &ad),
+        put("e/@eaDir/gone.png@SynoEAStream", &ad),
+        put("e/@eaDir/gone.png@SynoResource", &ad),
+        put("e/@eaDir/.DS_Store", &ds),
+        put("t/.thumbnails/.DS_Store", &ds),
+    ];
+    let prints: Vec<_> = kept.iter().map(|p| (p.clone(), fingerprint(p))).collect();
+
+    cli.run(&["scan", "--root", a.to_str().unwrap()]);
+    let dry = cli.said(&["derived", "clean", "--dry-run"]);
+    let yes = cli.said(&["derived", "clean", "--yes"]);
+    let all = cli.said(&["derived", "clean", "--kind", "system-junk", "--yes"]);
+    let said = format!("{dry}\n{yes}\n{all}");
+    for (p, before) in &prints {
+        assert!(p.exists(), "{} moved:\n{said}", p.display());
+        assert_eq!(&fingerprint(p), before, "{} changed", p.display());
+    }
+    for dir in [
+        "b3cfb",
+        "b3ds",
+        "b2",
+        "v",
+        "e",
+        "t",
+        "e/@eaDir",
+        "t/.thumbnails",
+    ] {
+        assert!(quarantined(&a.join(dir)).is_empty(), "{dir}: {said}");
+    }
+    assert!(!said.contains("Moved:"), "{said}");
+    assert!(said.contains("moves no system files"), "{said}");
 }

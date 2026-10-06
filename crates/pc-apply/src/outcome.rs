@@ -152,16 +152,6 @@ impl Tally {
         *self == Tally::default()
     }
 
-    /// One derived bundle, moved whole.
-    pub fn bundle(b: &pc_db::Bundle) -> Tally {
-        Tally {
-            bundles: 1,
-            bundle_files: b.file_count.max(0) as u64,
-            bytes: b.size.max(0) as u64,
-            ..Default::default()
-        }
-    }
-
     /// Every file moved forward, whatever its kind.
     pub fn files_moved(&self) -> u64 {
         self.bundle_files + self.frames + self.companions + self.litter

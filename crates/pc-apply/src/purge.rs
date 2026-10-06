@@ -339,19 +339,14 @@ pub fn purge_kept(err: &anyhow::Error) -> Option<&PurgeKept> {
 
 /// Whether `path` names something of Lightroom's — by any of its parts, so
 /// a file inside a `.lrdata` or `.lrcat-data` folder counts as well as the
-/// folder. Lightroom's own names all end in an `.lr…` extension (`.lrcat`,
-/// `.lrcat-data`, `.lrcat-wal`, `.lrdata`, `.lrprev`, `.lrlibrary`,
-/// `.lrtemplate`…), and its backups are `.lrcat` copies or `.lrcat.zip`.
-/// Anything else that happens to have such an extension is kept too: a
-/// file kept by mistake costs one decision, a catalogue lost costs years.
+/// folder. The extension rule is the one the scan and the move use
+/// ([`pc_core::derived::has_lightroom_extension`]); its backups are
+/// `.lrcat` copies or `.lrcat.zip`.
 pub fn is_lightroom(path: &str) -> bool {
     std::path::Path::new(path).components().any(|c| match c {
-        std::path::Component::Normal(n) => n
-            .to_string_lossy()
-            .to_lowercase()
-            .split('.')
-            .skip(1)
-            .any(|ext| ext.starts_with("lr")),
+        std::path::Component::Normal(n) => {
+            pc_core::derived::has_lightroom_extension(&n.to_string_lossy())
+        }
         _ => false,
     })
 }

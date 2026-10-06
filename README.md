@@ -65,8 +65,9 @@ and collected into the move plan.
 
 **Accounts for derived data.** Lightroom previews, caches, system junk. It
 recognises a bundle by its directory name and never walks inside: twenty-four
-thousand preview files become one line in the inventory. It also refuses to
-touch what cannot be rebuilt.
+thousand preview files become one line in the inventory. Nothing of
+Lightroom's is ever moved, and no system file either: `derived clean` lists
+what it found and says why each stays.
 
 **Sorts what is left by date**, into `YYYY/YYYY-MM-DD_event`, reversibly.
 
@@ -95,8 +96,8 @@ by hand say so, and do not depend on the role checkboxes above.
 | | |
 |---|---|
 | `*.lrcat-data` | **never removed** — AI masks and Denoise, nothing regenerates them. Enforced in code, no policy lifts it |
-| an open catalogue | a `*.lrcat.lock` beside it means Lightroom has it open → the bundle is blocked |
-| Smart Previews | removable only when **every** master the catalogue references is found on disk |
+| anything of Lightroom's, or of a Photos library | **never moved** — catalogues, `.lrcat-data`, every `.lrdata` (previews, Smart Previews, helper), `.lrprev`, backups, `.photoslibrary` and anything inside them, in any letter case, and any junk folder holding one at any depth; listed with the reason |
+| system files | **never moved** — `.DS_Store`, `Thumbs.db`, `desktop.ini`, `@eaDir`, `.thumbnails`: neither a name nor a structure proves one holds nothing of yours; companions (`._X`, Synology `X@SynoEAStream`/`@SynoResource`) travel only with their file, whether it is there or not. The scan does not record them; `derived clean` says why |
 | changed since the scan | skipped, never moved |
 | quarantine on another disk | refused: the move would silently become a copy |
 | deletion | `purge` only, with an explicit `--yes`, only after the holding period, and only files proven to be the ones moved |

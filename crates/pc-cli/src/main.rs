@@ -304,7 +304,8 @@ struct FamListArgs {
 enum DerivedCmd {
     /// Show the bundles that were found
     List(ListArgs),
-    /// Move to quarantine
+    /// Say what would move to quarantine: nothing — no Lightroom data, no
+    /// system file, no companion — and why
     Clean(CleanArgs),
     /// Delete from quarantine, for good
     Purge(PurgeArgs),
@@ -326,19 +327,20 @@ struct ListArgs {
 
 #[derive(Args)]
 struct CleanArgs {
-    /// Kind of data; repeatable. lr-previews by default
+    /// Kind of data; repeatable. system-junk by default. Nothing of
+    /// Lightroom's and no system file is ever moved; each kind is answered
+    /// with the reason
     #[arg(long = "kind")]
     kinds: Vec<String>,
     #[arg(long, value_parser = format::parse_size)]
     min_size: Option<i64>,
-    /// Only show what would be done
+    /// Accepted for older scripts; nothing is ever moved
     #[arg(long)]
     dry_run: bool,
-    /// Confirm and carry it out
+    /// Accepted for older scripts; nothing is ever moved
     #[arg(long)]
     yes: bool,
-    /// Where quarantine goes. By default, beside each file.
-    /// The path has to be on the same filesystem as the data.
+    /// Accepted for older scripts; nothing is ever moved
     #[arg(long)]
     quarantine: Option<PathBuf>,
 }
@@ -796,7 +798,6 @@ fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {
         kind: a.kind.as_deref().map(parse_kind).transpose()?,
         state: (!a.all).then_some(BundleState::Present),
         min_size: a.min_size,
-        removable_only: false,
     };
     let bundles = db.list_bundles(&filter)?;
     if bundles.is_empty() {
@@ -808,8 +809,11 @@ fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {
 }
 
 fn cmd_clean(db: &Db, a: CleanArgs) -> Result<()> {
+    // Nothing of Lightroom's is ever moved (el-126jk) and no system file
+    // either (el-2rpxq): the default asks for junk so that the answer says
+    // why nothing is moved.
     let kinds: Vec<DerivedKind> = if a.kinds.is_empty() {
-        vec![DerivedKind::LrPreviews]
+        vec![DerivedKind::SystemJunk]
     } else {
         a.kinds
             .iter()
@@ -817,66 +821,30 @@ fn cmd_clean(db: &Db, a: CleanArgs) -> Result<()> {
             .collect::<Result<Vec<_>>>()?
     };
 
-    for k in &kinds {
-        if !k.regenerable() {
-            bail!(
-                "kind “{}” ({}) is never removed: nothing regenerates it",
-                k.as_str(),
-                k.label()
-            );
+    // `--dry-run`, `--yes` and `--quarantine` are still accepted, so that a
+    // script written for an earlier version gets this answer rather than an
+    // error; there is nothing for them to change (el-1bzcw).
+    let _ = (a.dry_run, a.yes, &a.quarantine);
+
+    // The same answer the web preview gives: what is not moved is named,
+    // with its reason. Nothing is moved: there is no move for a bundle.
+    let pc_apply::DerivedSelection { excluded, notes } =
+        pc_apply::select_derived(db, &kinds, a.min_size)?;
+
+    if !excluded.is_empty() {
+        println!(
+            "Not moved: {}",
+            pc_core::count_en(excluded.len() as i64, "object", "objects")
+        );
+        for (path, why) in &excluded {
+            println!("  {path}\n      └─ {why}");
         }
+        println!();
     }
-
-    let mut selected = Vec::new();
-    for k in &kinds {
-        let f = pc_db::model::BundleFilter {
-            kind: Some(*k),
-            state: Some(BundleState::Present),
-            min_size: a.min_size,
-            removable_only: true,
-        };
-        selected.extend(db.list_bundles(&f)?);
+    for (what, why) in &notes {
+        println!("{what}\n      └─ {why}\n");
     }
-
-    if selected.is_empty() {
-        println!("Nothing matches those conditions.");
-        return Ok(());
-    }
-
-    let files: i64 = selected.iter().map(|b| b.file_count).sum();
-    let bytes: i64 = selected.iter().map(|b| b.size).sum();
-    println!(
-        "To move to quarantine: {}, {}, {}\n",
-        pc_core::count_en(selected.len() as i64, "bundle", "bundles"),
-        pc_core::count_en(files, "file", "files"),
-        fmt_bytes(bytes as u64)
-    );
-    format::print_grouped_opts(&selected, false);
-
-    if a.dry_run {
-        println!("\n--dry-run: nothing changed.");
-        return Ok(());
-    }
-    if !a.yes {
-        println!("\nAdd --yes to carry it out.");
-        return Ok(());
-    }
-
-    let run_id = db.latest_run()?.context("no runs yet; run scan first")?;
-    let totals = pc_apply::quarantine_many(db, run_id, &selected, a.quarantine.as_deref())
-        .inspect_err(print_stop)?;
-
-    println!("\nMoved: {}", totals.done.summary());
-    for s in &totals.skipped {
-        println!("  skipped: {s}");
-    }
-    // `purge` deletes no bundle (el-3s9kp): saying it would reclaim this
-    // space would send a person to a command that keeps all of it.
-    println!(
-        "\nNo space has come back yet — the data is in quarantine, and can be undone.\n\
-         `derived purge` never deletes bundles: to reclaim the space, delete them from\n\
-         quarantine by hand if you are sure."
-    );
+    println!("Nothing matches those conditions.");
     Ok(())
 }
 
@@ -1332,10 +1300,10 @@ fn cmd_status(db: &Db) -> Result<()> {
         .iter()
         .filter(|b| b.state == BundleState::Present)
         .collect();
-    let removable: Vec<_> = present.iter().filter(|b| b.removable()).collect();
-    let blocked: Vec<_> = present.iter().filter(|b| !b.removable()).collect();
-
-    let sum = |v: &[&&pc_db::Bundle]| -> u64 { v.iter().map(|b| b.size as u64).sum() };
+    // Nothing in the inventory can be moved (el-126jk, el-2rpxq): the line
+    // stays, at zero, so that the answer reads the same as it always has.
+    let blocked = &present;
+    let sum = |v: &[&pc_db::Bundle]| -> u64 { v.iter().map(|b| b.size as u64).sum() };
 
     let idx = db.index_stats()?;
     if idx.without_thumb > 0 {
@@ -1345,15 +1313,11 @@ fn cmd_status(db: &Db) -> Result<()> {
         );
     }
     println!("Bundles in the inventory: {}", all.len());
-    println!(
-        "  can be moved:          {:>4}  {}",
-        removable.len(),
-        fmt_bytes(sum(&removable))
-    );
+    println!("  can be moved:          {:>4}  {}", 0, fmt_bytes(0));
     println!(
         "  blocked:               {:>4}  {}",
         blocked.len(),
-        fmt_bytes(sum(&blocked))
+        fmt_bytes(sum(blocked))
     );
 
     let idx = db.index_stats()?;

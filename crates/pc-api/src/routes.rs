@@ -135,12 +135,10 @@ pub async fn status(State(st): State<Arc<AppState>>) -> Api<Status> {
         state: Some(BundleState::Present),
         ..Default::default()
     })?;
-    let derived_removable_bytes = bundles
-        .iter()
-        .filter(|b| b.removable())
-        .map(|b| b.size)
-        .sum();
-    let derived_blocked = bundles.iter().filter(|b| !b.removable()).count() as i64;
+    // No bundle can be moved (el-126jk, el-2rpxq): every present one is
+    // blocked, and the field the page reads stays, at zero.
+    let derived_removable_bytes = 0;
+    let derived_blocked = bundles.len() as i64;
     let quarantined_bytes = db.journal_quarantined(None)?.iter().map(|e| e.size).sum();
 
     Ok(Json(Status {
@@ -429,17 +427,16 @@ pub async fn derived(State(st): State<Arc<AppState>>) -> Api<Vec<BundleOut>> {
     Ok(Json(
         rows.into_iter()
             .map(|b| BundleOut {
+                // Nothing is ever moved; the field stays for the page.
+                removable: false,
+                blocked: Some(b.refusal()),
                 id: b.id,
                 path: b.path,
                 kind: b.kind.as_str(),
                 kind_label: b.kind.label(),
                 file_count: b.file_count,
                 size: b.size,
-                removable: b.regenerable
-                    && b.blocked_code.is_none()
-                    && b.state == BundleState::Present,
                 regenerable: b.regenerable,
-                blocked: b.blocked_detail,
                 hint: b.rebuild_cost_hint,
                 state: match b.state {
                     BundleState::Present => "present",

@@ -542,7 +542,6 @@ pub async fn runs(State(st): State<Arc<AppState>>) -> Response {
 
 pub enum Action {
     Copy(pc_family::plan::Candidate),
-    Bundle(pc_db::Bundle),
     Move(pc_organize::Move),
     Undo(pc_db::JournalEntry),
     Purge(pc_db::JournalEntry),
@@ -558,7 +557,6 @@ impl Action {
     pub fn path(&self) -> &str {
         match self {
             Self::Copy(x) => &x.path,
-            Self::Bundle(x) => &x.path,
             Self::Adopt(x) | Self::Abandon(x) => &x.path,
             Self::Move(x) => &x.src,
             Self::Undo(x) | Self::Purge(x) | Self::Reconcile(x) => &x.src,
@@ -573,7 +571,6 @@ impl Action {
     pub fn size(&self) -> u64 {
         match self {
             Self::Copy(x) => x.size,
-            Self::Bundle(x) => x.size,
             Self::Move(x) => x.size,
             Self::Adopt(x) | Self::Abandon(x) => x.size,
             Self::Undo(x) | Self::Purge(x) | Self::Reconcile(x) => x.size,
@@ -714,51 +711,16 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             }
         }
         "derived-clean" => {
-            let kinds = strings(&r.params, "kinds");
-            for b in db.list_bundles(&pc_db::model::BundleFilter {
-                state: Some(pc_db::BundleState::Present),
-                ..Default::default()
-            })? {
-                if !kinds.contains(&b.kind.as_str().to_string())
-                    || b.size < num(&r.params, "min_size", 0)
-                {
-                    continue;
-                }
-                if !b.removable() {
-                    add_refusal(
-                        b.path.clone(),
-                        b.blocked_detail.clone().unwrap_or(
-                            pc_core::tr!(
-                                "Удаление запрещено видом данных",
-                                "This kind of data is never removed"
-                            )
-                            .into(),
-                        ),
-                    );
-                    continue;
-                }
-                if let Err(e) = pc_apply::lightroom_gate(&b) {
-                    add_refusal(b.path.clone(), format!("{e:#}"));
-                    continue;
-                }
-                match pc_apply::quarantine_dest(&b, root.as_deref()) {
-                    Ok(dst) => {
-                        if dst.exists() {
-                            add_refusal(
-                                b.path.clone(),
-                                pc_core::tf!(
-                                    "Цель занята: {0}",
-                                    "Destination taken: {0}",
-                                    dst.display()
-                                ),
-                            );
-                            continue;
-                        }
-                        items.push(json!({"path":b.path,"dst":dst,"size":b.size,"file_count":b.file_count,"kind":b.kind.as_str()}));
-                        actions.push(Action::Bundle(b));
-                    }
-                    Err(e) => add_refusal(b.path.clone(), format!("{e:#}")),
-                }
+            let kinds = strings(&r.params, "kinds")
+                .iter()
+                .filter_map(|k| pc_core::DerivedKind::parse(k))
+                .collect::<Vec<_>>();
+            // The command line's answer, word for word: what is left is
+            // named with its reason, and the question is asked in pc-apply.
+            let sel = pc_apply::select_derived(db, &kinds, Some(num(&r.params, "min_size", 0)))?;
+            // Nothing is offered: there is no move for a bundle (el-1bzcw).
+            for (path, why) in sel.excluded.into_iter().chain(sel.notes) {
+                add_refusal(path, why);
             }
         }
         "organize-apply" => {
@@ -1051,17 +1013,15 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
     // A volume that cannot move without replacing refuses the whole
     // operation before its first move: the same answer, from the same
     // pc-apply functions, as the command line (el-usdqi).
-    let (mut copies, mut bundles, mut moves) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut copies, mut moves) = (Vec::new(), Vec::new());
     for a in &actions {
         match a {
             Action::Copy(c) => copies.push(c.clone()),
-            Action::Bundle(b) => bundles.push(b.clone()),
             Action::Move(m) => moves.push(m.clone()),
             _ => {}
         }
     }
     pc_apply::check_candidates(db, &copies, root.as_deref())?;
-    pc_apply::check_bundles(&bundles, root.as_deref())?;
     pc_apply::check_organize(&moves)?;
     // A refused file deserves the same inspection as a candidate. Metadata
     // is read from the index; previewing never opens an arbitrary client path.
@@ -1091,7 +1051,7 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
 /// How the moves of a job stopped at `a` are walked back.
 pub fn route_of(a: &Action, run_id: i64) -> pc_apply::Route {
     match a {
-        Action::Copy(_) | Action::Bundle(_) => pc_apply::Route::Quarantine,
+        Action::Copy(_) => pc_apply::Route::Quarantine,
         Action::Move(_) => pc_apply::Route::Organize { run_id },
         _ => pc_apply::Route::Restore,
     }
@@ -1180,28 +1140,6 @@ pub fn apply_action(
                 warnings,
             }
         }
-        Action::Bundle(b) => match pc_apply::quarantine(db, run, b, root.as_deref()) {
-            Ok(pc_apply::Outcome::Moved) => ActionResult {
-                done: pc_apply::Tally::bundle(b),
-                ..Default::default()
-            },
-            Ok(pc_apply::Outcome::Skipped) => ActionResult::refused(
-                pc_core::tf!(
-                    "Изменился с момента описи: {0}",
-                    "Changed since the inventory: {0}",
-                    b.path
-                ),
-                Default::default(),
-            ),
-            // As `derived clean` on the command line: one bundle's refusal
-            // is noted and the next is tried; a stop is a stop.
-            Err(e)
-                if pc_apply::is_no_exclusive_rename(&e) || pc_apply::stopped_run(&e).is_some() =>
-            {
-                return Err(e)
-            }
-            Err(e) => ActionResult::refused(format!("{e:#}"), Default::default()),
-        },
         Action::Move(m) => {
             if !flag(&r.params, "allow_lightroom") && db.lightroom_protected()?.contains_key(&m.src)
             {

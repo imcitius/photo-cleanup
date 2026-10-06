@@ -14,6 +14,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[path = "../../pc-core/src/derived/fixtures.rs"]
+mod junk;
+
 /// What turns up at the destination.
 #[derive(Clone, Copy, Debug)]
 enum Stranger {
@@ -209,48 +212,56 @@ fn a_sidecar_never_replaces_what_appears_beside_its_photograph() {
     assert!(a.db.journal_quarantined(None).unwrap().is_empty());
 }
 
-#[test]
-fn a_bundle_never_replaces_what_appears_in_quarantine() {
-    let a = archive();
-    let previews = a.dir.join("Previews.lrdata");
-    fs::create_dir_all(&previews).unwrap();
-    fs::write(previews.join("cache"), b"cached").unwrap();
+fn bundle(a: &Archive, path: &Path, is_dir: bool) -> pc_db::Bundle {
     a.db.upsert_bundle(
         &pc_db::model::NewBundle {
-            path: previews.display().to_string(),
-            is_dir: true,
+            path: path.display().to_string(),
+            is_dir,
             disk: "root".into(),
             dev: 0,
             mount: a.dir.display().to_string(),
-            kind: pc_core::DerivedKind::LrPreviews,
+            kind: pc_core::DerivedKind::SystemJunk,
             owner_ref: None,
             file_count: 1,
-            size: 6,
-            newest_mtime: pc_core::time::mtime_unix(&fs::metadata(&previews).unwrap()),
+            size: 0,
+            newest_mtime: pc_core::time::mtime_unix(&fs::metadata(path).unwrap()),
         },
         a.run,
     )
     .unwrap();
-    let b =
-        a.db.list_bundles(&Default::default())
-            .unwrap()
-            .pop()
-            .unwrap();
-    let dst = a.quarantine.join("Previews.lrdata");
+    a.db.list_bundles(&Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|b| b.path == path.display().to_string())
+        .unwrap()
+}
 
-    let _race = race_at(dst.clone(), Stranger::EmptyDir);
-    let totals = crate::quarantine_many(&a.db, a.run, &[b], None).unwrap();
-
-    assert_eq!(totals.done.bundles, 0, "каталог уехал поверх чужого");
-    assert!(
-        totals.skipped[0].contains(&dst.display().to_string()),
-        "{:?}",
-        totals.skipped
-    );
-    assert_eq!(fs::read(previews.join("cache")).unwrap(), b"cached");
-    intact(&dst, Stranger::EmptyDir);
-    let (status, _) = journal_row(&a.db, last_journal_id(&a.db));
-    assert_eq!(status, JournalStatus::Failed.as_str());
+/// el-wda81 B2 and el-2rpxq B2-R2: a companion an earlier version recorded
+/// is left and named as a companion whether its file is gone, there, or
+/// there in the other Unicode normal form; nothing moves and nothing is
+/// journalled.
+#[test]
+fn a_companion_is_left_and_named_with_or_without_its_file() {
+    let a = archive();
+    for (sat, frame) in [
+        ("._frame.jpg", None),
+        ("._frame2.jpg", Some("frame2.jpg")),
+        ("._cafe\u{301}.png", Some("caf\u{e9}.png")),
+        ("gone.png@SynoEAStream", None),
+    ] {
+        let sat = a.dir.join(sat);
+        fs::write(&sat, junk::apple_double()).unwrap();
+        if let Some(f) = frame {
+            fs::write(a.dir.join(f), b"synthetic frame").unwrap();
+        }
+        let b = bundle(&a, &sat, false);
+        let sel = crate::select_derived(&a.db, &[b.kind], None).unwrap();
+        let (_, why) = sel.excluded.iter().find(|(p, _)| *p == b.path).unwrap();
+        assert!(why.contains("companion"), "{why}");
+        assert_eq!(fs::read(&sat).unwrap(), junk::apple_double());
+    }
+    assert!(!a.quarantine.exists());
+    assert!(a.db.journal_quarantined(None).unwrap().is_empty());
 }
 
 #[test]

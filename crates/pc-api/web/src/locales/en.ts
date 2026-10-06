@@ -638,7 +638,7 @@ export const messages = {
   zaschischat_fayly_iz_katalogov_lightroom:
     "Protect files from Lightroom catalogues",
   prevyu_mozhno_peresozdat_esli_ishodniki_dostupny_smart_previews_p:
-    "Previews can be rebuilt while the originals are there. Smart Previews are checked separately. AI mask and Denoise data are never removed.",
+    "Lightroom data is never touched: catalogues, previews, Smart Previews, AI mask and Denoise data and backups stay where they are. System files (.DS_Store, ._*, Thumbs.db, desktop.ini, @eaDir, .thumbnails) are not moved either: neither a name nor a structure proves such a file holds nothing of yours, and a companion such as ._* belongs to its file. This screen lists what was found and why it stays.",
   proizvodnye_dannye_poka_ne_naydeny: "No derived data found yet",
   nachat_opis_2: "Start the inventory →",
   faylov_2: "files · ",

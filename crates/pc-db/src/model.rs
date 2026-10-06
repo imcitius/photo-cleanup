@@ -115,9 +115,18 @@ pub struct Bundle {
 }
 
 impl Bundle {
-    /// Selectable means: the kind can be rebuilt and no gate blocks it.
-    pub fn removable(&self) -> bool {
-        self.regenerable && self.blocked_code.is_none() && self.state == BundleState::Present
+    /// Why this bundle stays where it is — always something.
+    ///
+    /// Read from the kind and the path, not from what a scan wrote: a
+    /// database scanned by an earlier version holds bundles with no block
+    /// recorded.
+    pub fn protected(&self) -> BlockReason {
+        pc_core::derived::refusal(self.kind, std::path::Path::new(&self.path))
+    }
+
+    /// What keeps this bundle where it is, in words.
+    pub fn refusal(&self) -> String {
+        self.protected().describe()
     }
 
     fn from_row(r: &Row<'_>) -> rusqlite::Result<Self> {
@@ -373,8 +382,6 @@ pub struct BundleFilter {
     pub kind: Option<DerivedKind>,
     pub state: Option<BundleState>,
     pub min_size: Option<i64>,
-    /// Only bundles that may actually be removed.
-    pub removable_only: bool,
 }
 
 impl Db {
@@ -541,9 +548,6 @@ impl Db {
         }
         if f.min_size.is_some() {
             sql.push_str(" AND size >= :min_size");
-        }
-        if f.removable_only {
-            sql.push_str(" AND regenerable = 1 AND blocked_code IS NULL AND state = 'present'");
         }
         sql.push_str(" ORDER BY size DESC, path");
 
