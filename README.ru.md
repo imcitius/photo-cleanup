@@ -347,8 +347,17 @@ photo-cleanup organize undo --yes   # вернуть последнюю раск
 photo-cleanup derived clean --dry-run
 photo-cleanup derived clean --yes
 photo-cleanup derived undo --journal 12
+photo-cleanup derived undo --journal 12 --on-conflict rename-returning
 photo-cleanup derived purge --older-than 7d --yes
 ```
+
+Если исходное место файла занято другим файлом, откат по умолчанию оставляет
+его в карантине и называет оба пути. `--on-conflict` выбирает иначе:
+`replace` (существующий уходит в карантин, сам откатывается),
+`rename-existing` (существующий становится `*_1`), `rename-returning`
+(возвращаемый — `*_1`); `--all` применяет выбор ко всем конфликтам. На
+терминале команда спрашивает сама. Файлы Lightroom не заменяются и не
+переименовываются. Подробности — DESIGN.md §11.2, «Откат на занятое место».
 
 `derived clean` сейчас не переносит ничего. Виды `lr-previews`,
 `lr-smart-previews`, `lr-helper`, `lr-lrdata-other`, `lr-catalog-data`
