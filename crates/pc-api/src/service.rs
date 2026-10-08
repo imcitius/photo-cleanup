@@ -543,7 +543,10 @@ pub async fn runs(State(st): State<Arc<AppState>>) -> Response {
 pub enum Action {
     Copy(pc_family::plan::Candidate),
     Move(pc_organize::Move),
-    Undo(pc_db::JournalEntry),
+    /// With the choice reviewed in the preview when its original place was
+    /// taken (el-14vx0); pc-apply holds it only while the conflict is still
+    /// the one reviewed.
+    Undo(pc_db::JournalEntry, Option<pc_apply::Reviewed>),
     Purge(pc_db::JournalEntry),
     /// A file in a quarantine folder that this database never put there,
     /// carried back to where it came from — or, asked to be deleted for
@@ -559,12 +562,12 @@ impl Action {
             Self::Copy(x) => &x.path,
             Self::Adopt(x) | Self::Abandon(x) => &x.path,
             Self::Move(x) => &x.src,
-            Self::Undo(x) | Self::Purge(x) | Self::Reconcile(x) => &x.src,
+            Self::Undo(x, _) | Self::Purge(x) | Self::Reconcile(x) => &x.src,
         }
     }
     pub fn source_path(&self) -> &str {
         match self {
-            Self::Undo(e) | Self::Purge(e) => e.dst.as_deref().unwrap_or(&e.src),
+            Self::Undo(e, _) | Self::Purge(e) => e.dst.as_deref().unwrap_or(&e.src),
             _ => self.path(),
         }
     }
@@ -573,7 +576,7 @@ impl Action {
             Self::Copy(x) => x.size,
             Self::Move(x) => x.size,
             Self::Adopt(x) | Self::Abandon(x) => x.size,
-            Self::Undo(x) | Self::Purge(x) | Self::Reconcile(x) => x.size,
+            Self::Undo(x, _) | Self::Purge(x) | Self::Reconcile(x) => x.size,
         }
         .max(0) as u64
     }
@@ -584,6 +587,9 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
     let mut actions = Vec::new();
     let mut items = Vec::new();
     let mut refusals = Vec::new();
+    // Undo entries whose original place is taken, with the choices pc-apply
+    // offers for each and the one these parameters make (el-14vx0).
+    let mut conflicts: Vec<Value> = Vec::new();
     let mut add_refusal = |path: String, why: String| refusals.push(json!({"path":path,"why":why}));
     match r.kind.as_str() {
         "plan-apply" => {
@@ -882,6 +888,31 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     .filter_map(|i| i.why().map(|w| (i.src.clone(), w)))
                     .collect();
                 if !doubts.is_empty() {
+                    // Its only obstacle is that its place is taken: the
+                    // choice is the user's (el-14vx0). What each choice
+                    // does, and which are offered, is pc-apply's; the
+                    // reviewed conflict goes with the action, and a
+                    // conflict that changed since is refused there.
+                    if let Some(c) = pc_apply::undo_conflict(db, &e)? {
+                        let chosen = r.params["choices"][e.id.to_string()]
+                            .as_str()
+                            .and_then(pc_apply::Choice::parse)
+                            .unwrap_or(pc_apply::Choice::Keep);
+                        conflicts.push(conflict_json(&c, chosen));
+                        if chosen == pc_apply::Choice::Keep {
+                            add_refusal(e.src.clone(), c.kept_words());
+                        } else {
+                            items.push(json!({"journal_id":e.id,"path":e.dst,"dst":e.src,"size":e.size,"file_count":e.file_count,"choice":chosen.as_str()}));
+                            actions.push(Action::Undo(
+                                e,
+                                Some(pc_apply::Reviewed {
+                                    seen: c,
+                                    choice: chosen,
+                                }),
+                            ));
+                        }
+                        continue;
+                    }
                     for (src, why) in doubts {
                         add_refusal(src, why);
                     }
@@ -897,7 +928,7 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 let mut item = json!({"journal_id":e.id,"path":e.dst,"dst":e.src,"size":e.size,"file_count":e.file_count});
                 item["companions"] = json!(rest);
                 items.push(item);
-                actions.push(Action::Undo(e));
+                actions.push(Action::Undo(e, None));
             }
         }
         // An operation a killed process left half-done. The journal says what
@@ -1042,12 +1073,29 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
         .sum();
     let bytes: i64 = items.iter().map(|x| x["size"].as_i64().unwrap_or(0)).sum();
     warnings.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
-    let mut out = json!({"kind":r.kind,"params":r.params,"items":items,"refusals":refusals,"warnings":warnings,"total_files":count,"total_bytes":bytes});
+    conflicts.sort_by_key(|c| c["journal_id"].as_i64());
+    let mut out = json!({"kind":r.kind,"params":r.params,"items":items,"refusals":refusals,"warnings":warnings,"conflicts":conflicts,"total_files":count,"total_bytes":bytes});
     out["token"] = json!(blake3::hash(out.to_string().as_bytes())
         .to_hex()
         .to_string());
     Ok((out, actions))
 }
+/// An undo's conflict as the web shows it: pc-apply's words and choices,
+/// and the evidence of each occupant, so that the preview's token changes
+/// when what bears the place does.
+fn conflict_json(c: &pc_apply::Conflict, chosen: pc_apply::Choice) -> Value {
+    json!({
+        "journal_id": c.journal_id,
+        "text": c.describe(),
+        "kept": c.kept_words(),
+        "returning": c.returning.iter().map(|r| json!({"home": r.home, "held": r.held})).collect::<Vec<_>>(),
+        "occupants": c.occupants.iter().map(|o| json!({"path": o.path, "size": o.size(), "evidence": o.evidence()})).collect::<Vec<_>>(),
+        "choices": c.choices.iter().map(|ch| json!({"choice": ch.as_str(), "words": ch.words()})).collect::<Vec<_>>(),
+        "limits": c.limits,
+        "choice": chosen.as_str(),
+    })
+}
+
 /// How the moves of a job stopped at `a` are walked back.
 pub fn route_of(a: &Action, run_id: i64) -> pc_apply::Route {
     match a {
@@ -1177,7 +1225,9 @@ pub fn apply_action(
                 warnings,
             }
         }
-        Action::Undo(e) => per_entry(pc_apply::undo(db, e.id))?,
+        Action::Undo(e, reviewed) => {
+            per_entry(pc_apply::undo_reviewed(db, e.id, reviewed.as_ref()))?
+        }
         Action::Reconcile(e) => per_entry(pc_apply::reconcile_undo(db, e.id).map(|r| r.done))?,
         // What may be deleted is pc-apply's to prove, for the command line
         // and the web alike (el-3s9kp). An entry it refuses, or stops part

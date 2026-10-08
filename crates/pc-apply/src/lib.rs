@@ -22,6 +22,7 @@ compile_error!(
 );
 
 mod bound;
+mod conflict;
 pub mod files;
 mod located;
 pub mod organize;
@@ -31,10 +32,14 @@ pub mod recovery;
 mod roots;
 mod unit;
 
+pub use conflict::{
+    conflict_kept, undo_conflict, undo_reviewed, Choice, Conflict, ConflictKept, Occupant,
+    Returning, Reviewed,
+};
 pub use files::{
     apply, companion_plan, companions, same_picture, ApplyReport, Companion, FileOutcome, Filed,
 };
-pub use organize::{organize, undo_run, OrganizeReport};
+pub use organize::{organize, undo_run, undo_run_with, OrganizeReport};
 pub use outcome::{
     is_folder_moved, is_no_exclusive_rename, is_run_stop, stop_run, stopped_run, FolderMoved,
     Halted, NoExclusiveRename, Placed, Role, Route, Stopped, Tally, Whereabouts,
@@ -44,7 +49,8 @@ pub use purge::{
     KeptWhy, OrphanKept, OrphanWhy, PurgeKept, PurgeStage, PurgeStopped,
 };
 pub use recovery::{
-    reconcile, reconcile_undo, undo, undo_offered, undo_preview, Item, Reconciled, Standing,
+    reconcile, reconcile_undo, undo, undo_offered, undo_preview, undo_with, Item, Reconciled,
+    Standing,
 };
 pub use roots::RunRoots;
 
@@ -384,17 +390,51 @@ pub(crate) fn close_refused(
     )
 }
 
-/// What a refused rename says.
-pub(crate) fn rename_error(e: std::io::Error, src: &Path, dst: &Path) -> anyhow::Error {
-    if e.kind() == std::io::ErrorKind::AlreadyExists {
-        anyhow::anyhow!(
-            "{}",
+/// A move refused because something already bears its destination: nothing
+/// moved and nothing was replaced. Typed so that a search for a free name
+/// (`IMG_1`, `IMG_2`, …, el-14vx0) can try the next one — the rename itself
+/// is the test, never a look before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Taken {
+    pub(crate) path: PathBuf,
+    /// Said of a whole frame-and-companions unit, before any of it moved.
+    pub(crate) unit: bool,
+}
+
+impl std::fmt::Display for Taken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&if self.unit {
+            pc_core::tf!(
+                "цель уже существует и не будет заменена: {0}; кадр со спутниками не \
+                 переносится, ничего не перенесено",
+                "the destination already exists and is not replaced: {0}; the frame and its \
+                 companions are not moved, nothing moved",
+                self.path.display()
+            )
+        } else {
             pc_core::tf!(
                 "цель уже существует и не будет заменена: {0}",
                 "the destination already exists and is not replaced: {0}",
-                dst.display()
+                self.path.display()
             )
-        )
+        })
+    }
+}
+
+impl std::error::Error for Taken {}
+
+pub(crate) fn is_taken(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<Taken>())
+}
+
+/// What a refused rename says.
+pub(crate) fn rename_error(e: std::io::Error, src: &Path, dst: &Path) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::AlreadyExists {
+        Taken {
+            path: dst.to_path_buf(),
+            unit: false,
+        }
+        .into()
     } else if pc_core::disk::lacks_exclusive_rename(&e) {
         NoExclusiveRename::new(dst.to_path_buf(), e.to_string()).into()
     } else {
@@ -593,6 +633,9 @@ mod purge_tests;
 
 #[cfg(all(test, unix))]
 mod abandon_tests;
+
+#[cfg(all(test, unix))]
+mod conflict_tests;
 
 /// What `derived clean` leaves, with the reason — the one answer the
 /// command line and the web preview both print.

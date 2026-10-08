@@ -210,13 +210,13 @@ pub(crate) fn move_unit(
     }
     for m in members.iter().skip(1) {
         if std::fs::symlink_metadata(m.to).is_ok() {
-            return Unit::Refused(anyhow!(pc_core::tf!(
-                "цель уже существует и не будет заменена: {0}; кадр со спутниками не \
-                 переносится, ничего не перенесено",
-                "the destination already exists and is not replaced: {0}; the frame and its \
-                 companions are not moved, nothing moved",
-                m.to.display()
-            )));
+            return Unit::Refused(
+                crate::Taken {
+                    path: m.to.to_path_buf(),
+                    unit: true,
+                }
+                .into(),
+            );
         }
     }
 

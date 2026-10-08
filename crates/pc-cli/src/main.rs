@@ -150,6 +150,39 @@ struct OrganizeUndoArgs {
     run: Option<i64>,
     #[arg(long)]
     yes: bool,
+    #[command(flatten)]
+    conflict: ConflictArgs,
+}
+
+/// What to do when the place a file comes back to is taken by another file.
+#[derive(Args)]
+struct ConflictArgs {
+    /// keep (the default: it stays in quarantine), replace (the existing
+    /// file goes to quarantine), rename-existing (the existing file becomes
+    /// *_1), rename-returning (this one comes back as *_1). Answers the
+    /// first conflict; with --all, every one. On a terminal the others are
+    /// asked; otherwise they are kept
+    #[arg(long, value_parser = parse_choice)]
+    on_conflict: Option<pc_apply::Choice>,
+    /// Apply --on-conflict to every conflict, not only the first
+    #[arg(long, requires = "on_conflict")]
+    all: bool,
+}
+
+fn parse_choice(s: &str) -> std::result::Result<pc_apply::Choice, String> {
+    pc_apply::Choice::parse(s)
+        .ok_or_else(|| "expected keep, replace, rename-existing or rename-returning".to_string())
+}
+
+/// The terminal to ask on, when both ends of it are one.
+fn with_chooser<T>(a: &ConflictArgs, f: impl FnOnce(&mut pc_cli::conflict::Chooser) -> T) -> T {
+    use std::io::IsTerminal;
+    let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let (mut input, mut output) = (std::io::stdin().lock(), std::io::stdout());
+    let ask: Option<(&mut dyn std::io::BufRead, &mut dyn std::io::Write)> =
+        tty.then_some((&mut input, &mut output));
+    let mut chooser = pc_cli::conflict::Chooser::new(a.on_conflict, a.all, ask);
+    f(&mut chooser)
 }
 
 #[derive(Args)]
@@ -361,6 +394,8 @@ struct PurgeArgs {
 struct UndoArgs {
     #[arg(long)]
     journal: i64,
+    #[command(flatten)]
+    conflict: ConflictArgs,
 }
 
 /// What this command is about to do to the archive, or `None` when it only
@@ -439,7 +474,10 @@ fn main() -> Result<()> {
         Command::Derived(DerivedCmd::Clean(a)) => cmd_clean(&db, a),
         Command::Derived(DerivedCmd::Purge(a)) => cmd_purge(&db, a),
         Command::Derived(DerivedCmd::Undo(a)) => {
-            let back = pc_apply::undo(&db, a.journal).inspect_err(print_stop)?;
+            let back = with_chooser(&a.conflict, |ch| {
+                pc_apply::undo_with(&db, a.journal, &mut |c| ch.decide(c))
+            })
+            .inspect_err(print_stop)?;
             println!("Entry {} rolled back: {}.", a.journal, back.summary());
             Ok(())
         }
@@ -1267,7 +1305,10 @@ fn cmd_organize_undo(db: &Db, a: &OrganizeUndoArgs) -> Result<()> {
         println!("Add --yes to carry it out.");
         return Ok(());
     }
-    let (back, failed) = pc_apply::undo_run(db, run_id).inspect_err(print_stop)?;
+    let (back, failed) = with_chooser(&a.conflict, |ch| {
+        pc_apply::undo_run_with(db, run_id, &mut |c| ch.decide(c))
+    })
+    .inspect_err(print_stop)?;
     println!("Restored: {}.", back.summary());
     for f in failed.iter().take(10) {
         println!("  failed: {f}");

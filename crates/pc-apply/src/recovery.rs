@@ -18,8 +18,10 @@
 //! taken from it before it moves, so that a retry can recognise it at home.
 //! A file at home in such a row is never taken for the one that left: the
 //! row stays open, the file stays in quarantine, and the refusal names both
-//! paths (director decision, el-usdqi: no name-based recognition; the
-//! per-file choice for such rows is follow-up el-14vx0).
+//! paths (director decision, el-usdqi: no name-based recognition). What to
+//! do then — keep it in quarantine, replace, rename either file — is the
+//! user's choice, for such rows and new ones alike ([`crate::conflict`],
+//! el-14vx0).
 
 use anyhow::{bail, Context, Result};
 use pc_core::proof::{Proof, Verdict};
@@ -92,7 +94,7 @@ impl Item {
 }
 
 /// What is at one path, against the evidence.
-enum Spot {
+pub(crate) enum Spot {
     Absent,
     Proven,
     /// Something is there; the entry recorded nothing to compare it with.
@@ -102,7 +104,7 @@ enum Spot {
     Unreadable(String),
 }
 
-fn spot(path: &str, proof: Option<&Proof>) -> Spot {
+pub(crate) fn spot(path: &str, proof: Option<&Proof>) -> Spot {
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Spot::Absent,
         // Not "nothing there": a permission or I/O error, or a component
@@ -226,7 +228,7 @@ pub(crate) fn readable(entry: &JournalEntry) -> Result<()> {
 /// The list an entry is walked back from: what it wrote down, or, for a row
 /// from before the journal held one, the photograph and whatever carries its
 /// name beside it in quarantine — exactly what the older versions moved.
-fn list_of(entry: &JournalEntry) -> Result<Vec<Moved>> {
+pub(crate) fn list_of(entry: &JournalEntry) -> Result<Vec<Moved>> {
     readable(entry)?;
     if !entry.manifest.is_empty() {
         return Ok(entry.manifest.clone());
@@ -260,14 +262,62 @@ fn list_of(entry: &JournalEntry) -> Result<Vec<Moved>> {
 /// the recorded `dst`. Whatever is found there is still this entry's only on
 /// its evidence ([`classify`]); the overlay is a place to look, never a
 /// reason to act.
+///
+/// A return under a free name already under way (el-14vx0: `IMG.CR2` as
+/// `IMG_1.CR2`, recorded before the rename) sets where its items are looked
+/// for at home in the same way — and only once some item of it is proven
+/// there by its evidence.
 #[derive(Debug, Clone)]
-struct Pair {
-    rec: Moved,
-    look: Moved,
+pub(crate) struct Pair {
+    pub(crate) rec: Moved,
+    pub(crate) look: Moved,
     note: Option<String>,
     /// The object the operation last found is its own, changed since its
     /// check, and was kept where this says (user decision (c), point 4).
-    changed: Option<String>,
+    pub(crate) changed: Option<String>,
+}
+
+impl Pair {
+    /// This item comes back under a free name rather than its own.
+    pub(crate) fn renamed(&self) -> bool {
+        self.look.src != self.rec.src
+    }
+}
+
+/// The free names an interrupted return under free names was taking, if it
+/// had begun: the latest recorded attempt of which some item is proven — by
+/// its evidence, never by its name — at its free name.
+fn names_under_way(entry: &JournalEntry, list: &[Moved]) -> Vec<pc_db::ReturnedAs> {
+    for attempt in entry.returned_as.iter().rev() {
+        let begun = attempt.iter().any(|r| {
+            list.iter()
+                .find(|m| m.src == r.src && m.dst == r.dst)
+                .and_then(|m| m.proof.as_ref())
+                .is_some_and(|p| matches!(spot(&r.to, Some(p)), Spot::Proven))
+        });
+        if begun {
+            return attempt.clone();
+        }
+    }
+    Vec::new()
+}
+
+/// Every item of `list` as recovery reads it: [`Pair`].
+pub(crate) fn pairs_of(entry: &JournalEntry, list: Vec<Moved>) -> Vec<Pair> {
+    let under_way = names_under_way(entry, &list);
+    list.into_iter()
+        .map(|m| {
+            let to = under_way
+                .iter()
+                .find(|r| r.src == m.src && r.dst == m.dst)
+                .map(|r| r.to.clone());
+            let mut p = pair_of(entry, m);
+            if let Some(to) = to {
+                p.look.src = to;
+            }
+            p
+        })
+        .collect()
 }
 
 fn pair_of(entry: &JournalEntry, rec: Moved) -> Pair {
@@ -294,7 +344,7 @@ fn pair_of(entry: &JournalEntry, rec: Moved) -> Pair {
     }
 }
 
-fn item_of(p: &Pair) -> Item {
+pub(crate) fn item_of(p: &Pair) -> Item {
     // A photograph that changed after its check and stayed with the tool is
     // never brought back by recovery: its evidence no longer says it is the
     // one that left, and a newer evidence is not a reason to act. It is told
@@ -321,9 +371,9 @@ fn item_of(p: &Pair) -> Item {
 /// What an undo of `entry` would find, file by file. Reads only: the web's
 /// preview and the undo itself ask this same question.
 pub fn undo_preview(entry: &JournalEntry) -> Result<Vec<Item>> {
-    Ok(list_of(entry)?
-        .into_iter()
-        .map(|m| item_of(&pair_of(entry, m)))
+    Ok(pairs_of(entry, list_of(entry)?)
+        .iter()
+        .map(item_of)
         .collect())
 }
 
@@ -337,7 +387,14 @@ pub fn undo_offered(entry: &JournalEntry) -> bool {
 /// Add `text` to the entry's history, with the places of what it concerns.
 /// If the journal cannot take it, the caller's error says so as well — a
 /// refusal is never reported as written down when it was not.
-fn told(db: &Db, id: i64, phase: &str, kind: &str, text: &str, e: anyhow::Error) -> anyhow::Error {
+pub(crate) fn told(
+    db: &Db,
+    id: i64,
+    phase: &str,
+    kind: &str,
+    text: &str,
+    e: anyhow::Error,
+) -> anyhow::Error {
     told_located(db, id, phase, kind, text, e, &[])
 }
 
@@ -363,7 +420,7 @@ fn told_located(
 
 /// Every item of an entry with where it is — said whenever the entry is
 /// refused, so that a person sees all of it, not only the part that failed.
-fn listing(items: &[Item]) -> String {
+pub(crate) fn listing(items: &[Item]) -> String {
     items
         .iter()
         .map(|i| match i.why() {
@@ -393,7 +450,7 @@ fn listing(items: &[Item]) -> String {
 /// every item's place added to its history; if the unit could not even be
 /// put back where it was, the places proven after the last rename are
 /// recorded and the run stops.
-fn walk_back(
+pub(crate) fn walk_back(
     db: &Db,
     id: i64,
     phase: &str,
@@ -418,34 +475,72 @@ fn walk_back(
             anyhow::anyhow!("{why}"),
         ));
     }
+    match move_back(pairs) {
+        Back::Done(arrived, came) => Ok((arrived, came)),
+        Back::Failed(unit) => Err(unit_failed(db, id, phase, &items, unit)),
+    }
+}
+
+pub(crate) enum Back {
+    /// Everything that was away came back: what arrived, held until it is
+    /// recorded, and the pairs as they actually went.
+    Done(Vec<crate::bound::Arrived>, Vec<Moved>),
+    Failed(Unit),
+}
+
+/// Bring back, as one unit, every item of `pairs` that is away — to the
+/// place its `look.src` names. Asked only once no item is in doubt.
+pub(crate) fn move_back(pairs: &[Pair]) -> Back {
     let moving: Vec<&Pair> = pairs
         .iter()
-        .zip(&items)
-        .filter(|(_, i)| i.standing == Standing::Moved)
-        .map(|(p, _)| p)
+        .filter(|p| item_of(p).standing == Standing::Moved)
         .collect();
     if moving.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Back::Done(Vec::new(), Vec::new());
     }
     let members: Vec<Member> = moving
         .iter()
         .map(|p| Member::back(&p.rec, &p.look))
         .collect();
-    let pb = match move_unit(&members, Way::Back, None, &[]) {
+    match move_unit(&members, Way::Back, None, &[]) {
         Unit::Moved(arrived) => {
-            return Ok((arrived, moving.iter().map(|p| p.rec.clone()).collect()))
+            // As it went: a return under a free name names the free name.
+            let came = moving
+                .iter()
+                .map(|p| Moved {
+                    src: p.look.src.clone(),
+                    ..p.rec.clone()
+                })
+                .collect();
+            Back::Done(arrived, came)
         }
+        unit => Back::Failed(unit),
+    }
+}
+
+/// The refusal of a unit that did not come back, added to the entry's
+/// history with every item's place; a unit not put back whole stops the
+/// run.
+pub(crate) fn unit_failed(
+    db: &Db,
+    id: i64,
+    phase: &str,
+    items: &[Item],
+    unit: Unit,
+) -> anyhow::Error {
+    let pb = match unit {
+        Unit::Moved(_) => unreachable!("a unit that came back is not a failure"),
         Unit::Refused(e) => {
             let why = pc_core::tf!(
                 "{0}: ничего не перенесено — {1}; где что: {2}",
                 "{0}: nothing was moved — {1}; where things are: {2}",
                 phase,
                 e,
-                listing(&items)
+                listing(items)
             );
             let stop = crate::is_no_exclusive_rename(&e);
             let e = told(db, id, phase, "refused", &why, e);
-            return Err(if stop { e } else { e.context(why) });
+            return if stop { e } else { e.context(why) };
         }
         Unit::PutBack(pb) => pb,
     };
@@ -467,16 +562,30 @@ fn walk_back(
     };
     let e = told_located(db, id, phase, kind, &why, e, &located);
     let e = crate::outcome::with_placed(e, placed, Route::Restore);
-    Err(if stops {
+    if stops {
         stop_run(e, &Tally::default(), Route::Restore, Vec::new())
     } else {
         e
-    })
+    }
 }
 
 /// Walk a finished entry back: every file it moved, by its evidence, as one
-/// unit.
+/// unit. Where its original place is taken by another file, it stays in
+/// quarantine — the default choice (el-14vx0) — and the refusal says where
+/// it is and where it belongs; [`undo_with`] offers the other choices.
 pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
+    undo_with(db, journal_id, &mut |_| Ok(crate::Choice::Keep))
+}
+
+/// [`undo`], asking `decide` what to do when the place the entry comes back
+/// to is taken (el-14vx0). `decide` sees the conflict as read now; the
+/// moves that follow are bound to the occupants exactly as that reading
+/// found them, and a choice the conflict does not offer is refused.
+pub fn undo_with(
+    db: &Db,
+    journal_id: i64,
+    decide: &mut dyn FnMut(&crate::Conflict) -> Result<crate::Choice>,
+) -> Result<Tally> {
     let entry = db.journal_entry(journal_id)?.with_context(|| {
         pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
     })?;
@@ -491,7 +600,7 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
             )
         );
     }
-    let dst = entry.dst.clone().context(pc_core::tr!(
+    entry.dst.as_ref().context(pc_core::tr!(
         "в записи нет пути назначения",
         "the entry has no destination path"
     ))?;
@@ -502,16 +611,38 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
             return Err(told(db, journal_id, "undo", "refused", &why, e));
         }
     };
-    let pairs: Vec<Pair> = list.iter().map(|m| pair_of(&entry, m.clone())).collect();
+    let pairs = pairs_of(&entry, list.clone());
     if pairs.iter().map(item_of).all(|i| i.why().is_none()) {
         adopt_held_evidence(db, journal_id, &mut list)?;
+    } else if let Some(c) = crate::conflict::of(db, &entry, &pairs)? {
+        let choice = decide(&c)?;
+        return crate::conflict::resolve(db, &entry, list, c, choice);
     }
-    let pairs: Vec<Pair> = list.into_iter().map(|m| pair_of(&entry, m)).collect();
+    let pairs = pairs_of(&entry, list);
     let (arrived, came) = walk_back(db, journal_id, "undo", &pairs)?;
-    let mut done = Tally {
-        files_back: came.len() as u64,
-        ..Default::default()
-    };
+    finish(db, &entry, &pairs, arrived, came, Tally::default())
+}
+
+/// Record an undo whose files are back: the index follows, and the entry
+/// is closed `undone` with what came back and where. `earlier` is what the
+/// same undo did before it (files set aside to make room), counted once.
+pub(crate) fn finish(
+    db: &Db,
+    entry: &JournalEntry,
+    pairs: &[Pair],
+    arrived: Vec<crate::bound::Arrived>,
+    came: Vec<Moved>,
+    earlier: Tally,
+) -> Result<Tally> {
+    let journal_id = entry.id;
+    let dst = entry.dst.clone().unwrap_or_default();
+    let mut done = earlier;
+    done.files_back += came.len() as u64;
+    // Where the entry's own file is now when it came back under a free name.
+    let renamed = pairs
+        .iter()
+        .find(|p| p.rec.src == entry.src && p.renamed())
+        .map(|p| p.look.src.clone());
 
     let unrecorded = |e: anyhow::Error, done: &Tally| -> anyhow::Error {
         let e = e.context(pc_core::tf!(
@@ -522,6 +653,14 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
         stop_run(e, done, Route::Restore, Vec::new())
     };
     let indexed = (|| -> Result<()> {
+        // The index row follows a file that came back under a free name,
+        // unless the index already holds a row at that name.
+        let follow = |id: i64, at: &str| -> Result<()> {
+            if db.file_id_at(at)?.is_none() {
+                db.set_file_path(id, at, &name_of(Path::new(at)))?;
+            }
+            Ok(())
+        };
         match entry.op.as_str() {
             "quarantine" => {
                 if let Some(id) = db.bundle_id_at(&entry.src)? {
@@ -530,12 +669,15 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
             }
             "quarantine-file" => {
                 if let Some(id) = db.file_id_at(&entry.src)? {
+                    if let Some(at) = &renamed {
+                        follow(id, at)?;
+                    }
                     db.set_file_state(id, "present")?;
                 }
             }
             "organize" => {
                 if let Some(id) = db.file_id_at(&dst)? {
-                    db.set_file_path(id, &entry.src, &name_of(Path::new(&entry.src)))?;
+                    follow(id, renamed.as_deref().unwrap_or(&entry.src))?;
                 }
             }
             _ => {}
@@ -594,9 +736,9 @@ pub fn reconcile(db: &Db, journal_id: i64) -> Result<Vec<Item>> {
             )
         );
     }
-    Ok(pending_list(&entry)?
-        .into_iter()
-        .map(|m| item_of(&pair_of(&entry, m)))
+    Ok(pairs_of(&entry, pending_list(&entry)?)
+        .iter()
+        .map(item_of)
         .collect())
 }
 
@@ -619,7 +761,7 @@ fn pending_list(entry: &JournalEntry) -> Result<Vec<Moved>> {
 /// at its own recorded quarantine paths are what it has. Their evidence is
 /// taken now and written down *before* anything moves (el-1y8uo B4), so a
 /// retry recognises what is home by proof — never by its name. Rows that recorded evidence are left exactly as they are.
-fn adopt_held_evidence(db: &Db, journal_id: i64, list: &mut [Moved]) -> Result<()> {
+pub(crate) fn adopt_held_evidence(db: &Db, journal_id: i64, list: &mut [Moved]) -> Result<()> {
     let mut adopted = false;
     for m in list.iter_mut() {
         if m.proof.is_none() {
@@ -674,7 +816,7 @@ pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
         })?;
         let mut list = pending_list(&entry)?;
         adopt_held_evidence(db, journal_id, &mut list)?;
-        let pairs: Vec<Pair> = list.into_iter().map(|m| pair_of(&entry, m)).collect();
+        let pairs = pairs_of(&entry, list);
         (entry, pairs)
     };
     let (arrived, returned) = walk_back(db, journal_id, "reconcile", &pairs)?;

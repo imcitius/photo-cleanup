@@ -484,6 +484,17 @@ fn sweep_litter(
 /// back is counted from what each undo actually did — entries walked back
 /// whole, entries walked back in part, and files.
 pub fn undo_run(db: &Db, run_id: i64) -> Result<(Tally, Vec<String>)> {
+    undo_run_with(db, run_id, &mut |_| Ok(crate::Choice::Keep))
+}
+
+/// [`undo_run`], asking `decide` about every entry whose original place is
+/// taken (el-14vx0) — the same question, from the same function, as a
+/// single [`crate::undo_with`].
+pub fn undo_run_with(
+    db: &Db,
+    run_id: i64,
+    decide: &mut dyn FnMut(&crate::Conflict) -> Result<crate::Choice>,
+) -> Result<(Tally, Vec<String>)> {
     let entries = db.journal_by_run_op(run_id, "organize")?;
     if entries.is_empty() {
         bail!(
@@ -498,7 +509,7 @@ pub fn undo_run(db: &Db, run_id: i64) -> Result<(Tally, Vec<String>)> {
     let mut back = Tally::default();
     let mut failed = Vec::new();
     for e in entries {
-        match crate::undo(db, e.id) {
+        match crate::undo_with(db, e.id, decide) {
             Ok(t) => back.add(&t),
             // The volume cannot move without replacing: every later entry
             // would meet it too, so the walk stops here, saying how far it

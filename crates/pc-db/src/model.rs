@@ -268,6 +268,44 @@ impl Located {
     }
 }
 
+/// One file of an undo whose original place was taken, returned under a
+/// free name beside it instead (`IMG.CR2` as `IMG_1.CR2`, el-14vx0).
+///
+/// Written to the entry's history *before* the rename, so a retry after an
+/// interruption knows where to look for what already came back — and still
+/// treats a file there as this one only by its evidence ([`Moved::proof`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReturnedAs {
+    /// The manifest item this concerns, as recorded.
+    pub src: String,
+    pub dst: String,
+    /// The free name it is returned to instead of `src`.
+    pub to: String,
+}
+
+/// The decision taken for an undo whose original place was taken
+/// (el-14vx0), as appended to the entry's history: which choice, what was
+/// returning, what occupied its place — with the evidence read when the
+/// choice was offered — and what was done about it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConflictNote {
+    /// `keep`, `replace`, `rename-existing` or `rename-returning`.
+    pub choice: String,
+    /// The unit coming back: `src` its place, `dst` where it is held.
+    pub returning: Vec<Moved>,
+    /// What bore those places: `src` the path, `dst` where it was set aside
+    /// (empty while it was not moved), `proof` the evidence read.
+    pub occupants: Vec<Moved>,
+    /// An attempt to return the unit under free names, recorded before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returned_as: Vec<ReturnedAs>,
+    /// The journal entry that set the occupants aside, itself undoable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aside_entry: Option<i64>,
+}
+
 /// One event in the history of a journal entry. Appended, never replaced:
 /// a retry adds to what the entry says, it does not erase it (el-5vue3 R3/D6).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,6 +403,11 @@ pub struct JournalEntry {
     /// Every [`Located`] its events carry, oldest first. The latest one per
     /// manifest item is the one that counts.
     pub located: Vec<Located>,
+    /// The run the entry was written in.
+    pub run_id: i64,
+    /// Every attempt to return this entry under free names
+    /// ([`ConflictNote::returned_as`]), oldest first.
+    pub returned_as: Vec<Vec<ReturnedAs>>,
 }
 
 impl JournalEntry {
@@ -695,6 +738,35 @@ impl Db {
         self.journal_event(id, phase, kind, text, data.as_deref())
     }
 
+    /// [`Db::journal_event`] with the decision on an undo whose place was
+    /// taken ([`ConflictNote`]); an attempt under free names in it is read
+    /// back into [`JournalEntry::returned_as`].
+    pub fn journal_event_conflict(
+        &self,
+        id: i64,
+        phase: &str,
+        kind: &str,
+        text: &str,
+        note: &ConflictNote,
+    ) -> Result<()> {
+        let data = serde_json::json!({ "conflict": note }).to_string();
+        self.journal_event(id, phase, kind, text, Some(&data))
+    }
+
+    /// Point a `pending` entry at the destination of its next attempt, before
+    /// that attempt moves anything: a search for a free name (`_1`, `_2`, …,
+    /// el-14vx0) whose earlier attempt moved nothing — refused, or put back
+    /// whole — tries the next one under the same entry. Only a pending row
+    /// is ever retargeted.
+    pub fn journal_retarget(&self, id: i64, dst: &str, moved: &[Moved]) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE journal SET dst=?1, manifest=?2 WHERE id=?3 AND status='pending'",
+            params![dst, manifest_json(moved), id],
+        )?;
+        anyhow::ensure!(n == 1, "journal entry {id} is not pending");
+        Ok(())
+    }
+
     /// An entry's events, oldest first.
     pub fn journal_events(&self, id: i64) -> Result<Vec<JournalEvent>> {
         let mut st = self.conn.prepare(
@@ -781,6 +853,8 @@ impl Db {
                     manifest,
                     manifest_unreadable,
                     located: Vec::new(),
+                    run_id: r.get("run_id")?,
+                    returned_as: Vec::new(),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -795,6 +869,21 @@ impl Db {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for d in datas {
                 row.located.extend(located_of(&d)?);
+            }
+        }
+        let mut st = self.conn.prepare_cached(
+            "SELECT data FROM journal_events
+              WHERE journal_id = ?1 AND instr(data, '\"returned_as\"') > 0 ORDER BY id",
+        )?;
+        for row in &mut rows {
+            let datas = st
+                .query_map([row.id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for d in datas {
+                let as_ = returned_as_of(&d)?;
+                if !as_.is_empty() {
+                    row.returned_as.push(as_);
+                }
             }
         }
         Ok(rows)
@@ -986,6 +1075,16 @@ fn located_of(data: &str) -> Result<Vec<Located>> {
         Some(l) => Ok(serde_json::from_value(l.clone()).map_err(|e| {
             anyhow::anyhow!("a located record this version cannot read ({e}): {l}")
         })?),
+    }
+}
+
+fn returned_as_of(data: &str) -> Result<Vec<ReturnedAs>> {
+    let v: serde_json::Value = serde_json::from_str(data)?;
+    match v.get("conflict") {
+        None => Ok(Vec::new()),
+        Some(c) => Ok(serde_json::from_value::<ConflictNote>(c.clone())
+            .map_err(|e| anyhow::anyhow!("a conflict record this version cannot read ({e}): {c}"))?
+            .returned_as),
     }
 }
 

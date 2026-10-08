@@ -131,6 +131,11 @@ pub struct Tally {
     pub purged_files: u64,
     /// Bytes that came back: of files whose last link went.
     pub purged_bytes: u64,
+    /// Files that bore the place of something coming back and were moved
+    /// out of its way by the user's choice (el-14vx0) — renamed beside it,
+    /// or carried into quarantine under an entry of their own. Never
+    /// deleted, never replaced.
+    pub set_aside: u64,
 }
 
 impl Tally {
@@ -146,6 +151,7 @@ impl Tally {
         self.purged_entries += o.purged_entries;
         self.purged_files += o.purged_files;
         self.purged_bytes += o.purged_bytes;
+        self.set_aside += o.set_aside;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -209,6 +215,17 @@ impl Tally {
                     "записей отменено целиком",
                 ],
                 ["entry walked back", "entries walked back"],
+            ));
+        }
+        if self.set_aside > 0 {
+            parts.push(pc_core::tf!(
+                "отложено, чтобы освободить место: {0}",
+                "set aside to make room: {0}",
+                pc_core::count(
+                    self.set_aside as i64,
+                    ["файл", "файла", "файлов"],
+                    ["file", "files"]
+                )
             ));
         }
         if self.files_back > 0 {

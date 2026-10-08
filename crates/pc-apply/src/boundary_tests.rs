@@ -391,18 +391,22 @@ fn repeated_and_distinct_refusals_preserve_all_events() {
     let id = row(&a, &home, &held, &list, JournalStatus::Done);
     let side = home.with_extension("xmp");
     fs::write(&side, b"foreign edits").unwrap();
-    assert!(crate::undo(&a.db, id).is_err());
-    assert!(crate::undo(&a.db, id).is_err());
     let side_name = side.display().to_string();
+    assert!(crate::undo(&a.db, id).is_err());
+    // One refusal names the occupied place (as where the sidecar belongs
+    // and as what bears it, el-14vx0); the second adds as many again.
+    let once = note(&a, id).matches(&side_name).count();
+    assert!(once > 0);
+    assert!(crate::undo(&a.db, id).is_err());
     let n = note(&a, id);
     assert!(n.starts_with("prior recovery evidence"), "{n}");
-    assert_eq!(n.matches(&side_name).count(), 2, "{n}");
+    assert_eq!(n.matches(&side_name).count(), 2 * once, "{n}");
 
     fs::remove_file(&side).unwrap();
     crate::undo(&a.db, id).unwrap();
     let n = note(&a, id);
     assert!(n.starts_with("prior recovery evidence"), "{n}");
-    assert_eq!(n.matches(&side_name).count(), 2, "{n}");
+    assert_eq!(n.matches(&side_name).count(), 2 * once, "{n}");
     assert_eq!(journal_row(&a.db, id).0, "undone");
 }
 
