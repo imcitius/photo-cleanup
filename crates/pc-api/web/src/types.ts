@@ -196,8 +196,20 @@ export interface Preview {
     file_id?: number;
     thumb?: string | null;
   }[];
+  /// Undo entries whose original place is taken (el-14vx0).
+  conflicts?: Conflict[];
   total_files: number;
   total_bytes: number;
+}
+export interface Conflict {
+  journal_id: number;
+  text: string;
+  kept: string;
+  returning: { home: string; held: string }[];
+  occupants: { path: string; size: number; evidence: string }[];
+  choices: { choice: string; words: string }[];
+  limits: string[];
+  choice: string;
 }
 export interface Bundle {
   id: number;

@@ -286,6 +286,13 @@ export const ui = {
   reconcile: "Read against the disk",
   reconcileHelp:
     "We read the entry’s manifest and look at where each file actually is. The ones that went to quarantine and never came back are carried home; if a file turns out to be in both places, that is yours to settle and nothing is touched.",
+  conflictsTitle: "The original place is taken",
+  conflictsHelp:
+    "The file cannot come back: another file is already in its place, or it cannot be proven to be this one. By default the file stays in quarantine, and you can return it by hand from the path shown. You can choose otherwise, per file or for all the remaining ones: replace the existing file (it goes to quarantine under an entry of its own that can be undone — nothing is deleted), rename the existing file to *_1 and return this one to its name, or return this one as *_1 and leave the existing file alone. A free name is found by a move that never replaces: if *_1 is taken, *_2 is used. Companions (.xmp, .aae, ._*) travel and are renamed with their frame. Lightroom files are never replaced or renamed — for them only “keep” or “return as *_1”. If anything changes at the place after this preview, nothing is moved.",
+  conflictComing: "Coming back:",
+  conflictInPlace: "In its place:",
+  conflictApplyAll: "Apply this choice to all the remaining ones",
+  opSetAside: "Set aside to make room",
   pendingNote:
     "The operation was interrupted. Check the source and the destination: the file may have moved before the journal was updated. If permanent deletion had started, some data may already be gone.",
   jobNote: "You can close the tab — the job carries on on the server.",

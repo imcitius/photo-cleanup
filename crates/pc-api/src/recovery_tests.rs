@@ -480,3 +480,91 @@ async fn cli_and_api_render_the_same_retained_outcome() {
         assert!(said.contains(&line), "web lacks «{line}»: {said}");
     }
 }
+
+/// el-14vx0. An undo whose place is taken: the preview lists the conflict
+/// with pc-apply's choices and keeps the file by default; with a choice in
+/// the parameters, the job carries it out exactly as the command line's
+/// `--on-conflict` does — the same pc-apply function, the same result.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_web_offers_the_choice_on_a_taken_place_and_carries_it_out_like_the_cli() {
+    let f = Fixture::new();
+    let (home, held, id) = legacy_held(&f);
+    std::fs::write(&home, b"someone else's frame").unwrap();
+
+    let p = f.preview("journal-undo", json!({"journal_id":id})).await;
+    assert!(p["items"].as_array().unwrap().is_empty(), "{p}");
+    let c = &p["conflicts"][0];
+    assert_eq!(c["journal_id"], id, "{p}");
+    assert_eq!(c["choice"], "keep");
+    let offered: Vec<&str> = c["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["choice"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        offered,
+        ["keep", "replace", "rename-existing", "rename-returning"]
+    );
+    let kept = p["refusals"][0]["why"].as_str().unwrap();
+    assert!(kept.contains(&held.display().to_string()), "{kept}");
+
+    let p = f
+        .preview(
+            "journal-undo",
+            json!({"journal_id":id,"choices":{id.to_string():"rename-returning"}}),
+        )
+        .await;
+    assert_eq!(p["items"][0]["choice"], "rename-returning", "{p}");
+    let done = f.apply(&p).await;
+    assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(std::fs::read(&home).unwrap(), b"someone else's frame");
+    assert_eq!(
+        std::fs::read(f.archive.join("frame_1.arw")).unwrap(),
+        b"our frame"
+    );
+    assert_eq!(
+        std::fs::read(f.archive.join("frame_1.xmp")).unwrap(),
+        b"our edits"
+    );
+}
+
+/// el-14vx0. A replace reviewed against one file, and another file in its
+/// place by the time the job runs: the plan changed, nothing moves, the
+/// newcomer is neither replaced nor set aside.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_file_swapped_in_after_the_preview_is_never_replaced_by_the_job() {
+    let f = Fixture::new();
+    let (home, held, id) = legacy_held(&f);
+    std::fs::write(&home, b"someone else's frame").unwrap();
+    let p = f
+        .preview(
+            "journal-undo",
+            json!({"journal_id":id,"choices":{id.to_string():"replace"}}),
+        )
+        .await;
+    assert_eq!(p["items"].as_array().unwrap().len(), 1, "{p}");
+    std::fs::rename(&home, f.archive.join("elsewhere.arw")).unwrap();
+    std::fs::write(&home, b"a newcomer, never reviewed").unwrap();
+
+    let (s, v) = f
+        .req(
+            "POST",
+            "/api/jobs",
+            json!({"kind":p["kind"],"params":p["params"],"plan_token":p["token"]}),
+        )
+        .await;
+    if s == 202 {
+        let j = f.wait(v["job_id"].as_i64().unwrap()).await;
+        assert_ne!(j["state"], "done", "{j}");
+    }
+    assert_eq!(std::fs::read(&home).unwrap(), b"a newcomer, never reviewed");
+    assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
+    let db = f.state.db.lock().unwrap();
+    assert_eq!(
+        db.journal_entry(id).unwrap().unwrap().status,
+        pc_db::JournalStatus::Done
+    );
+}

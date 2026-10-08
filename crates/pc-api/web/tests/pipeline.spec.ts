@@ -262,7 +262,9 @@ test("real archive goes through scan, index, review, quarantine, undo and organi
     .getByRole("button", { name: "Plan preview", exact: true })
     .click();
   await expect(
-    main(page).getByText(/derived clean moves no system files/).first(),
+    main(page)
+      .getByText(/derived clean moves no system files/)
+      .first(),
   ).toBeVisible();
   await expect(
     main(page).getByRole("button", { name: "Move to quarantine", exact: true }),

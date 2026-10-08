@@ -168,6 +168,77 @@ fn a_copy_goes_to_quarantine_comes_back_and_only_then_can_be_deleted() {
 }
 
 #[test]
+fn a_taken_place_keeps_the_file_without_a_terminal_and_on_conflict_decides_it() {
+    // el-14vx0. Another program puts a file where the copy belongs. Without
+    // a terminal to ask, the copy stays in quarantine and the command says
+    // where it is; `--on-conflict rename-returning` brings it back beside
+    // the newcomer, which nothing touches.
+    let cli = Cli::new();
+    cli.photo("frame.jpg", 90);
+    let copy = cli.photo("frame copy.jpg", 90);
+    let ours = std::fs::read(&copy).unwrap();
+    cli.run(&[
+        "index",
+        "--root",
+        cli.archive.to_str().unwrap(),
+        "--min-size",
+        "0",
+    ]);
+    cli.run(&["families", "build"]);
+    cli.run(&["apply", "--yes"]);
+    assert!(!copy.exists());
+    std::fs::write(&copy, b"a newer file under the same name").unwrap();
+    let entry = {
+        let db = pc_db::Db::open(&cli.db).unwrap();
+        db.journal_quarantined(None).unwrap().pop().unwrap().id
+    };
+    let id = entry.to_string();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup"))
+        .arg("--db")
+        .arg(&cli.db)
+        .args(["derived", "undo", "--journal", &id])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a kept file is not a finished undo");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(said.contains("kept in quarantine"), "{said}");
+    assert!(said.contains(pc_core::QUARANTINE_DIR), "{said}");
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        b"a newer file under the same name"
+    );
+    assert_eq!(
+        quarantined(&cli.archive),
+        vec!["frame copy.jpg".to_string()]
+    );
+
+    let said = cli.said(&[
+        "derived",
+        "undo",
+        "--journal",
+        &id,
+        "--on-conflict",
+        "rename-returning",
+    ]);
+    assert!(said.contains("rename-returning"), "{said}");
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        b"a newer file under the same name"
+    );
+    assert_eq!(
+        std::fs::read(cli.archive.join("frame copy_1.jpg")).unwrap(),
+        ours
+    );
+    assert!(quarantined(&cli.archive).is_empty());
+}
+
+#[test]
 fn deleting_for_good_needs_the_flag_and_the_holding_period() {
     let cli = Cli::new();
     cli.photo("frame.jpg", 90);

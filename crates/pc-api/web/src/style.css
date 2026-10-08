@@ -3690,3 +3690,16 @@ select {
   margin: 0;
   padding-left: 18px;
 }
+/* An undo whose original place is taken: one card per conflict (el-14vx0). */
+.conflicts {
+  margin: 14px 0;
+}
+.conflict {
+  border: 1px solid var(--line, #d9d9d9);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 10px 0;
+}
+.conflict .check {
+  margin: 6px 0;
+}

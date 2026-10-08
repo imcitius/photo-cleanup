@@ -26,7 +26,15 @@ import {
   stateName,
   when,
 } from "./i18n";
-import type { Job, Journal, PlanItem, Preview, RecentFile, Run } from "./types";
+import type {
+  Conflict,
+  Job,
+  Journal,
+  PlanItem,
+  Preview,
+  RecentFile,
+  Run,
+} from "./types";
 export type Start = (
   kind: string,
   params?: Record<string, unknown>,
@@ -462,6 +470,89 @@ export function PlanRows({
     </>
   );
 }
+/// Undo entries whose original place is taken by another file (el-14vx0):
+/// one card per conflict with the choices pc-apply offers for it, and
+/// "apply to all the remaining ones". What each choice does and whether it
+/// is offered is decided on the server; this only sends the answer.
+function Conflicts({
+  conflicts,
+  choose,
+}: {
+  conflicts: Conflict[];
+  choose: (next: Record<string, string>) => void;
+}) {
+  const [all, setAll] = useState<number | null>(null);
+  const pick = (from: number, choice: string, toAll: boolean) => {
+    const next: Record<string, string> = {
+      [conflicts[from].journal_id]: choice,
+    };
+    if (toAll)
+      conflicts.slice(from + 1).forEach((c) => {
+        if (c.choices.some((x) => x.choice === choice))
+          next[c.journal_id] = choice;
+      });
+    choose(next);
+  };
+  return (
+    <section className="conflicts" data-testid="conflicts">
+      <h3>{ui.conflictsTitle}</h3>
+      <Notice tone="warning">{ui.conflictsHelp}</Notice>
+      {conflicts.map((c, i) => (
+        <div
+          className="conflict"
+          key={c.journal_id}
+          data-testid={`conflict-${c.journal_id}`}
+        >
+          <p>{c.text}</p>
+          <div className="muted">{ui.conflictComing}</div>
+          {c.returning.map((r) => (
+            <code className="path" key={r.home}>
+              {r.held} → {r.home}
+            </code>
+          ))}
+          <div className="muted">{ui.conflictInPlace}</div>
+          {c.occupants.map((o) => (
+            <code className="path" key={o.path}>
+              {o.path} · {bytes(o.size)}
+            </code>
+          ))}
+          {c.limits.map((l) => (
+            <p className="muted" key={l}>
+              {l}
+            </p>
+          ))}
+          <div role="radiogroup">
+            {c.choices.map((x) => (
+              <label className="check" key={x.choice}>
+                <input
+                  type="radio"
+                  name={`conflict-${c.journal_id}`}
+                  value={x.choice}
+                  checked={c.choice === x.choice}
+                  onChange={() => pick(i, x.choice, all === i)}
+                />
+                {x.words}
+              </label>
+            ))}
+          </div>
+          {conflicts.length > i + 1 && (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={all === i}
+                onChange={(e) => {
+                  setAll(e.target.checked ? i : null);
+                  if (e.target.checked) pick(i, c.choice, true);
+                }}
+              />
+              {ui.conflictApplyAll}
+            </label>
+          )}
+        </div>
+      ))}
+    </section>
+  );
+}
 export function Review({
   kind,
   params,
@@ -487,8 +578,17 @@ export function Review({
     [word, setWord] = useState(""),
     [accepted, setAccepted] = useState(false),
     [sending, setSending] = useState(false),
-    [uncertain, setUncertain] = useState(false);
-  const key = JSON.stringify(params),
+    [uncertain, setUncertain] = useState(false),
+    // The user's answer per undo whose place is taken (el-14vx0), sent as
+    // a parameter: the preview shows what it will do, and its token binds
+    // the answer to the files it was given about.
+    [choices, setChoices] = useState<Record<string, string>>({});
+  const base = JSON.stringify(params);
+  useEffect(() => setChoices({}), [kind, base]);
+  const effective = Object.keys(choices).length
+    ? { ...params, choices }
+    : params;
+  const key = JSON.stringify(effective),
     debounced = useDebounce(key);
   const stale = key !== debounced;
   useEffect(() => {
@@ -522,7 +622,7 @@ export function Review({
     if (!plan) return;
     setSending(true);
     try {
-      await start(kind, params, plan, word);
+      await start(kind, effective, plan, word);
       setConfirm(false);
       setNonce((n) => n + 1);
     } catch (e) {
@@ -547,6 +647,12 @@ export function Review({
           <>
             {kind === "journal-reconcile" && (
               <Notice>{ui.reconcileHelp}</Notice>
+            )}
+            {!!plan.conflicts?.length && (
+              <Conflicts
+                conflicts={plan.conflicts}
+                choose={(next) => setChoices({ ...choices, ...next })}
+              />
             )}
             <section className="review-summary">
               <div>
@@ -800,9 +906,11 @@ export function JournalPage({
                   #{j.id} ·{" "}
                   {j.op === "organize"
                     ? t("raskladka")
-                    : j.op === "quarantine"
-                      ? t("prevyu_v_karantin")
-                      : t("fayl_v_karantin")}
+                    : j.op === "set-aside"
+                      ? ui.opSetAside
+                      : j.op === "quarantine"
+                        ? t("prevyu_v_karantin")
+                        : t("fayl_v_karantin")}
                 </strong>
                 <span className="muted">
                   {when(j.applied_at)} {t("progon_2")}
