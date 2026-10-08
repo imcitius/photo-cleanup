@@ -569,7 +569,27 @@ fn returning_renamed(
             .collect();
         let items: Vec<Item> = pairs.iter().map(recovery::item_of).collect();
         if items.iter().any(|i| i.standing != Standing::Moved) {
-            continue;
+            // A free name taken since the look above: the next one. Any
+            // other doubt is about the unit itself, not the name — refused
+            // with where everything is, nothing moved.
+            if names.iter().any(|t| fs::symlink_metadata(t).is_ok()) {
+                continue;
+            }
+            let why = pc_core::tf!(
+                "undo: ничего не перенесено — кадр со спутниками возвращается только целиком, \
+                 а не всё доказано: {0}",
+                "undo: nothing was moved — the frame and its companions come back only \
+                 together, and not all of them are proven: {0}",
+                recovery::listing(&items)
+            );
+            return Err(noted(
+                db,
+                id,
+                "refused",
+                &why,
+                &c.note(Choice::RenameReturning),
+                anyhow!("{why}"),
+            ));
         }
         // Recorded before the rename: a retry after an interruption looks
         // for what already came back under these names, by its evidence.

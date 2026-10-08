@@ -53,7 +53,7 @@ impl<'a> Chooser<'a> {
         };
         let Some((input, output)) = &mut self.ask else {
             let (ch, why) = settled.unwrap_or((Choice::Keep, ""));
-            print!("{said}  → {}{why}\n", ch.as_str());
+            println!("{said}  → {}{why}", ch.as_str());
             return Ok(ch);
         };
         write!(output, "{said}")?;
