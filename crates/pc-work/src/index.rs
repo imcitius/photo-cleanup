@@ -64,12 +64,20 @@ pub struct Summary {
     pub bytes_read: u64,
     pub bytes_on_disk: u64,
     pub elapsed_secs: f64,
+    /// Files indexed whose thumbnail could not be stored, and the first
+    /// such file with the reason. Each is also a refusal on the job.
+    pub thumbs_failed: u64,
+    pub thumb_failure: Option<(String, String)>,
 }
 
 /// One file's result, ready for the single writer.
 struct Indexed {
     file: NewFile,
     meta: Option<NewMeta>,
+    /// The thumbnail could not be stored (el-5x1uh O2). A bound cache's
+    /// refusal ([`pc_core::storage::NotBound`]) stops the job; anything
+    /// else is a refusal on this file, which is still indexed.
+    thumb_error: Option<anyhow::Error>,
 }
 
 fn u64_to_i64(v: u64) -> i64 {
@@ -113,6 +121,7 @@ fn process(
                     ..base
                 },
                 meta: None,
+                thumb_error: None,
             }
         }
     };
@@ -129,6 +138,7 @@ fn process(
                     ..base
                 },
                 meta: None,
+                thumb_error: None,
             }
         }
     };
@@ -140,7 +150,10 @@ fn process(
         crop_bytes.extend_from_slice(&c.to_le_bytes());
     }
 
-    let thumb_key = store.put(&probe.thumb.jpeg).ok();
+    let (thumb_key, thumb_error) = match store.put(&probe.thumb.jpeg) {
+        Ok(key) => (Some(key), None),
+        Err(e) => (None, Some(e)),
+    };
     let m = &probe.meta;
 
     Indexed {
@@ -204,6 +217,7 @@ fn process(
             xmp_derived_from: m.provenance.derived_from.clone(),
             dng_original_raw: m.provenance.dng_original_raw.clone(),
         }),
+        thumb_error,
     }
 }
 
@@ -307,6 +321,10 @@ pub fn run_controlled(
     let (tx, rx) = mpsc::sync_channel::<Indexed>(workers * QUEUE_PER_WORKER);
     let total = todo.len() as u64;
     let pool = priority::pool(workers);
+    // Set when a bound cache refused a thumbnail: every later one would be
+    // refused too, so the readers stop and the writer records nothing more.
+    let halted = std::sync::atomic::AtomicBool::new(false);
+    let mut halt: Option<anyhow::Error> = None;
     tracing::info!(workers, "декодирование в фоновом классе планировщика");
 
     // SQLite takes one writer, so the workers hand results over a channel and
@@ -315,7 +333,7 @@ pub fn run_controlled(
         scope.spawn(|| {
             pool.install(|| {
                 todo.par_iter().for_each_with(tx, |tx, hit| {
-                    if control.check().is_ok() {
+                    if control.check().is_ok() && !halted.load(Ordering::Relaxed) {
                         let _ = tx.send(process(hit, &permits, store, &bytes_read));
                     }
                 });
@@ -330,10 +348,30 @@ pub fn run_controlled(
         let mut last_commit = Instant::now();
         db.conn.execute_batch("BEGIN")?;
         for item in rx {
-            if control.check().is_err() {
+            if control.check().is_err() || halt.is_some() {
                 continue;
             }
             control.current(&item.file.path)?;
+            if let Some(e) = &item.thumb_error {
+                if e.downcast_ref::<pc_core::storage::NotBound>().is_some() {
+                    // Not recorded: a file written now would count as
+                    // current and never get its thumbnail.
+                    control.refuse(&item.file.path, &format!("{e:#}"));
+                    halted.store(true, Ordering::Relaxed);
+                    halt = item.thumb_error;
+                    continue;
+                }
+                let why = pc_core::tf!(
+                    "миниатюра не сохранена: {0}",
+                    "the thumbnail was not stored: {0}",
+                    format!("{e:#}")
+                );
+                control.refuse(&item.file.path, &why);
+                summary.thumbs_failed += 1;
+                summary
+                    .thumb_failure
+                    .get_or_insert_with(|| (item.file.path.clone(), why));
+            }
             let id = db.upsert_file(&item.file, run_id)?;
             if let Some(m) = &item.meta {
                 db.upsert_meta(id, m)?;
@@ -364,6 +402,12 @@ pub fn run_controlled(
         Ok(())
     })?;
 
+    if let Some(refusal) = halt {
+        return Err(refusal.context(pc_core::tr!(
+            "индексация остановлена: кэш миниатюр отклонён",
+            "indexing stopped: the thumbnail cache was refused"
+        )));
+    }
     control.check()?;
     db.finish_run(run_id)?;
     summary.bytes_read = bytes_read.load(Ordering::Relaxed);
@@ -381,14 +425,147 @@ impl Summary {
         format!(
             "Indexed {} of {} files, skipped {}, already current {}.\n\
              Read {} of {} on disk — {saved:.0}% saved by embedded previews.\n\
-             Time: {:.1} s",
+             Time: {:.1} s{}",
             self.indexed,
             self.seen,
             self.skipped,
             self.already_current,
             fmt_bytes(self.bytes_read),
             fmt_bytes(self.bytes_on_disk),
-            self.elapsed_secs
+            self.elapsed_secs,
+            match &self.thumb_failure {
+                Some((path, why)) => format!(
+                    "\nThumbnails not stored: {} (first: {path}: {why})",
+                    self.thumbs_failed
+                ),
+                None => String::new(),
+            }
         )
+    }
+}
+
+/// A thumbnail that could not be stored is seen, not swallowed
+/// (el-5x1uh O2): a bound cache's refusal stops the job with that refusal,
+/// any other failure is a refusal on the file and a line in the summary.
+#[cfg(test)]
+mod thumbnail_refusal_tests {
+    use super::*;
+    use pc_core::storage::{NotBound, StorageBinding};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// Seven different real JPEGs, so seven different thumbnails.
+    fn archive(root: &Path) -> PathBuf {
+        let archive = root.canonicalize().unwrap().join("archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        for n in 0..7u32 {
+            let img = image::RgbImage::from_fn(320, 240, |x, y| {
+                image::Rgb([
+                    ((x * (n + 3) + y * 7) % 256) as u8,
+                    ((y * (n + 5)) % 256) as u8,
+                    ((x + y + n * 31) % 256) as u8,
+                ])
+            });
+            let mut encoded = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+                .encode_image(&img)
+                .unwrap();
+            std::fs::write(archive.join(format!("IMG_{:04}.JPG", 4100 + n)), &encoded).unwrap();
+        }
+        archive
+    }
+
+    fn options() -> Options {
+        Options {
+            min_file_size: 0,
+            readers_per_disk: 1,
+            reindex: false,
+            workers: 2,
+        }
+    }
+
+    fn files(db: &Db) -> i64 {
+        db.conn
+            .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[derive(Debug)]
+    struct Cache {
+        refuse: bool,
+    }
+
+    impl StorageBinding for Cache {
+        fn check_database(&self) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn check_thumbnails(&self) -> std::result::Result<(), String> {
+            if self.refuse {
+                Err("the thumbnail folder was replaced (5531)".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn check_thumbnail_folder(&self, _: &std::fs::File) -> std::result::Result<(), String> {
+            self.check_thumbnails()
+        }
+    }
+
+    #[test]
+    fn a_refused_bound_cache_stops_the_index_and_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = archive(tmp.path());
+        let db = Db::open(&tmp.path().join("pc.db")).unwrap();
+        let thumbs = tmp.path().join("thumbs");
+        std::fs::create_dir(&thumbs).unwrap();
+        let refused = ThumbStore::bound(&thumbs, Arc::new(Cache { refuse: true }));
+        let control = pc_core::work::Control::default();
+
+        let err = run_controlled(&db, &[archive.clone()], &refused, &options(), &control)
+            .expect_err("the index finished as if the thumbnails were stored");
+        assert!(err.downcast_ref::<NotBound>().is_some(), "{err:#}");
+        assert!(format!("{err:#}").contains("5531"), "{err:#}");
+        let refusals = control.progress.lock().unwrap().refusals.clone();
+        assert!(!refusals.is_empty(), "no refusal in the job's status");
+        assert!(
+            refusals.iter().all(|(_, why)| why.contains("5531")),
+            "{refusals:?}"
+        );
+        assert!(refusals[0].0.contains("IMG_41"), "{refusals:?}");
+        assert_eq!(files(&db), 0, "files recorded without their thumbnails");
+        assert_eq!(std::fs::read_dir(&thumbs).unwrap().count(), 0);
+
+        // With the cache confirmed again, the same files are indexed — none
+        // was recorded as current without its thumbnail.
+        let fine = ThumbStore::bound(&thumbs, Arc::new(Cache { refuse: false }));
+        let summary = run(&db, &[archive], &fine, &options()).unwrap();
+        assert_eq!((summary.indexed, summary.already_current), (7, 0));
+        assert_eq!(summary.thumbs_failed, 0);
+        assert_eq!(files(&db), 7);
+    }
+
+    #[test]
+    fn a_thumbnail_that_cannot_be_stored_is_a_refusal_and_a_summary_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = archive(tmp.path());
+        let db = Db::open(&tmp.path().join("pc.db")).unwrap();
+        // A file where the cache folder should be: nothing can be stored.
+        let thumbs = tmp.path().join("thumbs");
+        std::fs::write(&thumbs, b"not a folder 8840").unwrap();
+        let store = ThumbStore::new(&thumbs);
+        let control = pc_core::work::Control::default();
+
+        let summary = run_controlled(&db, &[archive], &store, &options(), &control).unwrap();
+        assert_eq!(summary.indexed, 7);
+        assert_eq!(summary.thumbs_failed, 7);
+        let report = summary.report();
+        assert!(report.contains("Thumbnails not stored: 7"), "{report}");
+        let refusals = control.progress.lock().unwrap().refusals.clone();
+        assert_eq!(refusals.len(), 7, "{refusals:?}");
+        assert!(
+            refusals.iter().all(|(_, why)| why.contains("thumbnail")),
+            "{refusals:?}"
+        );
+        assert_eq!(std::fs::read(&thumbs).unwrap(), b"not a folder 8840");
     }
 }
