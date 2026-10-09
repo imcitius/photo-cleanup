@@ -894,3 +894,164 @@ fn reviewer_el_2rpxq_no_system_file_or_companion_ever_moves() {
     assert!(!said.contains("Moved:"), "{said}");
     assert!(said.contains("moves no system files"), "{said}");
 }
+
+/// el-14vx0 B5 (review el-4cmzu). Two sorted photographs whose original
+/// names another program has taken since. The preview names both conflicts
+/// and their choices before anything is carried out; on a real terminal
+/// every question is asked before the first file moves — the first answer
+/// moves nothing while the second question is still open.
+#[cfg(unix)]
+#[test]
+fn every_conflict_is_shown_and_answered_before_the_first_file_moves() {
+    use std::io::{Read, Write};
+    let cli = Cli::new();
+    let first = cli.photo("first.jpg", 40);
+    let second = cli.photo("second.jpg", 200);
+    cli.run(&[
+        "index",
+        "--root",
+        cli.archive.to_str().unwrap(),
+        "--min-size",
+        "0",
+    ]);
+    let sorted = cli.archive.parent().unwrap().join("sorted");
+    std::fs::create_dir(&sorted).unwrap();
+    cli.run(&[
+        "organize",
+        "apply",
+        "--root",
+        sorted.to_str().unwrap(),
+        "--allow-duplicates",
+        "--yes",
+    ]);
+    assert!(!first.exists() && !second.exists());
+    for p in [&first, &second] {
+        std::fs::write(p, b"a foreign file under the same name").unwrap();
+    }
+    let sorted_files = || -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = walkdir::WalkDir::new(&sorted)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.into_path())
+            .collect();
+        v.sort();
+        v
+    };
+    let held = sorted_files();
+    assert_eq!(held.len(), 2, "{held:?}");
+
+    // The preview: both conflicts, with what can be chosen for each.
+    let preview = cli.said(&["organize", "undo"]);
+    for p in [&first, &second] {
+        assert!(preview.contains(p.to_str().unwrap()), "{preview}");
+    }
+    for word in ["keep", "replace", "rename-existing", "rename-returning"] {
+        assert!(preview.contains(word), "{preview}");
+    }
+    assert_eq!(sorted_files(), held, "a preview moves nothing");
+
+    // A real terminal, through script(1): the questions are answered one by
+    // one, and the disk is looked at while the second is still open.
+    let bin = env!("CARGO_BIN_EXE_photo-cleanup");
+    let db = cli.db.to_str().unwrap();
+    let mut cmd = if cfg!(target_os = "linux") {
+        let mut c = std::process::Command::new("script");
+        c.args([
+            "-q",
+            "-e",
+            "-c",
+            &format!("'{bin}' --db '{db}' organize undo --yes"),
+            "/dev/null",
+        ]);
+        c
+    } else {
+        let mut c = std::process::Command::new("script");
+        c.args([
+            "-q",
+            "/dev/null",
+            bin,
+            "--db",
+            db,
+            "organize",
+            "undo",
+            "--yes",
+        ]);
+        c
+    };
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("script(1) runs the command on a terminal");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let mut out = child.stdout.take().unwrap();
+    let sink = seen.clone();
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = out.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            sink.lock().unwrap().extend_from_slice(&buf[..n]);
+        }
+    });
+    let shown = || String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+    let wait_for = |n: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while shown().matches("Choose 1-").count() < n {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "question {n} never came:\n{}",
+                shown()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    let mut input = child.stdin.take().unwrap();
+    wait_for(1);
+    input.write_all(b"4\n").unwrap();
+    input.flush().unwrap();
+    wait_for(2);
+    assert_eq!(
+        sorted_files(),
+        held,
+        "a file moved before every question was answered:\n{}",
+        shown()
+    );
+    for p in [&first, &second] {
+        let renamed = p.with_file_name(format!(
+            "{}_1.jpg",
+            p.file_stem().unwrap().to_str().unwrap()
+        ));
+        assert!(!renamed.exists(), "{renamed:?} before the second answer");
+    }
+    input.write_all(b"1\n").unwrap();
+    input.flush().unwrap();
+    let status = child.wait().unwrap();
+    drop(input);
+    reader.join().unwrap();
+    let said = shown();
+    assert_eq!(said.matches("Choose 1-").count(), 2, "{said}");
+    // One came back as *_1 beside the newcomer; the other stays held.
+    let back: Vec<PathBuf> = [&first, &second]
+        .iter()
+        .map(|p| {
+            p.with_file_name(format!(
+                "{}_1.jpg",
+                p.file_stem().unwrap().to_str().unwrap()
+            ))
+        })
+        .filter(|p| p.exists())
+        .collect();
+    assert_eq!(back.len(), 1, "{said}");
+    assert_eq!(sorted_files().len(), 1, "{said}");
+    for p in [&first, &second] {
+        assert_eq!(
+            std::fs::read(p).unwrap(),
+            b"a foreign file under the same name"
+        );
+    }
+    let _ = status;
+}

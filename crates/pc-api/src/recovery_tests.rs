@@ -568,3 +568,223 @@ async fn a_file_swapped_in_after_the_preview_is_never_replaced_by_the_job() {
         pc_db::JournalStatus::Done
     );
 }
+
+#[tokio::test]
+async fn reviewer_reconcile_conflicts_must_offer_the_same_four_choices() {
+    let f = Fixture::new();
+    let (home, held, id) = legacy_held(&f);
+    {
+        let db = f.state.db.lock().unwrap();
+        db.journal_finish(id, pc_db::JournalStatus::Pending, None)
+            .unwrap();
+    }
+    std::fs::write(&home, b"foreign existing frame").unwrap();
+    let before = std::fs::read(&home).unwrap();
+    let p = f
+        .preview(
+            "journal-reconcile",
+            json!({"journal_id":id,"choices":{id.to_string():"rename-returning"}}),
+        )
+        .await;
+    eprintln!("RECONCILE_PREVIEW={p}");
+    assert_eq!(std::fs::read(&home).unwrap(), before);
+    assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
+    assert_eq!(
+        p["conflicts"].as_array().unwrap().len(),
+        1,
+        "pending recovery has no conflict choices"
+    );
+}
+
+#[tokio::test]
+async fn reviewer_api_refuses_a_new_companion_before_setting_existing_unit_aside() {
+    let f = Fixture::new();
+    let (home, held, id) = legacy_held(&f);
+    std::fs::write(&home, b"foreign existing frame").unwrap();
+    let p = f
+        .preview(
+            "journal-undo",
+            json!({"journal_id":id,"choices":{id.to_string():"rename-existing"}}),
+        )
+        .await;
+    let marker = f.archive.to_string_lossy().into_owned();
+    let existing = home.clone();
+    let late = home.with_extension("aae");
+    let put = late.clone();
+    let _g = pc_apply::race::before_move_under(&marker, move |src, _| {
+        if src == existing {
+            std::fs::write(&put, b"late foreign edits")?;
+        }
+        Ok(())
+    });
+    let job = f.apply(&p).await;
+    eprintln!("NEW_COMPANION_HTTP_JOB={job}");
+    assert_eq!(std::fs::read(&late).unwrap(), b"late foreign edits");
+    assert_eq!(
+        std::fs::read(&home).unwrap(),
+        b"foreign existing frame",
+        "API reports successful undo after splitting existing unit"
+    );
+    assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
+}
+
+#[tokio::test]
+async fn reviewer_forced_lightroom_choices_keep_every_payload_in_api() {
+    for ch in ["replace", "rename-existing"] {
+        let f = Fixture::new();
+        let (home, held, id) = legacy_held(&f);
+        std::fs::write(&home, b"catalogued existing frame").unwrap();
+        {
+            let db = f.state.db.lock().unwrap();
+            let cat = db
+                .upsert_catalog(&pc_db::NewCatalog {
+                    path: f.archive.join("Catalog.lrcat").display().to_string(),
+                    name: "Catalog".into(),
+                    disk: String::new(),
+                    size: 0,
+                    is_backup: false,
+                    is_locked: false,
+                    image_count: Some(1),
+                    read_error: None,
+                })
+                .unwrap();
+            db.replace_catalog_files(cat, &[(home.display().to_string(), Some(5), None)])
+                .unwrap();
+        }
+        let p = f
+            .preview(
+                "journal-undo",
+                json!({"journal_id":id,"choices":{id.to_string():ch}}),
+            )
+            .await;
+        let offered = p["conflicts"][0]["choices"].as_array().unwrap();
+        assert!(offered
+            .iter()
+            .all(|c| c["choice"] != "replace" && c["choice"] != "rename-existing"));
+        let job = f.apply(&p).await;
+        eprintln!("FORCED_LIGHTROOM_{ch}={job}");
+        assert_eq!(std::fs::read(&home).unwrap(), b"catalogued existing frame");
+        assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
+        assert!(job.to_string().contains("not offered"), "{job}");
+    }
+}
+
+#[tokio::test]
+async fn reviewer_web_mixed_keep_decision_is_structurally_journaled() {
+    let f = Fixture::new();
+    let (run, ids) = {
+        let db = f.state.db.lock().unwrap();
+        let run = db
+            .start_run(&[f.archive.display().to_string()], "test")
+            .unwrap();
+        let mut ids = Vec::new();
+        for name in ["first.arw", "second.arw"] {
+            let home = f.archive.join(name);
+            let held = f.archive.join(format!("held-{name}"));
+            std::fs::write(&held, b"returning frame").unwrap();
+            std::fs::write(&home, b"foreign occupant").unwrap();
+            let m = pc_db::Moved {
+                src: home.display().to_string(),
+                dst: held.display().to_string(),
+                proof: pc_core::proof::Proof::of(&std::fs::metadata(&held).unwrap()),
+            };
+            let id = db
+                .journal_begin(&pc_db::NewJournalEntry {
+                    run_id: run,
+                    op: "organize",
+                    target_id: None,
+                    src: &m.src,
+                    dst: Some(&m.dst),
+                    size: 15,
+                    file_count: 1,
+                    manifest: std::slice::from_ref(&m),
+                })
+                .unwrap();
+            db.journal_finish(id, pc_db::JournalStatus::Done, None)
+                .unwrap();
+            ids.push(id);
+        }
+        (run, ids)
+    };
+    let p=f.preview("organize-undo",json!({"run_id":run,"choices":{ids[0].to_string():"keep",ids[1].to_string():"rename-returning"}})).await;
+    let job = f.apply(&p).await;
+    eprintln!("MIXED_KEEP_JOB={job}");
+    let db = f.state.db.lock().unwrap();
+    let ev = db.journal_events(ids[0]).unwrap();
+    eprintln!("KEPT_ENTRY_EVENTS={ev:?}");
+    assert_eq!(
+        std::fs::read(f.archive.join("first.arw")).unwrap(),
+        b"foreign occupant"
+    );
+    assert_eq!(
+        std::fs::read(f.archive.join("held-first.arw")).unwrap(),
+        b"returning frame"
+    );
+    assert_eq!(
+        std::fs::read(f.archive.join("second_1.arw")).unwrap(),
+        b"returning frame"
+    );
+    assert!(
+        ev.iter().any(|e| e.phase == "undo"
+            && e.kind == "kept"
+            && e.data
+                .as_deref()
+                .is_some_and(|d| d.contains("\"choice\":\"keep\""))),
+        "confirmed web keep decision missing from structured history"
+    );
+}
+
+#[tokio::test]
+async fn reviewer_replace_is_listed_with_origin_and_undoing_it_preserves_both_units() {
+    let f = Fixture::new();
+    let (home, held, id) = legacy_held(&f);
+    std::fs::write(&home, b"foreign existing frame").unwrap();
+    let p = f
+        .preview(
+            "journal-undo",
+            json!({"journal_id":id,"choices":{id.to_string():"replace"}}),
+        )
+        .await;
+    let job = f.apply(&p).await;
+    assert_eq!(job["state"], "done", "{job}");
+    let (status, q) = f.req("GET", "/api/quarantine", Value::Null).await;
+    assert_eq!(status, 200);
+    let rows = q.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{q}");
+    assert_eq!(rows[0]["src"], home.display().to_string());
+    let aside = rows[0]["journal_id"].as_i64().unwrap();
+    let place = rows[0]["dst"].as_str().unwrap();
+    assert_eq!(std::fs::read(place).unwrap(), b"foreign existing frame");
+    {
+        let db = f.state.db.lock().unwrap();
+        let e = db.journal_entry(aside).unwrap().unwrap();
+        assert_eq!(e.op, "quarantine-file");
+        assert!(e.manifest.iter().all(|m| m.proof.is_some()));
+        assert!(db.journal_events(id).unwrap().iter().any(|e| e
+            .data
+            .as_ref()
+            .is_some_and(|d| d.contains(&format!("\"aside_entry\":{aside}")))));
+        assert!(db
+            .journal_events(aside)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "done"));
+    }
+    let p = f
+        .preview(
+            "journal-undo",
+            json!({"journal_id":aside,"choices":{aside.to_string():"replace"}}),
+        )
+        .await;
+    let job = f.apply(&p).await;
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(std::fs::read(&home).unwrap(), b"foreign existing frame");
+    assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
+    assert_eq!(
+        std::fs::read(held.with_extension("xmp")).unwrap(),
+        b"our edits"
+    );
+    let (_, q) = f.req("GET", "/api/quarantine", Value::Null).await;
+    assert_eq!(q.as_array().unwrap().len(), 1, "{q}");
+    eprintln!("REPLACE_CHAIN_AND_QUARANTINE_ORIGIN_PASS={q}");
+}

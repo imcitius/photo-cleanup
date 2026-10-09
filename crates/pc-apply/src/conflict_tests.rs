@@ -636,3 +636,150 @@ fn every_conflict_of_a_run_is_asked_and_answered_on_its_own() {
         assert_eq!(fs::read(a.dir.join(format!("{name}_1.jpg"))).unwrap(), OURS);
     }
 }
+
+// Independent reviewer probes: disposable fixtures, no production edits.
+#[cfg(unix)]
+fn review_metadata(p: &Path) -> (u64, u64, u32, u32, u32, u64, i64, i64, Vec<u8>) {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::symlink_metadata(p).unwrap();
+    (
+        m.dev(),
+        m.ino(),
+        m.mode(),
+        m.uid(),
+        m.gid(),
+        m.nlink(),
+        m.mtime(),
+        m.mtime_nsec(),
+        fs::read(p).unwrap(),
+    )
+}
+
+#[test]
+fn reviewer_a_new_existing_companion_during_choice_must_refuse_the_whole_unit() {
+    let a = archive();
+    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    taken(&home, &xmp);
+    let before = review_metadata(&home);
+    let mut decide = |_: &Conflict| {
+        fs::write(a.dir.join("IMG.aae"), b"late foreign edits").unwrap();
+        Ok(Choice::RenameExisting)
+    };
+    let result = crate::undo_with(&a.db, id, &mut decide);
+    eprintln!(
+        "NEW_COMPANION_RESULT={result:?}; late_sidecar={:?}; home={:?}; aside={:?}",
+        fs::read(a.dir.join("IMG.aae")),
+        fs::read(&home),
+        fs::read(a.dir.join("IMG_1.CR2"))
+    );
+    assert!(
+        result.is_err(),
+        "changed unit was accepted and its new companion left behind"
+    );
+    assert_eq!(review_metadata(&home), before);
+    assert_eq!(fs::read(q(&home)).unwrap(), OURS);
+}
+
+#[test]
+fn reviewer_a_changed_returning_member_must_not_set_the_existing_unit_aside() {
+    let a = archive();
+    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    taken(&home, &xmp);
+    let before = review_metadata(&home);
+    let mut decide = |_: &Conflict| {
+        fs::write(
+            q(&xmp),
+            b"a foreign change to returning sidecar after the question",
+        )
+        .unwrap();
+        Ok(Choice::Replace)
+    };
+    let err = crate::undo_with(&a.db, id, &mut decide).unwrap_err();
+    eprintln!(
+        "CHANGED_RETURNING_ERROR={err:#}; tally={:?}; home_exists={}",
+        crate::stopped_run(&err).map(|s| &s.done),
+        home.exists()
+    );
+    assert!(home.exists(),"existing frame was quarantined although returning unit was already unproven before first write");
+    assert_eq!(review_metadata(&home), before);
+}
+
+#[test]
+fn reviewer_existing_disappears_during_choice_refuses_and_keeps_payloads() {
+    let a = archive();
+    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    taken(&home, &xmp);
+    let before = review_metadata(&home);
+    let side_before = review_metadata(&xmp);
+    let away = a.dir.join("external-move.CR2");
+    let err = crate::undo_with(&a.db, id, &mut |_| {
+        fs::rename(&home, &away).unwrap();
+        Ok(Choice::Replace)
+    })
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("nothing"), "{err:#}");
+    assert_eq!(review_metadata(&away), before);
+    assert_eq!(review_metadata(&xmp), side_before);
+    assert_eq!(fs::read(q(&home)).unwrap(), OURS);
+}
+
+#[test]
+fn reviewer_replace_quarantine_collision_preserves_foreign_metadata_and_retries() {
+    let a = archive();
+    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    taken(&home, &xmp);
+    let target = q(&home).with_file_name("IMG_1.CR2");
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let capture = seen.clone();
+    let dst = target.clone();
+    let _g = race::before_move(move |_, to| {
+        if to == dst && !dst.exists() {
+            fs::write(&dst, b"foreign quarantine collision")?;
+            *capture.borrow_mut() = Some(review_metadata(&dst));
+        }
+        Ok(())
+    });
+    let done = crate::undo_with(&a.db, id, &mut with(Choice::Replace)).unwrap();
+    assert_eq!(done.set_aside, 2);
+    assert_eq!(review_metadata(&target), seen.borrow().clone().unwrap());
+    assert_eq!(
+        fs::read(q(&home).with_file_name("IMG_2.CR2")).unwrap(),
+        THEIRS
+    );
+    assert_eq!(fs::read(&home).unwrap(), OURS);
+}
+
+#[test]
+fn reviewer_a_very_long_suffix_refuses_without_touching_foreign_metadata() {
+    let a = archive();
+    let name = format!("{}.CR2", "n".repeat(250));
+    let (id, home, xmp) = quarantined(&a, &name);
+    taken(&home, &xmp);
+    let before = review_metadata(&home);
+    let side = review_metadata(&xmp);
+    let e = crate::undo_with(&a.db, id, &mut with(Choice::RenameReturning)).unwrap_err();
+    eprintln!("LONG_NAME_ERROR={e:#}");
+    assert_eq!(review_metadata(&home), before);
+    assert_eq!(review_metadata(&xmp), side);
+    assert_eq!(fs::read(q(&home)).unwrap(), OURS);
+}
+
+#[test]
+fn reviewer_unicode_case_companion_collision_is_skipped_as_a_unit() {
+    let a = archive();
+    let (id, home, xmp) = quarantined(&a, "Été.CR2");
+    taken(&home, &xmp);
+    let collision = a.dir.join("Été_1.XMP");
+    fs::write(&collision, b"foreign uppercase sidecar").unwrap();
+    let before = review_metadata(&collision);
+    let done = crate::undo_with(&a.db, id, &mut with(Choice::RenameReturning)).unwrap();
+    assert_eq!(done.files_back, 2);
+    assert_eq!(review_metadata(&collision), before);
+    // On case-insensitive native APFS the uppercase name collides with .xmp.
+    if a.dir.join("Été_1.xmp").exists()
+        && fs::read(a.dir.join("Été_1.xmp")).unwrap() == b"foreign uppercase sidecar"
+    {
+        assert_eq!(fs::read(a.dir.join("Été_2.CR2")).unwrap(), OURS);
+    }
+    assert_eq!(fs::read(&home).unwrap(), THEIRS);
+}
