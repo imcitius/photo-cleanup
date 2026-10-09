@@ -2254,6 +2254,10 @@ mod at {
     /// descriptor: an existing entry fails the copy and keeps its bytes, and
     /// renaming `to` or any folder above it changes nothing about where the
     /// copy goes. Anything but a file or a folder in `from` stops the copy.
+    ///
+    /// Folders are made 0700 and files 0600 whatever the source's modes or
+    /// the umask (which can only take bits away): the copied cache is this
+    /// user's only, as `pc_core::ThumbStore` makes it (el-5x1uh O3).
     pub(super) fn copy_tree(from: &Path, to: &fs::File) -> io::Result<()> {
         use std::os::unix::ffi::OsStrExt;
         for entry in fs::read_dir(from)? {
@@ -2261,14 +2265,14 @@ mod at {
             let kind = entry.file_type()?;
             let name = CString::new(entry.file_name().as_bytes())?;
             if kind.is_dir() {
-                mkdir(to, &name, 0o777)?;
+                mkdir(to, &name, 0o700)?;
                 copy_tree(&entry.path(), &open_dir_at(to, &name)?)?;
             } else if kind.is_file() {
                 let mut out = open_at(
                     to,
                     &name,
                     libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-                    0o666,
+                    0o600,
                 )?;
                 io::copy(&mut fs::File::open(entry.path())?, &mut out)?;
                 out.sync_all()?;
@@ -4189,6 +4193,9 @@ mod caller_tests {
     use crate::resolve::{confirm_started, prepare, resolve};
     use std::os::unix::fs::PermissionsExt;
 
+    /// The fixture's one thumbnail, relative to `thumbs/`.
+    pub(super) const THUMB: &str = "ab/cd/abcd0123456789abcdef0123456789ab.jpg";
+
     pub(super) struct Env {
         _tmp: tempfile::TempDir,
         pub(super) root: PathBuf,
@@ -4215,8 +4222,9 @@ mod caller_tests {
                     [],
                 )
                 .unwrap();
-            fs::create_dir_all(layout.thumbs.join("ab")).unwrap();
-            fs::write(layout.thumbs.join("ab/abcd.jpg"), vec![7u8; 5_123]).unwrap();
+            // Where and how `pc_core::ThumbStore` would store a thumbnail.
+            fs::create_dir_all(layout.thumbs.join("ab/cd")).unwrap();
+            fs::write(layout.thumbs.join(THUMB), vec![7u8; 5_123]).unwrap();
             Self {
                 _tmp: tmp,
                 root,
@@ -4390,7 +4398,7 @@ mod caller_tests {
         assert!(partial.is_dir());
         assert_eq!(marker(&target.join(DB_FILE)), "исходная");
         assert_eq!(
-            fs::read(target.join(THUMBS_DIR).join("ab/abcd.jpg")).unwrap(),
+            fs::read(target.join(THUMBS_DIR).join(THUMB)).unwrap(),
             vec![7u8; 5_123]
         );
 
@@ -4481,7 +4489,7 @@ mod caller_tests {
 /// renamed before and after its path check.
 #[cfg(all(test, unix))]
 mod publication_tests {
-    use super::caller_tests::{aside_dirs, marker, plenty, Env};
+    use super::caller_tests::{aside_dirs, marker, plenty, Env, THUMB};
     use super::*;
     use std::collections::BTreeMap;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -4580,7 +4588,7 @@ mod publication_tests {
     pub(super) fn foreign(parent: &Path, name: &str, with_db: bool) -> PathBuf {
         let dir = parent.join(name);
         fs::create_dir_all(dir.join("thumbs/ab")).unwrap();
-        let mut files = vec![dir.join("thumbs/ab/abcd.jpg")];
+        let mut files = vec![dir.join("thumbs").join(THUMB)];
         fs::write(&files[0], FOREIGN_THUMB).unwrap();
         if with_db {
             files.push(dir.join(DB_FILE));
@@ -4600,7 +4608,7 @@ mod publication_tests {
     }
 
     pub(super) fn own_thumbs(dir: &Path) -> Vec<u8> {
-        fs::read(dir.join(THUMBS_DIR).join("ab/abcd.jpg")).unwrap()
+        fs::read(dir.join(THUMBS_DIR).join(THUMB)).unwrap()
     }
 
     /// B1 verbatim at the two points after the copies are proven (before

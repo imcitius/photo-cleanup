@@ -253,6 +253,26 @@ impl pc_core::storage::StorageBinding for DataGuard {
     fn check_thumbnails(&self) -> Result<(), String> {
         self.thumbnails()
     }
+
+    /// The path still leads to the proven cache, and the folder the caller
+    /// holds open is that same folder (device and inode of both
+    /// descriptors), so what it does through its descriptor cannot land in
+    /// a replacement however the name changes afterwards.
+    fn check_thumbnail_folder(&self, folder: &fs::File) -> Result<(), String> {
+        self.thumbnails()?;
+        let held = file_identity(&self.thumbs).map_err(|e| e.to_string())?;
+        if file_identity(folder).map_err(|e| e.to_string())? == held {
+            Ok(())
+        } else {
+            Err(refused(
+                &self.dir.join(THUMBS_DIR),
+                pc_core::tr!(
+                    "открытая для изменения папка — не проверенная",
+                    "the folder opened for the change is not the proven one"
+                ),
+            ))
+        }
+    }
 }
 
 /// What SQLite and the writer lock open beside the database by name.

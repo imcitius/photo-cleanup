@@ -16,10 +16,16 @@
 //!
 //! What the check can promise depends on who can rename entries in the
 //! folder. The desktop admits a bound folder only in a namespace nobody but
-//! this user and the administrator can change, so between the check and the
-//! write only this user's own programs could swap an object — and those are
-//! outside the threat model (DESKTOP.md). A replacement made at any other
-//! moment is refused before it is written to.
+//! this user and the administrator can change. A replacement made by
+//! ordinary means — the user's own programs, a sync tool, a restored backup
+//! — at any moment the user can act in is refused before it is written to.
+//! What is left is the few system calls between a check and the write it
+//! guards (check → open, check → write, check → unlink): only a process
+//! running as this user (or root/admin) could swap an object there, and
+//! doing so on purpose is what DESKTOP.md excludes from the threat model —
+//! a *deliberately malicious* process with this user's UID, root or admin,
+//! which could change these files directly anyway. Ordinary programs of
+//! this user are inside the model.
 
 use std::fmt;
 use std::sync::Arc;
@@ -37,6 +43,14 @@ pub trait StorageBinding: Send + Sync + fmt::Debug {
     /// else can write to it. Called before anything in the cache is
     /// written or removed.
     fn check_thumbnails(&self) -> Result<(), String>;
+
+    /// [`StorageBinding::check_thumbnails`], and `folder` — the cache as
+    /// the caller holds it open — is the proven folder itself. What the
+    /// caller then does through that descriptor happens in the proven
+    /// folder, whatever bears its name afterwards. Called before anything
+    /// is removed from the cache (`ThumbStore::clear`) and before a
+    /// thumbnail is created in it.
+    fn check_thumbnail_folder(&self, folder: &std::fs::File) -> Result<(), String>;
 }
 
 /// Shared by the server state, its jobs and the thumbnail cache.

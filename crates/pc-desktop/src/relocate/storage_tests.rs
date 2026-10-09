@@ -15,7 +15,7 @@
 //! between two system calls of the check and the write is outside what a
 //! check can see — see `pc_db::Db::open_bound` for what is closed there.
 
-use super::caller_tests::{marker, plenty, Env};
+use super::caller_tests::{marker, plenty, Env, THUMB};
 use super::publication_tests::{own_target, signature, tree};
 use super::*;
 use crate::resolve::{confirm_started, prepare, resolve, revert_to_previous};
@@ -376,4 +376,117 @@ fn a_linked_source_file_is_refused_before_anything_is_written() {
         assert_eq!(marker(&target.join(DB_FILE)), "исходная");
         assert_eq!(signature(&foreign), before);
     }
+}
+
+/// C2 (el-5x1uh): a reset on the genuine bound cache takes only what the
+/// cache itself wrote. Somebody's file at the top, a folder of somebody's,
+/// a file under a foreign name in a fan-out folder and a link under a
+/// thumbnail's name all stay, with their bytes, and the reply counts them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reset_takes_only_the_caches_own_thumbnails_and_names_the_rest() {
+    let b = Bound::new();
+    let p = b.prepared();
+    let thumbs = p.layout.thumbs.clone();
+    let outside = b.env.root.join("outside-photo-3917.jpg");
+    fs::write(&outside, b"outside photo 3917").unwrap();
+    fs::write(thumbs.join("notes-1204.txt"), b"notes 1204").unwrap();
+    fs::create_dir(thumbs.join("album")).unwrap();
+    fs::write(thumbs.join("album/IMG_5521.JPG"), b"album photo 5521").unwrap();
+    fs::write(thumbs.join("ab/cd/IMG_7730.JPG"), b"foreign 7730").unwrap();
+    let link = thumbs.join("ab/cd/abcd99999999999999999999999999aa.jpg");
+    symlink(&outside, &link).unwrap();
+    let planted = [
+        thumbs.join("notes-1204.txt"),
+        thumbs.join("album"),
+        thumbs.join("album/IMG_5521.JPG"),
+        thumbs.join("ab/cd/IMG_7730.JPG"),
+        link.clone(),
+    ];
+    for f in &planted {
+        if f != &link {
+            mark(f);
+        }
+    }
+    let before: Vec<_> = planted.iter().map(|f| signature(f)).collect();
+    let server = start(&p).await.unwrap();
+    confirm_started(&b.env.dirs, &p).unwrap();
+    let (status, body) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["thumbs_removed"], 1, "{body}");
+    // notes, album (one entry, not walked into), the foreign name, the link.
+    assert_eq!(v["thumbs_kept"], 4, "{body}");
+    assert_eq!(
+        v["thumbs_kept_examples"].as_array().unwrap().len(),
+        4,
+        "{body}"
+    );
+    assert!(
+        !thumbs.join(THUMB).exists(),
+        "the cache's own thumbnail stayed"
+    );
+    let after: Vec<_> = planted.iter().map(|f| signature(f)).collect();
+    assert_eq!(after, before, "a planted entry changed or went");
+    assert_eq!(fs::read(&outside).unwrap(), b"outside photo 3917");
+    p.verify_binding().unwrap();
+    server.shutdown(pc_api::Shutdown::CancelJob).await.unwrap();
+}
+
+/// C2: the binding accepts a held cache folder only if it is the proven
+/// one — another folder, even at the proven path's place, is refused.
+#[test]
+fn the_binding_accepts_only_the_proven_cache_folder_as_held() {
+    use pc_core::storage::StorageBinding;
+    let b = Bound::new();
+    let p = b.prepared();
+    let guard = p.storage_binding().unwrap();
+    let genuine = fs::File::open(&p.layout.thumbs).unwrap();
+    guard.check_thumbnail_folder(&genuine).unwrap();
+    let other_dir = b.target.join("other-cache");
+    fs::create_dir(&other_dir).unwrap();
+    let other = fs::File::open(&other_dir).unwrap();
+    let err = guard.check_thumbnail_folder(&other).unwrap_err();
+    assert!(err.contains("not the proven one"), "{err}");
+}
+
+/// O3 (el-5x1uh): under umask 000 the copied cache's folders are 0700 and
+/// its files 0600, not 0777/0666. `umask` is process-wide, so the move
+/// runs in a child copy of the test binary.
+#[test]
+fn under_umask_000_a_moved_cache_is_not_writable_by_others() {
+    const CHILD: &str = "PC_DESKTOP_MOVE_UMASK";
+    if std::env::var_os(CHILD).is_some() {
+        let env = Env::new();
+        Connection::open(&env.layout.db)
+            .unwrap()
+            .execute("DELETE FROM settings WHERE key='marker'", [])
+            .unwrap();
+        let target = own_target(&env);
+        // The source as an older version under umask 000 left it.
+        for (rel, m) in [("ab", 0o777), ("ab/cd", 0o777), (THUMB, 0o666)] {
+            fs::set_permissions(env.layout.thumbs.join(rel), fs::Permissions::from_mode(m))
+                .unwrap();
+        }
+        // SAFETY: no preconditions; this child runs only this test, on one
+        // thread.
+        unsafe { libc::umask(0) };
+        move_data(&env.dirs, &env.layout, Source::System, &target, plenty).unwrap();
+        let thumbs = target.join(THUMBS_DIR);
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&thumbs.join("ab")), 0o700);
+        assert_eq!(mode(&thumbs.join("ab/cd")), 0o700);
+        assert_eq!(mode(&thumbs.join(THUMB)), 0o600);
+        assert_eq!(fs::read(thumbs.join(THUMB)).unwrap(), vec![7u8; 5_123]);
+        return;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "relocate::storage_tests::under_umask_000_a_moved_cache_is_not_writable_by_others",
+            "--exact",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .status()
+        .unwrap();
+    assert!(status.success());
 }

@@ -49,6 +49,26 @@ fn cvt(rc: libc::c_int) -> io::Result<libc::c_int> {
     }
 }
 
+/// An entry as `fstatat(AT_SYMLINK_NOFOLLOW)` reports it ([`Dir::entry_at`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Entry {
+    pub ident: Ident,
+    /// `st_mode`: the type bits and the permission bits.
+    pub mode: u32,
+    pub uid: u32,
+    pub nlink: u64,
+}
+
+impl Entry {
+    pub fn is_dir(&self) -> bool {
+        self.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
+    }
+
+    pub fn is_file(&self) -> bool {
+        self.mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
+    }
+}
+
 /// An open directory, and the path it was opened by (for messages only).
 pub struct Dir {
     fd: File,
@@ -161,6 +181,49 @@ impl Dir {
         // SAFETY: valid descriptor and name.
         cvt(unsafe { libc::mkdirat(self.fd.as_raw_fd(), c.as_ptr(), 0o755) })?;
         self.open_dir(name)
+    }
+
+    /// `mkdirat(fd, name, mode)` without opening it. The umask can only
+    /// take bits away from `mode`, never add them.
+    pub fn mkdir_mode(&self, name: &str, mode: u32) -> io::Result<()> {
+        let c = cname(name)?;
+        // SAFETY: valid descriptor and name.
+        cvt(unsafe { libc::mkdirat(self.fd.as_raw_fd(), c.as_ptr(), mode as libc::mode_t) })?;
+        Ok(())
+    }
+
+    /// `renameat(fd, from, fd, to)`, both in this folder, replacing what
+    /// bears `to` (a link there is replaced, never followed).
+    pub fn rename_replacing(&self, from: &str, to: &str) -> io::Result<()> {
+        let (a, b) = (cname(from)?, cname(to)?);
+        let fd = self.fd.as_raw_fd();
+        // SAFETY: valid descriptor and NUL-terminated names.
+        cvt(unsafe { libc::renameat(fd, a.as_ptr(), fd, b.as_ptr()) })?;
+        Ok(())
+    }
+
+    /// What bears `name` in this folder now, without following a link:
+    /// identity, mode (type and permissions), owner and number of names.
+    pub fn entry_at(&self, name: &str) -> io::Result<Entry> {
+        let c = cname(name)?;
+        // SAFETY: zero is valid for `stat`; the call fills it.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: valid descriptor, NUL-terminated name, writable buffer.
+        cvt(unsafe {
+            libc::fstatat(
+                self.fd.as_raw_fd(),
+                c.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        })?;
+        #[allow(clippy::unnecessary_cast)]
+        Ok(Entry {
+            ident: (st.st_dev as u64, st.st_ino as u64),
+            mode: st.st_mode as u32,
+            uid: st.st_uid as u32,
+            nlink: st.st_nlink as u64,
+        })
     }
 
     pub fn open_dir(&self, name: &str) -> io::Result<Dir> {
