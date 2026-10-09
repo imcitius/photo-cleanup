@@ -474,10 +474,16 @@ fn main() -> Result<()> {
         Command::Derived(DerivedCmd::Clean(a)) => cmd_clean(&db, a),
         Command::Derived(DerivedCmd::Purge(a)) => cmd_purge(&db, a),
         Command::Derived(DerivedCmd::Undo(a)) => {
-            let back = with_chooser(&a.conflict, |ch| {
-                pc_apply::undo_with(&db, a.journal, &mut |c| ch.decide(c))
-            })
-            .inspect_err(print_stop)?;
+            // The conflict shown and answered before anything moves; pc-apply
+            // holds the answer only while the conflict is still this one.
+            let entry = db
+                .journal_entry(a.journal)?
+                .with_context(|| format!("no journal entry {}", a.journal))?;
+            let conflicts: Vec<_> = pc_apply::undo_conflict(&db, &entry)?.into_iter().collect();
+            pc_cli::conflict::show(&mut std::io::stdout(), &conflicts)?;
+            let reviewed = with_chooser(&a.conflict, |ch| ch.review(&conflicts))?;
+            let back = pc_apply::undo_reviewed(&db, a.journal, reviewed.get(&a.journal))
+                .inspect_err(print_stop)?;
             println!("Entry {} rolled back: {}.", a.journal, back.summary());
             Ok(())
         }
@@ -1301,14 +1307,22 @@ fn cmd_organize_undo(db: &Db, a: &OrganizeUndoArgs) -> Result<()> {
         "Run {run_id}: {} will go back where they came from.",
         pc_core::count_en(moved, "file", "files")
     );
+    // Every conflict is shown, and every answer collected, before the first
+    // file moves (el-14vx0 B5) — with --yes as well as without.
+    let conflicts = pc_apply::run_conflicts(db, run_id)?;
+    pc_cli::conflict::show(&mut std::io::stdout(), &conflicts)?;
     if !a.yes {
+        if !conflicts.is_empty() {
+            println!(
+                "\nWithout --on-conflict, each one is kept in quarantine (asked on a terminal)."
+            );
+        }
         println!("Add --yes to carry it out.");
         return Ok(());
     }
-    let (back, failed) = with_chooser(&a.conflict, |ch| {
-        pc_apply::undo_run_with(db, run_id, &mut |c| ch.decide(c))
-    })
-    .inspect_err(print_stop)?;
+    let reviewed = with_chooser(&a.conflict, |ch| ch.review(&conflicts))?;
+    let (back, failed) =
+        pc_apply::undo_run_reviewed(db, run_id, &reviewed).inspect_err(print_stop)?;
     println!("Restored: {}.", back.summary());
     for f in failed.iter().take(10) {
         println!("  failed: {f}");

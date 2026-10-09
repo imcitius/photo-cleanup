@@ -1055,3 +1055,61 @@ fn every_conflict_is_shown_and_answered_before_the_first_file_moves() {
     }
     let _ = status;
 }
+
+/// el-14vx0 B5, without a terminal: `--on-conflict … --all` answers every
+/// conflict, and the list of all of them is printed before anything is
+/// carried out.
+#[test]
+fn without_a_terminal_every_conflict_is_listed_before_the_answer_for_all_is_carried_out() {
+    let cli = Cli::new();
+    let first = cli.photo("first.jpg", 40);
+    let second = cli.photo("second.jpg", 200);
+    cli.run(&[
+        "index",
+        "--root",
+        cli.archive.to_str().unwrap(),
+        "--min-size",
+        "0",
+    ]);
+    let sorted = cli.archive.parent().unwrap().join("sorted");
+    std::fs::create_dir(&sorted).unwrap();
+    cli.run(&[
+        "organize",
+        "apply",
+        "--root",
+        sorted.to_str().unwrap(),
+        "--allow-duplicates",
+        "--yes",
+    ]);
+    for p in [&first, &second] {
+        std::fs::write(p, b"a foreign file under the same name").unwrap();
+    }
+
+    let said = cli.said(&[
+        "organize",
+        "undo",
+        "--yes",
+        "--on-conflict",
+        "rename-returning",
+        "--all",
+    ]);
+
+    let listed = said.find("2 conflicts").unwrap_or_else(|| panic!("{said}"));
+    let restored = said.find("Restored:").unwrap_or_else(|| panic!("{said}"));
+    assert!(listed < restored, "{said}");
+    for p in [&first, &second] {
+        assert!(
+            said[listed..restored].contains(p.to_str().unwrap()),
+            "{said}"
+        );
+        assert_eq!(
+            std::fs::read(p).unwrap(),
+            b"a foreign file under the same name"
+        );
+        let back = p.with_file_name(format!(
+            "{}_1.jpg",
+            p.file_stem().unwrap().to_str().unwrap()
+        ));
+        assert!(back.exists(), "{back:?}: {said}");
+    }
+}

@@ -1,11 +1,39 @@
 //! The command line's side of an undo whose original place is taken
-//! (el-14vx0): which choice to pass to `pc_apply::undo_with`. Only the
-//! question and the answer live here; what each choice does — and whether
-//! it is offered at all — is pc-apply's, the same for the web.
+//! (el-14vx0): which choice to pass to pc-apply. Only the question and the
+//! answer live here; what each choice does — and whether it is offered at
+//! all — is pc-apply's, the same for the web.
+//!
+//! Every conflict is shown, and every answer collected, before the first
+//! file moves (el-14vx0 B5): [`show`], then [`Chooser::review`], then
+//! `pc_apply::undo_reviewed` / `undo_run_reviewed`, which hold each choice
+//! only while its conflict is still the one shown.
 
 use anyhow::Result;
-use pc_apply::{Choice, Conflict};
+use pc_apply::{Choice, Conflict, Reviewed};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
+
+/// The preview: every conflict, what it offers and why not more. Nothing
+/// has moved when this is printed.
+pub fn show(out: &mut dyn Write, conflicts: &[Conflict]) -> Result<()> {
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "\n{} — the original place is taken; nothing has moved yet:",
+        pc_core::count_en(conflicts.len() as i64, "conflict", "conflicts")
+    )?;
+    for (i, c) in conflicts.iter().enumerate() {
+        writeln!(out, "  {}. {}", i + 1, c.describe())?;
+        for l in &c.limits {
+            writeln!(out, "     ({l})")?;
+        }
+        let offered: Vec<&str> = c.choices.iter().map(|ch| ch.as_str()).collect();
+        writeln!(out, "     choices: {}", offered.join(", "))?;
+    }
+    Ok(())
+}
 
 /// Answers the conflicts of one command: the one given on the command line
 /// first, then — on a terminal — a question per conflict; "apply to all"
@@ -32,6 +60,23 @@ impl<'a> Chooser<'a> {
             remembered: None,
             ask,
         }
+    }
+
+    /// An answer for every conflict, all of them before anything moves, by
+    /// entry.
+    pub fn review(&mut self, conflicts: &[Conflict]) -> Result<HashMap<i64, Reviewed>> {
+        let mut out = HashMap::new();
+        for c in conflicts {
+            let choice = self.decide(c)?;
+            out.insert(
+                c.journal_id,
+                Reviewed {
+                    seen: c.clone(),
+                    choice,
+                },
+            );
+        }
+        Ok(out)
     }
 
     pub fn decide(&mut self, c: &Conflict) -> Result<Choice> {
@@ -151,6 +196,7 @@ mod tests {
                 home: "/a/IMG.CR2".into(),
                 held: "/a/.q/IMG.CR2".into(),
                 proof: None,
+                seen: None,
             }],
             occupants: Vec::new(),
             choices: OFFERED.to_vec(),

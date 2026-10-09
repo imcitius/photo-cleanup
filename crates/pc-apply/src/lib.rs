@@ -39,7 +39,9 @@ pub use conflict::{
 pub use files::{
     apply, companion_plan, companions, same_picture, ApplyReport, Companion, FileOutcome, Filed,
 };
-pub use organize::{organize, undo_run, undo_run_with, OrganizeReport};
+pub use organize::{
+    organize, run_conflicts, undo_run, undo_run_reviewed, undo_run_with, OrganizeReport,
+};
 pub use outcome::{
     is_folder_moved, is_no_exclusive_rename, is_run_stop, stop_run, stopped_run, FolderMoved,
     Halted, NoExclusiveRename, Placed, Role, Route, Stopped, Tally, Whereabouts,

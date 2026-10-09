@@ -489,11 +489,47 @@ pub fn undo_run(db: &Db, run_id: i64) -> Result<(Tally, Vec<String>)> {
 
 /// [`undo_run`], asking `decide` about every entry whose original place is
 /// taken (el-14vx0) — the same question, from the same function, as a
-/// single [`crate::undo_with`].
+/// single [`crate::undo_with`]. Each question is asked when the walk reaches
+/// its entry; to ask them all before anything moves, read them with
+/// [`run_conflicts`] and carry them out with [`undo_run_reviewed`].
 pub fn undo_run_with(
     db: &Db,
     run_id: i64,
     decide: &mut dyn FnMut(&crate::Conflict) -> Result<crate::Choice>,
+) -> Result<(Tally, Vec<String>)> {
+    walk_run(db, run_id, &mut |id| crate::undo_with(db, id, decide))
+}
+
+/// Every conflict an undo of run `run_id` would meet now, in the order the
+/// undo walks its entries: what the preview shows, and asks about, before
+/// the first file moves (el-14vx0 B5). Reads only.
+pub fn run_conflicts(db: &Db, run_id: i64) -> Result<Vec<crate::Conflict>> {
+    let mut out = Vec::new();
+    for e in db.journal_by_run_op(run_id, "organize")? {
+        if let Some(c) = crate::undo_conflict(db, &e)? {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// [`undo_run`] with the choices reviewed beforehand, by entry
+/// ([`crate::undo_reviewed`]): a conflict reviewed and unchanged gets its
+/// choice, one that changed since is refused, one not reviewed is kept.
+pub fn undo_run_reviewed(
+    db: &Db,
+    run_id: i64,
+    reviewed: &std::collections::HashMap<i64, crate::Reviewed>,
+) -> Result<(Tally, Vec<String>)> {
+    walk_run(db, run_id, &mut |id| {
+        crate::undo_reviewed(db, id, reviewed.get(&id))
+    })
+}
+
+fn walk_run(
+    db: &Db,
+    run_id: i64,
+    undo: &mut dyn FnMut(i64) -> Result<Tally>,
 ) -> Result<(Tally, Vec<String>)> {
     let entries = db.journal_by_run_op(run_id, "organize")?;
     if entries.is_empty() {
@@ -509,7 +545,7 @@ pub fn undo_run_with(
     let mut back = Tally::default();
     let mut failed = Vec::new();
     for e in entries {
-        match crate::undo_with(db, e.id, decide) {
+        match undo(e.id) {
             Ok(t) => back.add(&t),
             // The volume cannot move without replacing: every later entry
             // would meet it too, so the walk stops here, saying how far it

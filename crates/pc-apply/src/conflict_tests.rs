@@ -783,3 +783,112 @@ fn reviewer_unicode_case_companion_collision_is_skipped_as_a_unit() {
     }
     assert_eq!(fs::read(&home).unwrap(), THEIRS);
 }
+
+/// el-14vx0 B3. An operation interrupted after its files reached quarantine,
+/// whose places another program has taken since: reconciling it offers the
+/// same choices as an undo, through the same function. The default keeps it
+/// — written down under `reconcile`, the entry still pending, nothing moved
+/// — and a choice brings it back as that choice says.
+#[test]
+fn an_interrupted_entry_whose_place_is_taken_offers_the_same_choices_on_reconcile() {
+    let a = archive();
+    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    a.db.journal_finish(id, JournalStatus::Pending, None)
+        .unwrap();
+    taken(&home, &xmp);
+
+    let entry = a.db.journal_entry(id).unwrap().unwrap();
+    let c = crate::reconcile_conflict(&a.db, &entry)
+        .unwrap()
+        .expect("a conflict");
+    assert_eq!(c.choices, Choice::ALL.to_vec());
+    assert!(crate::undo_conflict(&a.db, &entry).unwrap().is_none());
+
+    let e = crate::reconcile_undo(&a.db, id).unwrap_err();
+    assert!(crate::conflict_kept(&e).is_some(), "{e:#}");
+    assert_eq!(status(&a.db, id), JournalStatus::Pending);
+    assert_eq!(fs::read(&home).unwrap(), THEIRS);
+    assert_eq!(fs::read(q(&home)).unwrap(), OURS);
+    assert!(events(&a.db, id)
+        .iter()
+        .any(|(p, k, d)| p == "reconcile" && k == "kept" && d.contains("\"choice\":\"keep\"")));
+
+    let r = crate::reconcile_undo_with(&a.db, id, &mut with(Choice::RenameReturning)).unwrap();
+    assert_eq!(r.done.files_back, 2);
+    assert_eq!(status(&a.db, id), JournalStatus::Undone);
+    assert_eq!(fs::read(&home).unwrap(), THEIRS);
+    assert_eq!(fs::read(&xmp).unwrap(), THEIR_EDITS);
+    assert_eq!(fs::read(a.dir.join("IMG_1.CR2")).unwrap(), OURS);
+    assert_eq!(fs::read(a.dir.join("IMG_1.xmp")).unwrap(), OUR_EDITS);
+    assert!(events(&a.db, id)
+        .iter()
+        .any(|(p, k, _)| p == "reconcile" && k == "done"));
+}
+
+/// el-14vx0 B3. A reconciliation reviewed with "replace" carries the
+/// existing unit into quarantine under its own entry first, as an undo does.
+#[test]
+fn a_reviewed_replace_on_reconcile_sets_the_existing_unit_aside_first() {
+    let a = archive();
+    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    a.db.journal_finish(id, JournalStatus::Pending, None)
+        .unwrap();
+    taken(&home, &xmp);
+    let entry = a.db.journal_entry(id).unwrap().unwrap();
+    let seen = crate::reconcile_conflict(&a.db, &entry).unwrap().unwrap();
+
+    let r = crate::reconcile_reviewed(
+        &a.db,
+        id,
+        Some(&Reviewed {
+            seen,
+            choice: Choice::Replace,
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(r.done.set_aside, 2);
+    assert_eq!(fs::read(&home).unwrap(), OURS);
+    assert_eq!(fs::read(&xmp).unwrap(), OUR_EDITS);
+    let aside: Vec<_> = fs::read_dir(a.dir.join(pc_core::QUARANTINE_DIR))
+        .unwrap()
+        .flatten()
+        .map(|e| fs::read(e.path()).unwrap())
+        .collect();
+    assert!(aside.contains(&THEIRS.to_vec()) && aside.contains(&THEIR_EDITS.to_vec()));
+    assert_eq!(status(&a.db, id), JournalStatus::Undone);
+}
+
+/// el-14vx0 B4. "Keep", once chosen and confirmed, is carried out as such:
+/// written down and reported, and nothing comes back even though the place
+/// has meanwhile become free.
+#[test]
+fn a_reviewed_keep_moves_nothing_even_once_the_place_is_free() {
+    let a = archive();
+    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    taken(&home, &xmp);
+    let entry = a.db.journal_entry(id).unwrap().unwrap();
+    let seen = crate::undo_conflict(&a.db, &entry).unwrap().unwrap();
+    // The other program moves its files away before the job runs.
+    fs::rename(&home, a.dir.join("theirs.CR2")).unwrap();
+    fs::rename(&xmp, a.dir.join("theirs.xmp")).unwrap();
+
+    let e = crate::undo_reviewed(
+        &a.db,
+        id,
+        Some(&Reviewed {
+            seen,
+            choice: Choice::Keep,
+        }),
+    )
+    .unwrap_err();
+
+    assert!(crate::conflict_kept(&e).is_some(), "{e:#}");
+    assert!(!home.exists() && !xmp.exists());
+    assert_eq!(fs::read(q(&home)).unwrap(), OURS);
+    assert_eq!(fs::read(q(&xmp)).unwrap(), OUR_EDITS);
+    assert_eq!(status(&a.db, id), JournalStatus::Done);
+    assert!(events(&a.db, id)
+        .iter()
+        .any(|(p, k, d)| p == "undo" && k == "kept" && d.contains("\"choice\":\"keep\"")));
+}

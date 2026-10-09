@@ -732,6 +732,69 @@ async fn reviewer_web_mixed_keep_decision_is_structurally_journaled() {
                 .is_some_and(|d| d.contains("\"choice\":\"keep\""))),
         "confirmed web keep decision missing from structured history"
     );
+    // And the job's own result says the first one was kept, by name.
+    assert!(
+        job.to_string().contains("kept in quarantine")
+            && job.to_string().contains("held-first.arw"),
+        "a confirmed keep is missing from the job result: {job}"
+    );
+}
+
+/// el-14vx0 B3 through the real preview → token → job flow: an interrupted
+/// entry whose place is taken is reconciled under the choice made in the
+/// dialog; "keep" is written down under `reconcile` and moves nothing.
+#[tokio::test]
+async fn a_reconcile_choice_is_carried_out_through_the_job_and_keep_is_written_down() {
+    let f = Fixture::new();
+    let (home, held, id) = legacy_held(&f);
+    {
+        let db = f.state.db.lock().unwrap();
+        db.journal_finish(id, pc_db::JournalStatus::Pending, None)
+            .unwrap();
+    }
+    std::fs::write(&home, b"foreign existing frame").unwrap();
+
+    let p = f
+        .preview("journal-reconcile", json!({ "journal_id": id }))
+        .await;
+    assert_eq!(p["conflicts"][0]["choice"], "keep", "{p}");
+    let job = f.apply(&p).await;
+    assert!(job.to_string().contains("kept in quarantine"), "{job}");
+    assert_eq!(std::fs::read(&home).unwrap(), b"foreign existing frame");
+    assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
+    {
+        let db = f.state.db.lock().unwrap();
+        assert_eq!(
+            db.journal_entry(id).unwrap().unwrap().status,
+            pc_db::JournalStatus::Pending
+        );
+        assert!(db
+            .journal_events(id)
+            .unwrap()
+            .iter()
+            .any(|e| e.phase == "reconcile" && e.kind == "kept"));
+    }
+
+    let p = f
+        .preview(
+            "journal-reconcile",
+            json!({"journal_id":id,"choices":{id.to_string():"rename-returning"}}),
+        )
+        .await;
+    assert_eq!(p["items"].as_array().unwrap().len(), 1, "{p}");
+    let job = f.apply(&p).await;
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(std::fs::read(&home).unwrap(), b"foreign existing frame");
+    assert_eq!(
+        std::fs::read(home.with_file_name("frame_1.arw")).unwrap(),
+        b"our frame"
+    );
+    assert!(!held.exists());
+    let db = f.state.db.lock().unwrap();
+    assert_eq!(
+        db.journal_entry(id).unwrap().unwrap().status,
+        pc_db::JournalStatus::Undone
+    );
 }
 
 #[tokio::test]
