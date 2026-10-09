@@ -1982,31 +1982,16 @@ mod review_tests;
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn exfat_is_refused_in_the_preview_and_the_job_like_the_command_line() {
-    use std::process::Command;
-    let tmp = tempfile::tempdir().unwrap();
-    let image = tmp.path().join("volume.dmg");
-    let mount = tmp.path().join("mnt");
-    let run = |c: &mut Command| assert!(c.output().unwrap().status.success(), "{c:?}");
-    run(Command::new("hdiutil")
-        .args([
-            "create", "-quiet", "-size", "64m", "-fs", "ExFAT", "-volname", "PCTEST",
-        ])
-        .arg(&image));
-    run(Command::new("hdiutil")
-        .args(["attach", "-quiet", "-nobrowse", "-noverify", "-mountpoint"])
-        .arg(&mount)
-        .arg(&image));
-    struct Detach(PathBuf);
-    impl Drop for Detach {
-        fn drop(&mut self) {
-            let _ = std::process::Command::new("hdiutil")
-                .args(["detach", "-quiet", "-force"])
-                .arg(&self.0)
-                .status();
-        }
+    mod disk_image {
+        #![allow(dead_code)]
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-support/disk_image.rs"
+        ));
     }
-    let mount = mount.canonicalize().unwrap();
-    let _detach = Detach(mount.clone());
+    let image = disk_image::DiskImage::new("ExFAT", None);
+    let mount = image.mount.clone();
+    let tmp = tempfile::tempdir().unwrap();
     let archive = mount.join("archive");
     // A photograph and its exact copy: `derived clean` moves nothing any
     // more (el-126jk, el-2rpxq), so the plan of copies is what reaches the

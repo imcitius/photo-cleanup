@@ -488,49 +488,15 @@ fn a_volume_that_cannot_refuse_to_replace_stops_organize_and_undo() {
 mod exfat {
     use super::*;
     use std::collections::BTreeMap;
-    use std::process::Command;
-    use std::sync::Mutex;
 
-    static HDIUTIL: Mutex<()> = Mutex::new(());
-
-    struct Image {
-        _dir: tempfile::TempDir,
-        mount: PathBuf,
+    mod disk_image {
+        #![allow(dead_code)]
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-support/disk_image.rs"
+        ));
     }
-
-    impl Image {
-        fn new(fs_name: &str) -> Self {
-            let _one = HDIUTIL.lock().unwrap_or_else(|e| e.into_inner());
-            let dir = tempfile::tempdir().unwrap();
-            let image = dir.path().join("volume.dmg");
-            let mount = dir.path().join("mnt");
-            run(Command::new("hdiutil")
-                .args(["create", "-quiet", "-size", "64m", "-fs", fs_name])
-                .args(["-volname", "PCTEST"])
-                .arg(&image));
-            run(Command::new("hdiutil")
-                .args(["attach", "-quiet", "-nobrowse", "-noverify", "-mountpoint"])
-                .arg(&mount)
-                .arg(&image));
-            let mount = mount.canonicalize().unwrap();
-            Self { _dir: dir, mount }
-        }
-    }
-
-    impl Drop for Image {
-        fn drop(&mut self) {
-            let _one = HDIUTIL.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = Command::new("hdiutil")
-                .args(["detach", "-quiet", "-force"])
-                .arg(&self.mount)
-                .status();
-        }
-    }
-
-    fn run(command: &mut Command) {
-        let out = command.output().unwrap();
-        assert!(out.status.success(), "{command:?}: {out:?}");
-    }
+    use disk_image::DiskImage as Image;
 
     fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
         let mut all = BTreeMap::new();
@@ -551,7 +517,7 @@ mod exfat {
 
     #[test]
     fn exfat_is_refused_before_the_first_move() {
-        let image = Image::new("ExFAT");
+        let image = Image::new("ExFAT", None);
         let tmp = tempfile::tempdir().unwrap();
         let db = Db::open(&tmp.path().join("test.db")).unwrap();
         let dir = image.mount.join("archive");
@@ -617,7 +583,7 @@ mod exfat {
     /// layout note (el-23goa B1). The default beside-quarantine likewise.
     #[test]
     fn exfat_refusal_with_a_configured_quarantine_writes_nothing() {
-        let image = Image::new("ExFAT");
+        let image = Image::new("ExFAT", None);
         let tmp = tempfile::tempdir().unwrap();
         let db = Db::open(&tmp.path().join("test.db")).unwrap();
         let dir = image.mount.join("archive");
@@ -642,7 +608,7 @@ mod exfat {
     #[test]
     fn apfs_and_hfs_take_the_move() {
         for fs_name in ["APFS", "HFS+"] {
-            let image = Image::new(fs_name);
+            let image = Image::new(fs_name, None);
             let tmp = tempfile::tempdir().unwrap();
             let db = Db::open(&tmp.path().join("test.db")).unwrap();
             let dir = image.mount.join("archive");
