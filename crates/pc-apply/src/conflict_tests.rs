@@ -1036,3 +1036,154 @@ fn a_carried_out_choice_is_written_down_with_its_outcome() {
         );
     }
 }
+
+// ---- el-14vx0 round 4: reproducers of rejection el-66rxn (R3-B1..B3) -----
+//
+// Adapted from the reviewer's probes (/tmp/el-14vx0-review-r3-el-67ku):
+// after the user's decision (a), only "keep" and "return as *_1" remain.
+
+mod review_round3 {
+    use super::*;
+
+    /// R3-B1/B3: every member of either side — the frame, its `.xmp`, and an
+    /// `.aae` that was not there at the preview — edited, renamed away or
+    /// vanished after the preview refuses the unit: nothing moves, the
+    /// refusal is typed and journaled as changed since the preview.
+    #[test]
+    fn r3_each_side_each_member_change_is_binding() {
+        let mut failures = Vec::new();
+        for choice in [Choice::Keep, Choice::RenameReturning] {
+            for side in ["returning", "occupant"] {
+                for member in ["frame", "xmp", "extra"] {
+                    for change in ["edit", "rename", "vanish"] {
+                        if member == "extra" && change != "edit" {
+                            continue;
+                        }
+                        let a = archive();
+                        let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+                        taken(&home, &xmp);
+                        let r = reviewed_now(&a, id, choice);
+                        let path = match (side, member) {
+                            ("returning", "extra") => q(&home).with_extension("aae"),
+                            (_, "extra") => home.with_extension("aae"),
+                            ("returning", "frame") => q(&home),
+                            ("returning", _) => q(&xmp),
+                            (_, "frame") => home.clone(),
+                            _ => xmp.clone(),
+                        };
+                        let away = path.with_file_name("externally-moved.bin");
+                        match change {
+                            "edit" => fs::write(&path, b"ordinary external change").unwrap(),
+                            _ => fs::rename(&path, &away).unwrap(),
+                        }
+                        let paths = [
+                            home.clone(),
+                            xmp.clone(),
+                            q(&home),
+                            q(&xmp),
+                            path.clone(),
+                            away.clone(),
+                        ];
+                        let before: Vec<_> = paths
+                            .iter()
+                            .filter(|p| p.exists())
+                            .map(|p| (p.clone(), review_metadata(p)))
+                            .collect();
+                        let result = crate::undo_reviewed(&a.db, id, Some(&r));
+                        let preserved = before
+                            .iter()
+                            .all(|(p, m)| p.exists() && review_metadata(p) == *m);
+                        let typed = result
+                            .as_ref()
+                            .err()
+                            .map(crate::outcome_of)
+                            .is_some_and(|t| {
+                                t.decisions
+                                    .iter()
+                                    .any(|d| d.outcome == crate::Outcome::ChangedSincePreview)
+                            });
+                        let event = changed_event(&a, id, choice);
+                        if !(preserved && typed && event) {
+                            failures.push(format!(
+                                "{choice:?}/{side}/{member}/{change}: result={result:?} \
+                                 preserved={preserved} typed={typed} event={event}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// R3-B3: a "keep" answered after the existing file changed is not a
+    /// keep of what was shown — it is changed since the preview.
+    #[test]
+    fn r3_interactive_keep_after_change_is_changed_not_kept() {
+        let a = archive();
+        let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+        taken(&home, &xmp);
+        let e = crate::undo_with(&a.db, id, &mut |_| {
+            fs::write(&home, b"edit while answering keep")?;
+            Ok(Choice::Keep)
+        })
+        .unwrap_err();
+        assert_eq!(fs::read(&home).unwrap(), b"edit while answering keep");
+        assert_eq!(fs::read(q(&home)).unwrap(), OURS);
+        assert!(
+            changed_event(&a, id, Choice::Keep),
+            "{e:#} {:?}",
+            events(&a.db, id)
+        );
+    }
+
+    /// R3-B2: a row written without evidence is keep-only even when its
+    /// place is free — on undo and on reconciliation alike.
+    #[test]
+    fn r3_legacy_free_destination_is_keep_only() {
+        let mut failures = Vec::new();
+        for pending in [false, true] {
+            let a = archive();
+            let home = a.dir.join("old.jpg");
+            let held = q(&home);
+            fs::create_dir_all(held.parent().unwrap()).unwrap();
+            fs::write(&held, OURS).unwrap();
+            fs::write(held.with_extension("xmp"), OUR_EDITS).unwrap();
+            let id =
+                a.db.journal_begin(&pc_db::NewJournalEntry {
+                    run_id: a.run,
+                    op: "quarantine-file",
+                    target_id: None,
+                    src: &s(&home),
+                    dst: Some(&s(&held)),
+                    size: OURS.len() as i64,
+                    file_count: 2,
+                    manifest: &[],
+                })
+                .unwrap();
+            if !pending {
+                a.db.journal_finish(id, JournalStatus::Done, None).unwrap();
+            }
+            let before = review_metadata(&held);
+            let edits = review_metadata(&held.with_extension("xmp"));
+            let result = if pending {
+                crate::reconcile_reviewed(&a.db, id, None).map(|r| r.done)
+            } else {
+                crate::undo_reviewed(&a.db, id, None)
+            };
+            let preserved = held.exists()
+                && held.with_extension("xmp").exists()
+                && review_metadata(&held) == before
+                && review_metadata(&held.with_extension("xmp")) == edits
+                && !home.exists();
+            if !preserved {
+                failures.push(format!(
+                    "pending={pending} result={result:?} status={:?} events={:?}",
+                    status(&a.db, id),
+                    events(&a.db, id)
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}

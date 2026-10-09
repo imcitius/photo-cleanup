@@ -1161,3 +1161,159 @@ async fn every_carried_out_decision_is_in_the_history_and_the_result() {
         assert!(job.to_string().contains(outcome), "{choice}: {job}");
     }
 }
+
+// ---- el-14vx0 round 4: reproducers of rejection el-66rxn (R3-B1..B3) -----
+//
+// Adapted from the reviewer's probes (/tmp/el-14vx0-review-r3-el-67ku).
+
+/// Two proven organize entries, both previewed; while the first one moves,
+/// the second one's held frame is edited, or gains an `.aae`. The second
+/// unit must not move, and its refusal is structured as changed since the
+/// preview.
+#[cfg(unix)]
+async fn r3_api_later_returning_change(conflict: bool, extra: bool) {
+    let f = Fixture::new();
+    let (run, ids) = {
+        let db = f.state.db.lock().unwrap();
+        let run = db
+            .start_run(&[f.archive.display().to_string()], "test")
+            .unwrap();
+        let mut ids = Vec::new();
+        for name in ["first.arw", "second.arw"] {
+            let home = f.archive.join(name);
+            let held = f.archive.join(format!("held-{name}"));
+            std::fs::write(&held, b"returning frame").unwrap();
+            if conflict {
+                std::fs::write(&home, b"foreign occupant").unwrap();
+            }
+            let m = pc_db::Moved {
+                src: home.display().to_string(),
+                dst: held.display().to_string(),
+                proof: pc_core::proof::Proof::of(&std::fs::metadata(&held).unwrap()),
+            };
+            let id = db
+                .journal_begin(&pc_db::NewJournalEntry {
+                    run_id: run,
+                    op: "organize",
+                    target_id: None,
+                    src: &m.src,
+                    dst: Some(&m.dst),
+                    size: 15,
+                    file_count: 1,
+                    manifest: std::slice::from_ref(&m),
+                })
+                .unwrap();
+            db.journal_finish(id, pc_db::JournalStatus::Done, None)
+                .unwrap();
+            ids.push(id);
+        }
+        (run, ids)
+    };
+    let p = f
+        .preview(
+            "organize-undo",
+            json!({"run_id": run, "choices": {
+                ids[0].to_string(): "rename-returning",
+                ids[1].to_string(): "rename-returning"
+            }}),
+        )
+        .await;
+    let altered = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let capture = altered.clone();
+    let archive = f.archive.clone();
+    let marker = f.archive.to_string_lossy().into_owned();
+    let _g = pc_apply::race::before_move_under(&marker, move |src, _| {
+        let mut seen = capture.lock().unwrap();
+        if seen.is_none() {
+            let other = if src.file_name().unwrap() == "held-first.arw" {
+                "second.arw"
+            } else {
+                "first.arw"
+            };
+            let held = archive.join(format!("held-{other}"));
+            let path = if extra {
+                held.with_extension("aae")
+            } else {
+                held
+            };
+            std::fs::write(&path, b"ordinary edit while earlier unit runs")?;
+            *seen = Some((other.to_string(), path.clone(), r3_metadata(&path)));
+        }
+        Ok(())
+    });
+    let job = f.apply(&p).await;
+    let seen = altered.lock().unwrap();
+    let (name, foreign, before) = seen.as_ref().unwrap();
+    assert_eq!(r3_metadata(foreign), *before);
+    let held = f.archive.join(format!("held-{name}"));
+    let id = if name == "first.arw" { ids[0] } else { ids[1] };
+    let db = f.state.db.lock().unwrap();
+    let events = db.journal_events(id).unwrap();
+    assert!(
+        held.exists(),
+        "returning unit moved despite changed membership: {job} {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e.kind == "refused"
+            && e.data
+                .as_deref()
+                .is_some_and(|d| d.contains("changed-since-preview"))),
+        "missing structured changed-since-preview outcome: {events:?}"
+    );
+    assert!(job.to_string().contains("refresh the preview"), "{job}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn r3_api_extra_returning_companion_during_accepted_job_refuses_unit() {
+    r3_api_later_returning_change(true, true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn r3_api_free_destination_changed_returning_member_has_changed_event() {
+    r3_api_later_returning_change(false, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn r3_api_free_destination_extra_companion_refuses_unit() {
+    r3_api_later_returning_change(false, true).await;
+}
+
+/// R3-B2: a legacy row whose place is free never moves, by undo or by
+/// reconciliation.
+#[cfg(unix)]
+#[tokio::test]
+async fn r3_api_legacy_free_destination_never_moves() {
+    let mut failures = Vec::new();
+    for pending in [false, true] {
+        let f = Fixture::new();
+        let (home, held, id) = legacy_held(&f);
+        if pending {
+            f.state
+                .db
+                .lock()
+                .unwrap()
+                .journal_finish(id, pc_db::JournalStatus::Pending, None)
+                .unwrap();
+        }
+        let before = r3_metadata(&held);
+        let edits = r3_metadata(&held.with_extension("xmp"));
+        let kind = if pending {
+            "journal-reconcile"
+        } else {
+            "journal-undo"
+        };
+        let p = f.preview(kind, json!({"journal_id": id})).await;
+        let job = f.apply(&p).await;
+        let kept = held.exists()
+            && r3_metadata(&held) == before
+            && r3_metadata(&held.with_extension("xmp")) == edits
+            && !home.exists();
+        if !kept {
+            failures.push(format!("pending={pending} PREVIEW={p} JOB={job}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
