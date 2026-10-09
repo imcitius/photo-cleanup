@@ -616,7 +616,7 @@ pub fn undo_with(
         adopt_held_evidence(db, journal_id, &mut list)?;
     } else if let Some(c) = crate::conflict::of(db, &entry, &pairs)? {
         let choice = decide(&c)?;
-        return crate::conflict::resolve(db, &entry, list, c, choice);
+        return crate::conflict::resolve(db, &entry, c, choice);
     }
     let pairs = pairs_of(&entry, list);
     let (arrived, came) = walk_back(db, journal_id, "undo", &pairs)?;
@@ -687,13 +687,26 @@ pub(crate) fn finish(
     if let Err(e) = indexed {
         return Err(unrecorded(e, &done));
     }
+    // An interrupted entry brought back through a conflict choice is a
+    // reconciliation, and its history says so.
+    let (phase, text) = if entry.status == JournalStatus::Pending {
+        (
+            "reconcile",
+            pc_core::tr!(
+                "прерванная операция сверена по манифесту и отменена",
+                "an interrupted operation was reconciled against its manifest and undone"
+            ),
+        )
+    } else {
+        ("undo", pc_core::tr!("откат выполнен", "undone"))
+    };
     let closed = db.journal_close(
         journal_id,
         JournalStatus::Undone,
         &pc_db::Event {
-            text: pc_core::tr!("откат выполнен", "undone"),
+            text,
             moved: &came,
-            ..pc_db::Event::new("undo", "done")
+            ..pc_db::Event::new(phase, "done")
         },
     );
     drop(arrived);
@@ -743,7 +756,7 @@ pub fn reconcile(db: &Db, journal_id: i64) -> Result<Vec<Item>> {
 }
 
 /// The list an interrupted entry is reconciled from.
-fn pending_list(entry: &JournalEntry) -> Result<Vec<Moved>> {
+pub(crate) fn pending_list(entry: &JournalEntry) -> Result<Vec<Moved>> {
     readable(entry)?;
     Ok(if entry.manifest.is_empty() {
         // Written before the journal held a list. One pair is all it knows.
@@ -790,6 +803,17 @@ pub struct Reconciled {
 /// this one, or held and free to come back. Anything else leaves the entry
 /// `pending`, which is what it is, with the reason added to its history.
 pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
+    reconcile_undo_with(db, journal_id, &mut |_| Ok(crate::Choice::Keep))
+}
+
+/// [`reconcile_undo`], asking `decide` what to do when the only obstacle is
+/// that the places the entry comes back to are taken: the same choices, from
+/// the same function, as an undo (el-14vx0 B3).
+pub fn reconcile_undo_with(
+    db: &Db,
+    journal_id: i64,
+    decide: &mut dyn FnMut(&crate::Conflict) -> Result<crate::Choice>,
+) -> Result<Reconciled> {
     if let Some(entry) = db.journal_entry(journal_id)? {
         if let Err(e) = readable(&entry) {
             let why = format!("{e:#}");
@@ -798,6 +822,15 @@ pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
     }
     let items = reconcile(db, journal_id)?;
     if items.iter().any(|i| i.why().is_some()) {
+        let entry = db.journal_entry(journal_id)?.with_context(|| {
+            pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
+        })?;
+        let pairs = pairs_of(&entry, pending_list(&entry)?);
+        if let Some(c) = crate::conflict::of(db, &entry, &pairs)? {
+            let choice = decide(&c)?;
+            let done = crate::conflict::resolve(db, &entry, c, choice)?;
+            return Ok(Reconciled { items, done });
+        }
         let why = pc_core::tf!(
             "сверка: ничего не перенесено — кадр со спутниками возвращается только целиком, а \
              не всё доказано: {0}",

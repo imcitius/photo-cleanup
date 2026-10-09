@@ -195,6 +195,21 @@ pub(crate) fn move_unit(
     first: Option<Held>,
     keepers: &[&Held],
 ) -> Unit {
+    move_unit_checked(members, way, first, keepers, &|| None)
+}
+
+/// [`move_unit`], asking `left` too, after the last rename and right before
+/// the record, whether what the unit left behind at its origin is as it
+/// should be (el-14vx0 B1: a companion of the existing frame that appeared
+/// while it moved would be split from it). Any answer sends the whole unit
+/// back, as any other doubt does.
+pub(crate) fn move_unit_checked(
+    members: &[Member<'_>],
+    way: Way,
+    first: Option<Held>,
+    keepers: &[&Held],
+    left: &dyn Fn() -> Option<String>,
+) -> Unit {
     // 1. Every member bound, held and proven, every later name free.
     let mut first = first;
     let mut held = Vec::with_capacity(members.len());
@@ -248,10 +263,16 @@ pub(crate) fn move_unit(
                 .filter_map(|(a, m)| doubt(a, m))
                 .collect();
             if doubts.is_empty() {
-                return Unit::Moved(arrived);
+                // Not a doubt about a member or its folder: the unit is put
+                // back whole and refused, the run goes on.
+                match left() {
+                    None => return Unit::Moved(arrived),
+                    Some(why) => anyhow!("{why}"),
+                }
+            } else {
+                doubted = true;
+                anyhow!("{}", doubts.join("; "))
             }
-            doubted = true;
-            anyhow!("{}", doubts.join("; "))
         }
         Some(e) if k == 0 && objects_of(&e).is_empty() => return Unit::Refused(e),
         Some(e) => e,

@@ -33,8 +33,8 @@ mod roots;
 mod unit;
 
 pub use conflict::{
-    conflict_kept, undo_conflict, undo_reviewed, Choice, Conflict, ConflictKept, Occupant,
-    Returning, Reviewed,
+    conflict_kept, reconcile_conflict, reconcile_reviewed, reviewed_choice, undo_conflict,
+    undo_reviewed, Choice, Conflict, ConflictKept, Occupant, Returning, Reviewed,
 };
 pub use files::{
     apply, companion_plan, companions, same_picture, ApplyReport, Companion, FileOutcome, Filed,
@@ -49,8 +49,8 @@ pub use purge::{
     KeptWhy, OrphanKept, OrphanWhy, PurgeKept, PurgeStage, PurgeStopped,
 };
 pub use recovery::{
-    reconcile, reconcile_undo, undo, undo_offered, undo_preview, undo_with, Item, Reconciled,
-    Standing,
+    reconcile, reconcile_undo, reconcile_undo_with, undo, undo_offered, undo_preview, undo_with,
+    Item, Reconciled, Standing,
 };
 pub use roots::RunRoots;
 

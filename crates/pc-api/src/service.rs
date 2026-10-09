@@ -553,8 +553,9 @@ pub enum Action {
     /// good, kept and named for a person to delete by hand (el-63ph1).
     Adopt(pc_db::QuarantineFound),
     Abandon(pc_db::QuarantineFound),
-    /// An operation a killed process left half-done, read against the disk.
-    Reconcile(pc_db::JournalEntry),
+    /// An operation a killed process left half-done, read against the disk;
+    /// with the choice reviewed when its places were taken, as for an undo.
+    Reconcile(pc_db::JournalEntry, Option<pc_apply::Reviewed>),
 }
 impl Action {
     pub fn path(&self) -> &str {
@@ -562,7 +563,7 @@ impl Action {
             Self::Copy(x) => &x.path,
             Self::Adopt(x) | Self::Abandon(x) => &x.path,
             Self::Move(x) => &x.src,
-            Self::Undo(x, _) | Self::Purge(x) | Self::Reconcile(x) => &x.src,
+            Self::Undo(x, _) | Self::Purge(x) | Self::Reconcile(x, _) => &x.src,
         }
     }
     pub fn source_path(&self) -> &str {
@@ -576,7 +577,7 @@ impl Action {
             Self::Copy(x) => x.size,
             Self::Move(x) => x.size,
             Self::Adopt(x) | Self::Abandon(x) => x.size,
-            Self::Undo(x, _) | Self::Purge(x) | Self::Reconcile(x) => x.size,
+            Self::Undo(x, _) | Self::Purge(x) | Self::Reconcile(x, _) => x.size,
         }
         .max(0) as u64
     }
@@ -899,18 +900,23 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                             .and_then(pc_apply::Choice::parse)
                             .unwrap_or(pc_apply::Choice::Keep);
                         conflicts.push(conflict_json(&c, chosen));
+                        // A "keep" moves nothing, so it is no reviewed
+                        // item; it still goes with the job, so that the
+                        // decision is written down and reported when the
+                        // job is confirmed, as on the command line (B4).
+                        // The preview itself writes nothing.
                         if chosen == pc_apply::Choice::Keep {
                             add_refusal(e.src.clone(), c.kept_words());
                         } else {
                             items.push(json!({"journal_id":e.id,"path":e.dst,"dst":e.src,"size":e.size,"file_count":e.file_count,"choice":chosen.as_str()}));
-                            actions.push(Action::Undo(
-                                e,
-                                Some(pc_apply::Reviewed {
-                                    seen: c,
-                                    choice: chosen,
-                                }),
-                            ));
                         }
+                        actions.push(Action::Undo(
+                            e,
+                            Some(pc_apply::Reviewed {
+                                seen: c,
+                                choice: chosen,
+                            }),
+                        ));
                         continue;
                     }
                     for (src, why) in doubts {
@@ -945,8 +951,35 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             // unaccounted for: a half-reconciled entry is the state this is
             // meant to get the archive out of.
             let clear = read.iter().all(|i| i.why().is_none());
-            for item in read {
-                match item.standing {
+            // Unless its only obstacle is that its places are taken: then
+            // the choices are the same as an undo's, from the same pc-apply
+            // function (el-14vx0 B3).
+            let conflict = if clear {
+                None
+            } else {
+                pc_apply::reconcile_conflict(db, &entry)?
+            };
+            if let Some(c) = conflict {
+                let chosen = r.params["choices"][id.to_string()]
+                    .as_str()
+                    .and_then(pc_apply::Choice::parse)
+                    .unwrap_or(pc_apply::Choice::Keep);
+                conflicts.push(conflict_json(&c, chosen));
+                if chosen == pc_apply::Choice::Keep {
+                    add_refusal(entry.src.clone(), c.kept_words());
+                } else {
+                    items.push(json!({"journal_id":id,"path":entry.dst,"dst":entry.src,"size":entry.size,"file_count":entry.file_count,"choice":chosen.as_str()}));
+                }
+                actions.push(Action::Reconcile(
+                    entry,
+                    Some(pc_apply::Reviewed {
+                        seen: c,
+                        choice: chosen,
+                    }),
+                ));
+            } else {
+                for item in read {
+                    match item.standing {
                     pc_apply::Standing::Moved => items.push(
                         json!({"journal_id":id,"path":item.dst,"dst":item.src,"size":0,"file_count":1}),
                     ),
@@ -969,9 +1002,10 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     ),
                     pc_apply::Standing::Doubt(ref why) => add_refusal(item.src.clone(), why.clone()),
                 }
-            }
-            if clear {
-                actions.push(Action::Reconcile(entry));
+                }
+                if clear {
+                    actions.push(Action::Reconcile(entry, None));
+                }
             }
         }
         _ => bail!(
@@ -1228,7 +1262,9 @@ pub fn apply_action(
         Action::Undo(e, reviewed) => {
             per_entry(pc_apply::undo_reviewed(db, e.id, reviewed.as_ref()))?
         }
-        Action::Reconcile(e) => per_entry(pc_apply::reconcile_undo(db, e.id).map(|r| r.done))?,
+        Action::Reconcile(e, reviewed) => {
+            per_entry(pc_apply::reconcile_reviewed(db, e.id, reviewed.as_ref()).map(|r| r.done))?
+        }
         // What may be deleted is pc-apply's to prove, for the command line
         // and the web alike (el-3s9kp). An entry it refuses, or stops part
         // way, is this item's refusal with what actually went; the run goes
