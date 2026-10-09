@@ -489,3 +489,173 @@ fn under_umask_000_a_moved_cache_is_not_writable_by_others() {
         .unwrap();
     assert!(status.success());
 }
+
+/// What a reset reply names as kept: the paths of its examples.
+fn kept_paths(body: &str) -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    v["thumbs_kept_examples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// B1 (review el-bdi66): a thumbnail the store wrote is moved aside and a
+/// plain file of this user's is put at exactly its name — same shape, same
+/// owner, one link. Nothing about the name proves the store made it; the
+/// reset keeps it with every byte, mode and attribute, and names it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_foreign_file_at_a_genuine_thumbnail_name_survives_reset() {
+    let b = Bound::new();
+    let p = b.prepared();
+    let server = start(&p).await.unwrap();
+    let store = pc_core::ThumbStore::bound(&p.layout.thumbs, p.storage_binding().unwrap());
+    let key = store.put(b"synthetic own thumbnail 9371").unwrap();
+    let leaf = store.path_for(&key);
+    let saved = b.env.root.join("saved-own-thumb-9371");
+    fs::rename(&leaf, &saved).unwrap();
+    fs::write(&leaf, b"foreign replacement payload 19371").unwrap();
+    fs::set_permissions(&leaf, fs::Permissions::from_mode(0o640)).unwrap();
+    mark(&leaf);
+    let before = signature(&leaf);
+    let (status, body) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
+    server.shutdown(pc_api::Shutdown::CancelJob).await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert!(leaf.exists(), "the foreign file was deleted: {body}");
+    assert_eq!(signature(&leaf), before, "its bytes or metadata changed");
+    assert!(
+        kept_paths(&body).contains(&leaf.display().to_string()),
+        "{body}"
+    );
+    assert_eq!(fs::read(&saved).unwrap(), b"synthetic own thumbnail 9371");
+}
+
+/// B1: a file shaped like the store's temporary name that the store never
+/// created stays and is named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_temporary_shaped_file_the_store_never_made_survives_reset() {
+    let b = Bound::new();
+    let p = b.prepared();
+    let server = start(&p).await.unwrap();
+    let leaf = p
+        .layout
+        .thumbs
+        .join("ab/cd/abcd0123456789abcdef0123456789ab.5193.713.tmp");
+    fs::write(&leaf, b"foreign temporary-shaped payload 713").unwrap();
+    mark(&leaf);
+    let before = signature(&leaf);
+    let (status, body) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
+    server.shutdown(pc_api::Shutdown::CancelJob).await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        leaf.exists(),
+        "the temporary-shaped file was deleted: {body}"
+    );
+    assert_eq!(signature(&leaf), before);
+}
+
+/// B1: the fan-out folder `ab/cd` is replaced by a folder of this user's,
+/// 0700, holding a file at a thumbnail's name. Neither the folder nor the
+/// file was made by the store; both stay, unchanged, and are counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_substituted_fan_out_folder_with_a_thumbnail_named_file_survives_reset() {
+    let b = Bound::new();
+    let p = b.prepared();
+    let server = start(&p).await.unwrap();
+    let fan = p.layout.thumbs.join("ab/cd");
+    fs::rename(&fan, b.env.root.join("saved-own-fan-5814")).unwrap();
+    fs::create_dir(&fan).unwrap();
+    fs::set_permissions(&fan, fs::Permissions::from_mode(0o700)).unwrap();
+    let leaf = fan.join("abcd0123456789abcdef0123456789ab.jpg");
+    fs::write(&leaf, b"foreign folder shaped payload 5814").unwrap();
+    mark(&fan);
+    mark(&leaf);
+    let before = tree(&fan);
+    let (status, body) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
+    server.shutdown(pc_api::Shutdown::CancelJob).await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert!(fan.exists(), "the folder and its file were deleted: {body}");
+    assert_eq!(tree(&fan), before);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["thumbs_kept"].as_u64().unwrap() >= 1, "{body}");
+}
+
+/// B2 (review el-bdi66): a reset does not narrow, or otherwise change, a
+/// fan-out folder it did not make. A replacement at `ab/cd`, 0750 with a
+/// note and an attribute, keeps its mode, its payload and its attributes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_substituted_fan_out_folder_keeps_its_mode_payload_and_attributes() {
+    let b = Bound::new();
+    let p = b.prepared();
+    let server = start(&p).await.unwrap();
+    let fan = p.layout.thumbs.join("ab/cd");
+    fs::rename(&fan, b.env.root.join("saved-own-fan-5813")).unwrap();
+    fs::create_dir(&fan).unwrap();
+    fs::set_permissions(&fan, fs::Permissions::from_mode(0o750)).unwrap();
+    fs::write(
+        fan.join("foreign-notes-5813.txt"),
+        b"foreign folder payload 5813",
+    )
+    .unwrap();
+    mark(&fan);
+    mark(&fan.join("foreign-notes-5813.txt"));
+    let before = tree(&fan);
+    let (status, body) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
+    server.shutdown(pc_api::Shutdown::CancelJob).await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        fs::metadata(&fan).unwrap().permissions().mode() & 0o777,
+        0o750,
+        "{body}"
+    );
+    assert_eq!(tree(&fan), before, "the folder changed: {body}");
+}
+
+/// C2 controls (review el-bdi66): a link, a second name of an outside file
+/// and a folder, each put at the name of a thumbnail the store wrote, stay
+/// exactly as they are, and the outside file keeps its links.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn links_and_folders_at_genuine_thumbnail_names_survive_reset() {
+    use std::os::unix::fs::MetadataExt;
+    let b = Bound::new();
+    let p = b.prepared();
+    let server = start(&p).await.unwrap();
+    let store = pc_core::ThumbStore::bound(&p.layout.thumbs, p.storage_binding().unwrap());
+    let outside = b.env.root.join("outside-payload-6381");
+    fs::write(&outside, b"outside preserved 6381").unwrap();
+    mark(&outside);
+    let mut paths = Vec::new();
+    for n in 0..3 {
+        let key = store
+            .put(format!("own synthetic 6381-{n}").as_bytes())
+            .unwrap();
+        let leaf = store.path_for(&key);
+        fs::rename(&leaf, b.env.root.join(format!("own-saved-6381-{n}"))).unwrap();
+        match n {
+            0 => symlink(&outside, &leaf).unwrap(),
+            1 => fs::hard_link(&outside, &leaf).unwrap(),
+            _ => {
+                fs::create_dir(&leaf).unwrap();
+                fs::write(leaf.join("notes"), b"foreign directory 6381").unwrap();
+                mark(&leaf);
+            }
+        }
+        paths.push(leaf);
+    }
+    let outside_before = signature(&outside);
+    let links_before = fs::metadata(&outside).unwrap().nlink();
+    let before: Vec<_> = paths.iter().map(|p| tree(p)).collect();
+    let (status, body) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
+    server.shutdown(pc_api::Shutdown::CancelJob).await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    let kept = kept_paths(&body);
+    for leaf in &paths {
+        assert!(kept.contains(&leaf.display().to_string()), "{body}");
+    }
+    let after: Vec<_> = paths.iter().map(|p| tree(p)).collect();
+    assert_eq!(after, before);
+    assert_eq!(signature(&outside), outside_before);
+    assert_eq!(fs::metadata(&outside).unwrap().nlink(), links_before);
+    assert_eq!(fs::read_link(&paths[0]).unwrap(), outside);
+}
