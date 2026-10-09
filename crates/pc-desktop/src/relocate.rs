@@ -5500,53 +5500,14 @@ mod volume_tests {
     use super::caller_tests::{aside_dirs, marker, plenty, Env};
     use super::*;
     use std::collections::BTreeMap;
-    use std::process::Command;
-
-    static HDIUTIL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct Image {
-        _dir: tempfile::TempDir,
-        mount: PathBuf,
+    mod disk_image {
+        #![allow(dead_code)]
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-support/disk_image.rs"
+        ));
     }
-
-    impl Image {
-        /// `owners`: `None` attaches like a double click would (external
-        /// volumes: ownership ignored), `Some(true)` with `-owners on`.
-        fn new(fs: &str, owners: Option<bool>) -> Self {
-            // Concurrent `hdiutil create` calls were seen to hang for good.
-            let _one = HDIUTIL.lock().unwrap_or_else(|e| e.into_inner());
-            let dir = tempfile::tempdir().unwrap();
-            let image = dir.path().join("volume.dmg");
-            let mount = dir.path().join("mnt");
-            run(Command::new("hdiutil")
-                .args(["create", "-quiet", "-size", "64m", "-fs", fs])
-                .args(["-volname", "PCTEST"])
-                .arg(&image));
-            let mut attach = Command::new("hdiutil");
-            attach.args(["attach", "-quiet", "-nobrowse", "-noverify"]);
-            if let Some(on) = owners {
-                attach.args(["-owners", if on { "on" } else { "off" }]);
-            }
-            run(attach.arg("-mountpoint").arg(&mount).arg(&image));
-            let mount = mount.canonicalize().unwrap();
-            Self { _dir: dir, mount }
-        }
-    }
-
-    impl Drop for Image {
-        fn drop(&mut self) {
-            let _one = HDIUTIL.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = Command::new("hdiutil")
-                .args(["detach", "-quiet", "-force"])
-                .arg(&self.mount)
-                .status();
-        }
-    }
-
-    fn run(command: &mut Command) {
-        let out = command.output().unwrap();
-        assert!(out.status.success(), "{command:?}: {out:?}");
-    }
+    use disk_image::DiskImage as Image;
 
     /// Every entry under `dir` with its contents (files) or `None`.
     fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
