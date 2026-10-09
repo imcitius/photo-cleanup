@@ -71,17 +71,25 @@ impl Db {
     ///
     /// 1. the binding confirms the path, the file and its companions;
     /// 2. SQLite opens the path read-write *without* the right to create it
-    ///    and without following a link. Opening reads and writes nothing;
+    ///    and without following a link. Opening writes nothing. If it
+    ///    fails, the binding is asked again: a name changed since step 1
+    ///    — emptied, or a link put there, which SQLite reports as
+    ///    `SQLITE_CANTOPEN_SYMLINK` — is the binding's refusal
+    ///    ([`pc_core::storage::NotBound`]) with what was found, not an
+    ///    unreadable database (el-5x1uh O1);
     /// 3. SQLite itself is asked whether the file it holds is still the one
     ///    at the path (`SQLITE_FCNTL_HAS_MOVED`), and the binding confirms
     ///    the path once more. Together they say that the object SQLite holds
     ///    is the proven one: for it to be another, the name would have to
-    ///    change to the other file and back again within these few calls —
-    ///    in a namespace only this user can change, only this user's own
-    ///    programs could do that;
+    ///    change to the other file and back again within these few calls.
+    ///    Ordinary replacements cannot be timed that way; a process of this
+    ///    user (or root) doing it on purpose is outside the threat model
+    ///    ([`pc_core::storage`]);
     /// 4. only then journal mode, pragmas and migrations.
     ///
-    /// A refusal at 1–3 closes the connection having written nothing.
+    /// A refusal at 1–3 closes the connection having written nothing. The
+    /// error says which: refused before SQLite opened anything (1–2), or
+    /// opened to be checked and closed again (3).
     pub fn open_bound(path: &Path, binding: &dyn pc_core::storage::StorageBinding) -> Result<Self> {
         use rusqlite::OpenFlags;
         let refused = |why: String| {
@@ -91,22 +99,51 @@ impl Db {
                 path.display()
             ))
         };
+        let refused_after_open = |why: String| {
+            anyhow::Error::new(pc_core::storage::NotBound(why)).context(pc_core::tf!(
+                "база {0} открыта для проверки и снова закрыта; в ней ничего не записано",
+                "the database {0} was opened to be checked and closed again; nothing was \
+                 written to it",
+                path.display()
+            ))
+        };
         binding.check_database().map_err(refused)?;
-        let conn = Connection::open_with_flags(
+        let conn = match Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .with_context(|| {
-            pc_core::tf!(
-                "не удалось открыть базу {0}",
-                "could not open the database {0}",
-                path.display()
-            )
-        })?;
+        ) {
+            Ok(conn) => conn,
+            Err(e) => {
+                let link = matches!(
+                    &e,
+                    rusqlite::Error::SqliteFailure(f, _)
+                        if f.extended_code == rusqlite::ffi::SQLITE_CANTOPEN_SYMLINK
+                );
+                let link_found = || {
+                    pc_core::tr!(
+                        "в момент открытия на пути была символическая ссылка — SQLite по \
+                         ссылкам не идёт (SQLITE_CANTOPEN_SYMLINK)",
+                        "when SQLite opened it, the path held a symbolic link, which SQLite does \
+                         not follow (SQLITE_CANTOPEN_SYMLINK)"
+                    )
+                    .to_string()
+                };
+                return Err(match (link, binding.check_database()) {
+                    (true, Err(why)) => refused(format!("{}; {why}", link_found())),
+                    (true, Ok(())) => refused(link_found()),
+                    (false, Err(why)) => refused(why),
+                    (false, Ok(())) => anyhow::Error::new(e).context(pc_core::tf!(
+                        "не удалось открыть базу {0}",
+                        "could not open the database {0}",
+                        path.display()
+                    )),
+                });
+            }
+        };
         if has_moved(&conn)? {
-            return Err(refused(
+            return Err(refused_after_open(
                 pc_core::tr!(
                     "файл под этим именем сменился, пока база открывалась",
                     "the file at this name changed while the database was being opened"
@@ -114,7 +151,7 @@ impl Db {
                 .into(),
             ));
         }
-        binding.check_database().map_err(refused)?;
+        binding.check_database().map_err(refused_after_open)?;
         if conn.is_readonly(rusqlite::MAIN_DB)? {
             anyhow::bail!(pc_core::tf!(
                 "база {0} открылась только для чтения",
@@ -367,5 +404,134 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.reset_index().unwrap();
         db.reset_index().unwrap();
+    }
+}
+
+/// The micro-windows of [`Db::open_bound`] (el-5x1uh O1): the name is
+/// changed right after the first check, which a test can only reach from
+/// inside the binding. Whatever happens, the error is a refusal by the
+/// binding (`NotBound`) and says truthfully what SQLite did.
+#[cfg(all(test, unix))]
+mod open_bound_tests {
+    use super::*;
+    use pc_core::storage::{NotBound, StorageBinding};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Passes check #1 and then does `after_first` to the database's name;
+    /// from then on refuses whatever is not a plain file at the name.
+    #[derive(Debug)]
+    struct Scripted {
+        db: PathBuf,
+        calls: AtomicU32,
+        after_first: fn(&Path),
+        refuse_second: bool,
+    }
+
+    impl StorageBinding for Scripted {
+        fn check_database(&self) -> std::result::Result<(), String> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                (self.after_first)(&self.db);
+                return Ok(());
+            }
+            if self.refuse_second {
+                return Err("refused at check 2 (4471)".into());
+            }
+            match std::fs::symlink_metadata(&self.db) {
+                Ok(m) if m.is_file() => Ok(()),
+                Ok(_) => Err("not a plain file at the name (4472)".into()),
+                Err(e) => Err(format!("nothing at the name: {e}")),
+            }
+        }
+        fn check_thumbnails(&self) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn check_thumbnail_folder(&self, _: &std::fs::File) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn fixture() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        // SQLite's NOFOLLOW refuses a link anywhere on the path; a bound
+        // folder is recorded without links, so the test's folder is too.
+        let db = tmp.path().canonicalize().unwrap().join("photo-cleanup.db");
+        drop(Db::open(&db).unwrap());
+        for s in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(tmp.path().join(format!("photo-cleanup.db{s}")));
+        }
+        (tmp, db)
+    }
+
+    fn open(db: &Path, after_first: fn(&Path), refuse_second: bool) -> anyhow::Error {
+        let binding = Scripted {
+            db: db.to_path_buf(),
+            calls: AtomicU32::new(0),
+            after_first,
+            refuse_second,
+        };
+        match Db::open_bound(db, &binding) {
+            Ok(_) => panic!("opened"),
+            Err(e) => e,
+        }
+    }
+
+    /// The proven file swapped for a link to a copy right after check #1:
+    /// SQLite refuses the link (`SQLITE_CANTOPEN_SYMLINK`). That is the
+    /// binding's refusal, not "could not open the database", and neither
+    /// the copy nor the proven file gets a byte.
+    #[test]
+    fn a_link_put_at_the_name_after_the_check_is_a_refusal_that_names_the_link() {
+        let (tmp, db) = fixture();
+        fn swap(db: &Path) {
+            let dir = db.parent().unwrap();
+            std::fs::rename(db, dir.join("saved-own.db")).unwrap();
+            std::fs::copy(dir.join("saved-own.db"), dir.join("copy.db")).unwrap();
+            std::os::unix::fs::symlink(dir.join("copy.db"), db).unwrap();
+        }
+        let err = open(&db, swap, false);
+        let text = format!("{err:#}");
+        assert!(err.downcast_ref::<NotBound>().is_some(), "{text}");
+        assert!(text.contains("symbolic link"), "{text}");
+        assert!(text.contains("was not opened"), "{text}");
+        assert!(text.contains("nothing was written"), "{text}");
+        assert!(text.contains("4472"), "the binding's own reason: {text}");
+        let own = std::fs::read(tmp.path().join("saved-own.db")).unwrap();
+        assert_eq!(std::fs::read(tmp.path().join("copy.db")).unwrap(), own);
+        assert!(!tmp.path().join("copy.db-wal").exists());
+        assert!(!tmp.path().join("saved-own.db-wal").exists());
+    }
+
+    /// The name emptied right after check #1: SQLite may not create it, the
+    /// open fails, and check #2 says why — a refusal again.
+    #[test]
+    fn a_name_emptied_after_the_check_is_a_refusal_and_nothing_is_created() {
+        let (tmp, db) = fixture();
+        fn away(db: &Path) {
+            std::fs::rename(db, db.with_file_name("saved-own.db")).unwrap();
+        }
+        let err = open(&db, away, false);
+        let text = format!("{err:#}");
+        assert!(err.downcast_ref::<NotBound>().is_some(), "{text}");
+        assert!(text.contains("nothing at the name"), "{text}");
+        assert!(!db.exists(), "a database was created at the name");
+        assert!(tmp.path().join("saved-own.db").exists());
+    }
+
+    /// A refusal after SQLite opened the file (check #2) does not claim the
+    /// file was never opened: SQLite opened it and read its header.
+    #[test]
+    fn a_refusal_after_the_open_says_the_file_was_opened_and_closed() {
+        let (tmp, db) = fixture();
+        let before = std::fs::read(&db).unwrap();
+        let err = open(&db, |_| {}, true);
+        let text = format!("{err:#}");
+        assert!(err.downcast_ref::<NotBound>().is_some(), "{text}");
+        assert!(text.contains("4471"), "{text}");
+        assert!(!text.contains("was not opened"), "{text}");
+        assert!(text.contains("closed again; nothing was written"), "{text}");
+        assert_eq!(std::fs::read(&db).unwrap(), before);
+        assert!(!tmp.path().join("photo-cleanup.db-wal").exists());
     }
 }
