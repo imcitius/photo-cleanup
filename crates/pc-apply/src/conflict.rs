@@ -311,13 +311,17 @@ impl Conflict {
             .map(|o| o.path.clone())
             .collect::<Vec<_>>()
             .join("; ");
-        pc_core::tf!(
+        let mut words = pc_core::tf!(
             "запись {0}: исходное место занято другим файлом. Возвращается: {1}. На месте лежит: {2}",
             "entry {0}: the original place is taken by another file. Coming back: {1}. In its place: {2}",
             self.journal_id,
             back,
             there
-        )
+        );
+        if !self.beside.is_empty() {
+            words.push_str(&beside_words(&self.beside));
+        }
+        words
     }
 
     /// The default's words: where the file stays and where it belongs.
@@ -526,17 +530,21 @@ impl Seen {
 
     fn words(&self) -> String {
         match self {
-            Seen::Free { places, .. } => {
+            Seen::Free { places, beside, .. } => {
                 let back = places
                     .iter()
                     .map(|p| format!("{} ← {}", p.home, p.held))
                     .collect::<Vec<_>>()
                     .join("; ");
-                pc_core::tf!(
-                    "место было свободно, возвращалось: {0}",
-                    "the place was free, coming back: {0}",
+                let mut words = pc_core::tf!(
+                    "место свободно, возвращается: {0}",
+                    "the place is free, coming back: {0}",
                     back
-                )
+                );
+                if !beside.is_empty() {
+                    words.push_str(&beside_words(beside));
+                }
+                words
             }
             Seen::Taken(c) => c.describe(),
             Seen::Held(h) => h.why.clone(),
@@ -1006,6 +1014,20 @@ pub(crate) fn stranger_words(strangers: &[String]) -> String {
          {0}; the frame does not come back without it, and a file that is not this entry's is \
          not moved",
         strangers.join("; ")
+    )
+}
+
+/// Files beside the unit that are not part of it, in words, with what was
+/// read of each — so that "then" and "now" differ where they differ.
+fn beside_words(beside: &[Occupant]) -> String {
+    pc_core::tf!(
+        ". Рядом, не из этой записи (не переносится): {0}",
+        ". Beside it, not of this entry (never moved): {0}",
+        beside
+            .iter()
+            .map(|o| format!("{} [{}]", o.path, o.evidence()))
+            .collect::<Vec<_>>()
+            .join("; ")
     )
 }
 
