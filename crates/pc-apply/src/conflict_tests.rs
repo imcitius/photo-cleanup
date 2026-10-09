@@ -892,3 +892,171 @@ fn a_reviewed_keep_moves_nothing_even_once_the_place_is_free() {
         .iter()
         .any(|(p, k, d)| p == "undo" && k == "kept" && d.contains("\"choice\":\"keep\"")));
 }
+
+// ---- el-14vx0 round 3: the preview is binding (rejection el-zvg9s) --------
+
+fn reviewed_now(a: &Archive, id: i64, choice: Choice) -> Reviewed {
+    let entry = a.db.journal_entry(id).unwrap().unwrap();
+    Reviewed {
+        seen: crate::undo_conflict(&a.db, &entry)
+            .unwrap()
+            .expect("a conflict"),
+        choice,
+    }
+}
+
+fn changed_event(a: &Archive, id: i64, choice: Choice) -> bool {
+    let needle = format!("\"choice\":\"{}\"", choice.as_str());
+    events(&a.db, id).iter().any(|(_, k, d)| {
+        k == "refused" && d.contains(&needle) && d.contains("\"outcome\":\"changed-since-preview\"")
+    })
+}
+
+/// R2-B2: the existing unit reviewed in the preview is gone by the time the
+/// choice is carried out. The place is free, but the choice was made on a
+/// conflict that is no longer there: nothing comes back by an ordinary
+/// undo or under any other name; the refusal is written down and says to
+/// preview again.
+#[test]
+fn a_reviewed_conflict_that_vanished_is_refused_never_undone_otherwise() {
+    for choice in [
+        Choice::Keep,
+        Choice::Replace,
+        Choice::RenameExisting,
+        Choice::RenameReturning,
+    ] {
+        let a = archive();
+        let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+        taken(&home, &xmp);
+        let r = reviewed_now(&a, id, choice);
+        fs::rename(&home, a.dir.join("theirs.CR2")).unwrap();
+        fs::rename(&xmp, a.dir.join("theirs.xmp")).unwrap();
+
+        let e = crate::undo_reviewed(&a.db, id, Some(&r)).unwrap_err();
+
+        assert!(format!("{e:#}").contains("preview"), "{choice:?}: {e:#}");
+        assert!(!home.exists() && !xmp.exists(), "{choice:?}");
+        assert!(!a.dir.join("IMG_1.CR2").exists(), "{choice:?}");
+        assert_eq!(fs::read(q(&home)).unwrap(), OURS);
+        assert_eq!(fs::read(q(&xmp)).unwrap(), OUR_EDITS);
+        assert_eq!(status(&a.db, id), JournalStatus::Done);
+        assert!(
+            changed_event(&a, id, choice),
+            "{choice:?}: {:?}",
+            events(&a.db, id)
+        );
+    }
+}
+
+/// R2-B3: the existing frame changed after the preview. The reviewed choice
+/// is refused, nothing moves, and the confirmed choice with its refusal is
+/// in the structured history.
+#[test]
+fn a_reviewed_conflict_that_changed_is_refused_and_written_down_with_its_choice() {
+    let a = archive();
+    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    taken(&home, &xmp);
+    let r = reviewed_now(&a, id, Choice::Replace);
+    fs::write(&home, b"an ordinary edit after the preview").unwrap();
+
+    let e = crate::undo_reviewed(&a.db, id, Some(&r)).unwrap_err();
+
+    assert!(format!("{e:#}").contains("preview"), "{e:#}");
+    assert_eq!(
+        fs::read(&home).unwrap(),
+        b"an ordinary edit after the preview"
+    );
+    assert_eq!(fs::read(q(&home)).unwrap(), OURS);
+    assert!(
+        changed_event(&a, id, Choice::Replace),
+        "{:?}",
+        events(&a.db, id)
+    );
+}
+
+/// Point 1, "appeared": an entry previewed with its place free, and taken by
+/// the time the job reaches it. It was never reviewed as a conflict: it is
+/// refused as changed since the preview, not kept or decided silently.
+#[test]
+fn a_conflict_that_appeared_after_the_preview_is_refused_as_changed() {
+    let a = archive();
+    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    taken(&home, &xmp);
+
+    let e = crate::undo_reviewed(&a.db, id, None).unwrap_err();
+
+    assert!(format!("{e:#}").contains("preview"), "{e:#}");
+    assert_eq!(fs::read(&home).unwrap(), THEIRS);
+    assert_eq!(fs::read(q(&home)).unwrap(), OURS);
+    assert!(events(&a.db, id)
+        .iter()
+        .any(|(_, k, d)| k == "refused" && d.contains("\"outcome\":\"changed-since-preview\"")));
+}
+
+/// Point 2: a row written without evidence is offered only "keep"; a choice
+/// that moves anything is refused whole and written down.
+#[test]
+fn a_row_without_evidence_is_offered_only_keep() {
+    let a = archive();
+    let home = a.dir.join("old.jpg");
+    let held = q(&home);
+    fs::create_dir_all(held.parent().unwrap()).unwrap();
+    fs::write(&held, OURS).unwrap();
+    fs::write(held.with_extension("xmp"), OUR_EDITS).unwrap();
+    fs::write(&home, THEIRS).unwrap();
+    let id =
+        a.db.journal_begin(&pc_db::NewJournalEntry {
+            run_id: a.run,
+            op: "quarantine-file",
+            target_id: None,
+            src: &s(&home),
+            dst: Some(&s(&held)),
+            size: OURS.len() as i64,
+            file_count: 1,
+            manifest: &[],
+        })
+        .unwrap();
+    a.db.journal_finish(id, JournalStatus::Done, None).unwrap();
+
+    let r = reviewed_now(&a, id, Choice::RenameReturning);
+    assert_eq!(r.seen.choices, vec![Choice::Keep]);
+    for choice in [
+        Choice::Replace,
+        Choice::RenameExisting,
+        Choice::RenameReturning,
+    ] {
+        assert!(crate::undo_with(&a.db, id, &mut with(choice)).is_err());
+        let r = reviewed_now(&a, id, choice);
+        assert!(crate::undo_reviewed(&a.db, id, Some(&r)).is_err());
+    }
+    assert_eq!(fs::read(&home).unwrap(), THEIRS);
+    assert_eq!(fs::read(&held).unwrap(), OURS);
+    assert_eq!(fs::read(held.with_extension("xmp")).unwrap(), OUR_EDITS);
+    assert!(!a.dir.join("old_1.jpg").exists());
+    assert_eq!(status(&a.db, id), JournalStatus::Done);
+    assert!(a.db.journal_entry(id).unwrap().unwrap().manifest.is_empty());
+}
+
+/// Point 3: a carried out choice is written down with its outcome.
+#[test]
+fn a_carried_out_choice_is_written_down_with_its_outcome() {
+    for (choice, outcome) in [
+        (Choice::Replace, "replaced"),
+        (Choice::RenameExisting, "renamed-existing"),
+        (Choice::RenameReturning, "renamed-returning"),
+    ] {
+        let a = archive();
+        let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+        taken(&home, &xmp);
+        let r = reviewed_now(&a, id, choice);
+        crate::undo_reviewed(&a.db, id, Some(&r)).unwrap();
+        let needle = format!("\"outcome\":\"{outcome}\"");
+        assert!(
+            events(&a.db, id)
+                .iter()
+                .any(|(_, _, d)| d.contains(&needle)),
+            "{choice:?}: {:?}",
+            events(&a.db, id)
+        );
+    }
+}

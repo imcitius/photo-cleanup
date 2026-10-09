@@ -181,3 +181,58 @@ test("apply to all answers every remaining conflict of a run with the same choic
     expect(readFileSync(join(archive, `${name}.jpg`), "utf8")).toBe(NEWER);
   }
 });
+
+// el-14vx0 round 3 (rejection el-zvg9s, R2-B4): "keep" is a decision too.
+// A batch whose every choice is "keep" can be confirmed; the job writes the
+// decision down and moves nothing.
+test("an explicit keep-only decision can be confirmed, is recorded and moves nothing", async ({
+  page,
+  request,
+}) => {
+  const archive = await archiveOf(request, "conflict-keep");
+  await page.goto("/#journal");
+  const data = Buffer.from(await jpeg(page, 30), "base64");
+  const copy = join(archive, "frame copy.jpg");
+  writeFileSync(join(archive, "frame.jpg"), data);
+  writeFileSync(copy, data);
+  writeFileSync(join(archive, "frame copy.xmp"), "our edits");
+  await job(request, "index", { roots: [archive], min_size: 0 });
+  await job(request, "families", {});
+  await reviewed(request, "plan-apply", { roles: ["copy"] });
+  expect(existsSync(copy)).toBe(false);
+  writeFileSync(copy, NEWER);
+
+  await page.reload();
+  await main(page)
+    .getByRole("button", { name: "Restore", exact: true })
+    .first()
+    .click();
+  const dialog = page
+    .getByRole("dialog")
+    .filter({ has: page.getByTestId("conflicts") });
+  const conflicts = dialog.getByTestId("conflicts");
+  await expect(conflicts).toBeVisible();
+  await conflicts
+    .getByRole("radio", {
+      name: "return it as *_1 and leave the existing file alone",
+    })
+    .check();
+  const keep = conflicts.getByRole("radio", {
+    name: "keep it in quarantine, return it by hand later",
+  });
+  await keep.check();
+  await expect(keep).toBeChecked();
+  const restore = dialog.getByRole("button", { name: "Restore", exact: true });
+  await expect(restore).toBeEnabled();
+  await restore.click();
+  await page.getByRole("button", { name: "Run the plan", exact: true }).click();
+
+  await expect
+    .poll(async () => (await (await request.get("/api/jobs")).json())[0]?.state)
+    .toBe("done");
+  const jobs = JSON.stringify((await (await request.get("/api/jobs")).json())[0]);
+  expect(jobs).toContain("kept in quarantine");
+  expect(readFileSync(copy, "utf8")).toBe(NEWER);
+  expect(existsSync(join(archive, "frame copy_1.jpg"))).toBe(false);
+  expect(existsSync(join(archive, "frame copy.xmp"))).toBe(false);
+});

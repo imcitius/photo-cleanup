@@ -851,3 +851,313 @@ async fn reviewer_replace_is_listed_with_origin_and_undoing_it_preserves_both_un
     assert_eq!(q.as_array().unwrap().len(), 1, "{q}");
     eprintln!("REPLACE_CHAIN_AND_QUARANTINE_ORIGIN_PASS={q}");
 }
+
+// ---- el-14vx0 round 3: the preview is binding (rejection el-zvg9s) --------
+
+/// The same photograph and sidecar as [`legacy_held`], journaled the way
+/// this version writes it: a list with the evidence of every member.
+fn proven_held(f: &Fixture) -> (PathBuf, PathBuf, i64) {
+    let home = f.archive.join("frame.arw");
+    let q = f.archive.join(pc_core::QUARANTINE_DIR);
+    std::fs::create_dir(&q).unwrap();
+    let held = q.join("frame.arw");
+    std::fs::write(&held, b"our frame").unwrap();
+    std::fs::write(held.with_extension("xmp"), b"our edits").unwrap();
+    let list: Vec<pc_db::Moved> = [(home.clone(), held.clone())]
+        .into_iter()
+        .chain([(home.with_extension("xmp"), held.with_extension("xmp"))])
+        .map(|(src, dst)| pc_db::Moved {
+            src: src.display().to_string(),
+            dst: dst.display().to_string(),
+            proof: pc_core::proof::Proof::of(&std::fs::symlink_metadata(&dst).unwrap()),
+        })
+        .collect();
+    let db = f.state.db.lock().unwrap();
+    let run = db
+        .start_run(&[f.archive.display().to_string()], "test")
+        .unwrap();
+    let id = db
+        .journal_begin(&pc_db::NewJournalEntry {
+            run_id: run,
+            op: "quarantine-file",
+            target_id: None,
+            src: &home.display().to_string(),
+            dst: Some(&held.display().to_string()),
+            size: 18,
+            file_count: 2,
+            manifest: &list,
+        })
+        .unwrap();
+    db.journal_finish(id, pc_db::JournalStatus::Done, None)
+        .unwrap();
+    (home, held, id)
+}
+
+#[cfg(unix)]
+fn r3_metadata(p: &std::path::Path) -> (u64, u64, u32, u32, u32, u64, i64, i64, Vec<u8>) {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(p).unwrap();
+    (
+        m.dev(),
+        m.ino(),
+        m.mode(),
+        m.uid(),
+        m.gid(),
+        m.nlink(),
+        m.mtime(),
+        m.mtime_nsec(),
+        std::fs::read(p).unwrap(),
+    )
+}
+
+/// R2-B1, narrowed contract point 2: a unit with a member journaled without
+/// evidence is offered only "keep", and whatever the parameters ask — on
+/// an undo or a reconciliation — nothing of it moves: the frame and its
+/// sidecar stay in quarantine together, the entry stays open, and the
+/// decision is in its structured history.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_legacy_unit_is_offered_only_keep_and_nothing_of_it_moves_whatever_is_asked() {
+    for (kind, status) in [
+        ("journal-undo", pc_db::JournalStatus::Done),
+        ("journal-reconcile", pc_db::JournalStatus::Pending),
+    ] {
+        for choice in ["replace", "rename-existing", "rename-returning", "keep"] {
+            let f = Fixture::new();
+            let (home, held, id) = legacy_held(&f);
+            f.state
+                .db
+                .lock()
+                .unwrap()
+                .journal_finish(id, status, None)
+                .unwrap();
+            std::fs::write(&home, b"foreign existing frame").unwrap();
+            let foreign = r3_metadata(&home);
+            let frame = r3_metadata(&held);
+            let edits = r3_metadata(&held.with_extension("xmp"));
+            let p = f
+                .preview(
+                    kind,
+                    json!({"journal_id":id,"choices":{id.to_string():choice}}),
+                )
+                .await;
+            let offered: Vec<&str> = p["conflicts"][0]["choices"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{kind}: no conflict in {p}"))
+                .iter()
+                .map(|x| x["choice"].as_str().unwrap())
+                .collect();
+            assert_eq!(offered, ["keep"], "{kind}/{choice}: {p}");
+            let job = f.apply(&p).await;
+            assert_eq!(r3_metadata(&home), foreign, "{kind}/{choice}: {job}");
+            assert_eq!(r3_metadata(&held), frame, "{kind}/{choice}: {job}");
+            assert_eq!(
+                r3_metadata(&held.with_extension("xmp")),
+                edits,
+                "{kind}/{choice}: the sidecar left its frame: {job}"
+            );
+            assert!(!f.archive.join("frame_1.arw").exists(), "{kind}/{choice}");
+            assert!(!f.archive.join("frame_1.xmp").exists(), "{kind}/{choice}");
+            let db = f.state.db.lock().unwrap();
+            assert_eq!(db.journal_entry(id).unwrap().unwrap().status, status);
+            let needle = format!("\"choice\":\"{choice}\"");
+            assert!(
+                db.journal_events(id)
+                    .unwrap()
+                    .iter()
+                    .any(|e| (e.kind == "refused" || e.kind == "kept")
+                        && e.data.as_deref().is_some_and(|d| d.contains(&needle))),
+                "{kind}/{choice}: the decision is not in the structured history"
+            );
+        }
+    }
+}
+
+/// R2-B1, the other half: an interrupted legacy entry whose place is free.
+/// The sidecar the older version carried beside the frame comes back with
+/// it, or neither does — never the frame alone with the entry closed.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_legacy_interrupted_entry_brings_its_frame_back_only_with_its_sidecar() {
+    let f = Fixture::new();
+    let (home, held, id) = legacy_held(&f);
+    f.state
+        .db
+        .lock()
+        .unwrap()
+        .journal_finish(id, pc_db::JournalStatus::Pending, None)
+        .unwrap();
+    let p = f
+        .preview("journal-reconcile", json!({ "journal_id": id }))
+        .await;
+    let job = f.apply(&p).await;
+    let db = f.state.db.lock().unwrap();
+    let status = db.journal_entry(id).unwrap().unwrap().status;
+    if home.exists() {
+        assert_eq!(
+            std::fs::read(home.with_extension("xmp")).unwrap(),
+            b"our edits",
+            "the frame came back without its sidecar: {job}"
+        );
+        assert!(!held.with_extension("xmp").exists(), "{job}");
+    } else {
+        assert!(
+            held.exists() && held.with_extension("xmp").exists(),
+            "{job}"
+        );
+        assert_eq!(status, pc_db::JournalStatus::Pending, "{job}");
+    }
+}
+
+/// R2-B2 across entries (reviewer el-67ku, copied unchanged in substance):
+/// the occupant of the second reviewed conflict moves away while the first
+/// entry is being carried out.
+#[cfg(unix)]
+async fn r3_between_entries(vanish: bool) {
+    let f = Fixture::new();
+    let (run, ids) = {
+        let db = f.state.db.lock().unwrap();
+        let run = db
+            .start_run(&[f.archive.display().to_string()], "test")
+            .unwrap();
+        let mut ids = Vec::new();
+        for name in ["first.arw", "second.arw"] {
+            let home = f.archive.join(name);
+            let held = f.archive.join(format!("held-{name}"));
+            std::fs::write(&held, b"returning frame").unwrap();
+            std::fs::write(&home, b"foreign occupant").unwrap();
+            let m = pc_db::Moved {
+                src: home.display().to_string(),
+                dst: held.display().to_string(),
+                proof: pc_core::proof::Proof::of(&std::fs::metadata(&held).unwrap()),
+            };
+            let id = db
+                .journal_begin(&pc_db::NewJournalEntry {
+                    run_id: run,
+                    op: "organize",
+                    target_id: None,
+                    src: &m.src,
+                    dst: Some(&m.dst),
+                    size: 15,
+                    file_count: 1,
+                    manifest: std::slice::from_ref(&m),
+                })
+                .unwrap();
+            db.journal_finish(id, pc_db::JournalStatus::Done, None)
+                .unwrap();
+            ids.push(id);
+        }
+        (run, ids)
+    };
+    let p = f
+        .preview(
+            "organize-undo",
+            json!({"run_id":run,"choices":{ids[0].to_string():"rename-returning",ids[1].to_string():"rename-returning"}}),
+        )
+        .await;
+    let altered = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let capture = altered.clone();
+    let archive = f.archive.clone();
+    let marker = f.archive.to_string_lossy().into_owned();
+    let _g = pc_apply::race::before_move_under(&marker, move |src, _| {
+        let mut seen = capture.lock().unwrap();
+        if seen.is_none() {
+            let other = if src.file_name().unwrap() == "held-first.arw" {
+                "second.arw"
+            } else {
+                "first.arw"
+            };
+            let home = archive.join(other);
+            let away = archive.join(format!("external-{other}"));
+            if vanish {
+                std::fs::rename(&home, &away)?;
+            } else {
+                std::fs::write(&home, b"ordinary external edit before next entry")?;
+            }
+            let path = if vanish { away } else { home };
+            *seen = Some((other.to_string(), path.clone(), r3_metadata(&path)));
+        }
+        Ok(())
+    });
+    let job = f.apply(&p).await;
+    let seen = altered.lock().unwrap();
+    let (name, foreign, before) = seen.as_ref().unwrap();
+    assert_eq!(r3_metadata(foreign), *before);
+    let held = f.archive.join(format!("held-{name}"));
+    let home = f.archive.join(name);
+    let id = if name == "first.arw" { ids[0] } else { ids[1] };
+    let db = f.state.db.lock().unwrap();
+    let events = db.journal_events(id).unwrap();
+    eprintln!(
+        "BETWEEN_ENTRIES vanish={vanish} JOB={job}; HELD_EXISTS={} HOME_EXISTS={} EVENTS={events:?}",
+        held.exists(),
+        home.exists()
+    );
+    assert!(held.exists(), "{job}");
+    if vanish {
+        assert!(
+            !home.exists(),
+            "a reviewed conflict disappeared during the earlier entry; the next entry returned to its original name instead of refusing: {job}"
+        );
+    }
+    assert!(job.to_string().contains("refresh the preview"), "{job}");
+    assert!(
+        events.iter().any(|e| e.kind == "refused"
+            && e.data
+                .as_deref()
+                .is_some_and(|d| d.contains("\"choice\":\"rename-returning\"")
+                    && d.contains("changed-since-preview"))),
+        "the changed reviewed conflict has no structured choice/refusal event: {events:?}"
+    );
+    assert_eq!(
+        db.journal_entry(id).unwrap().unwrap().status,
+        pc_db::JournalStatus::Done
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_reviewed_conflict_vanished_during_an_earlier_entry_is_refused() {
+    r3_between_entries(true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_reviewed_conflict_changed_during_an_earlier_entry_is_journaled_as_changed() {
+    r3_between_entries(false).await;
+}
+
+/// Contract point 3: a decision carried out is in the entry's structured
+/// history with its outcome, and in the job's result — not only refusals
+/// and keeps.
+#[cfg(unix)]
+#[tokio::test]
+async fn every_carried_out_decision_is_in_the_history_and_the_result() {
+    for (choice, outcome) in [
+        ("replace", "replaced"),
+        ("rename-existing", "renamed-existing"),
+        ("rename-returning", "renamed-returning"),
+    ] {
+        let f = Fixture::new();
+        let (home, _held, id) = proven_held(&f);
+        std::fs::write(&home, b"foreign existing frame").unwrap();
+        let p = f
+            .preview(
+                "journal-undo",
+                json!({"journal_id":id,"choices":{id.to_string():choice}}),
+            )
+            .await;
+        let job = f.apply(&p).await;
+        assert_eq!(job["state"], "done", "{job}");
+        let db = f.state.db.lock().unwrap();
+        let needle = format!("\"outcome\":\"{outcome}\"");
+        assert!(
+            db.journal_events(id).unwrap().iter().any(|e| e
+                .data
+                .as_deref()
+                .is_some_and(|d| d.contains(&needle) && d.contains(choice))),
+            "{choice}: no structured outcome event"
+        );
+        assert!(job.to_string().contains(outcome), "{choice}: {job}");
+    }
+}
