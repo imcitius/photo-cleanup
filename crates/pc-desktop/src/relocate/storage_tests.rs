@@ -679,3 +679,161 @@ async fn links_and_folders_at_genuine_thumbnail_names_survive_reset() {
     assert_eq!(fs::metadata(&outside).unwrap().nlink(), links_before);
     assert_eq!(fs::read_link(&paths[0]).unwrap(), outside);
 }
+
+/// A synthetic 193×137 RGB PNG (stored deflate, no compression), so the real
+/// index job has a picture to decode without any photo or image crate.
+fn synthetic_png() -> Vec<u8> {
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+    fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc32(&body).to_be_bytes());
+    }
+    let (w, h) = (193u32, 137u32);
+    let mut raw = Vec::new();
+    for y in 0..h {
+        raw.push(0u8);
+        for x in 0..w {
+            raw.extend_from_slice(&[
+                (x * 255 / w) as u8,
+                (y * 255 / h) as u8,
+                ((x * 7 + y * 13) % 256) as u8,
+            ]);
+        }
+    }
+    let mut z = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(65_535).collect();
+    for (i, block) in blocks.iter().enumerate() {
+        z.push(u8::from(i + 1 == blocks.len()));
+        let n = block.len() as u16;
+        z.extend_from_slice(&n.to_le_bytes());
+        z.extend_from_slice(&(!n).to_le_bytes());
+        z.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &raw {
+        a = (a + byte as u32) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&w.to_be_bytes());
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    chunk(&mut png, b"IHDR", &ihdr);
+    chunk(&mut png, b"IDAT", &z);
+    chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+/// Run one real index job over a folder holding one synthetic picture and
+/// wait for it to end: (state, error, progress).
+async fn index_once(
+    b: &Bound,
+    p: &crate::Prepared,
+    server: &pc_api::Server,
+) -> (String, String, String) {
+    let archive = b.env.root.join("archive-8923");
+    fs::create_dir_all(&archive).unwrap();
+    fs::write(archive.join("synthetic-8923.png"), synthetic_png()).unwrap();
+    let body = serde_json::json!({"kind": "index", "params": {
+        "roots": [archive], "min_size": 0, "workers": 1, "readers_per_disk": 1}})
+    .to_string();
+    let (status, response) = post(server, "/api/jobs", &body).await;
+    assert_eq!(status, 202, "{response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response).unwrap()["job_id"]
+        .as_i64()
+        .unwrap();
+    let conn = Connection::open(&p.layout.db).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let row: (String, String, String) = conn
+            .query_row(
+                "SELECT state, coalesce(error,''), coalesce(progress,'') FROM jobs WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        if !matches!(row.0.as_str(), "queued" | "running") {
+            return row;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the index job did not end"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// R1 (review el-19kbm): an ordinary file of the user's in the cache folder
+/// — here at the name an earlier version of the store used for its own
+/// record — is neither appended to nor rewritten by a real index job, nor
+/// by the reset after it, and the reset names it among what it kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_foreign_file_in_the_cache_is_not_written_by_indexing_and_is_reported_by_reset() {
+    let b = Bound::new();
+    let p = b.prepared();
+    let server = start(&p).await.unwrap();
+    confirm_started(&b.env.dirs, &p).unwrap();
+    let foreign = p.layout.thumbs.join(".thumbstore-made");
+    fs::write(&foreign, b"foreign notes 8923, not a cache record\n").unwrap();
+    fs::set_permissions(&foreign, fs::Permissions::from_mode(0o600)).unwrap();
+    mark(&foreign);
+    let before = signature(&foreign);
+    let (state, error, _) = index_once(&b, &p, &server).await;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(
+        signature(&foreign),
+        before,
+        "indexing wrote into the foreign file"
+    );
+    let (status, body) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
+    server.shutdown(pc_api::Shutdown::CancelJob).await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        signature(&foreign),
+        before,
+        "the reset changed the foreign file"
+    );
+    assert!(
+        kept_paths(&body).contains(&foreign.display().to_string()),
+        "the reset did not name the foreign file: {body}"
+    );
+}
+
+/// R1, reset only: the foreign file is kept byte for byte and named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_foreign_file_in_the_cache_is_kept_and_named_by_reset() {
+    let b = Bound::new();
+    let p = b.prepared();
+    let server = start(&p).await.unwrap();
+    confirm_started(&b.env.dirs, &p).unwrap();
+    let foreign = p.layout.thumbs.join(".thumbstore-made");
+    fs::write(&foreign, b"foreign notes 8924\n").unwrap();
+    mark(&foreign);
+    let before = signature(&foreign);
+    let (status, body) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
+    server.shutdown(pc_api::Shutdown::CancelJob).await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(signature(&foreign), before);
+    assert!(
+        kept_paths(&body).contains(&foreign.display().to_string()),
+        "the reset did not name the foreign file: {body}"
+    );
+}
