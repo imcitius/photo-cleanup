@@ -136,6 +136,9 @@ pub struct Tally {
     /// or carried into quarantine under an entry of their own. Never
     /// deleted, never replaced.
     pub set_aside: u64,
+    /// Every decision on a taken place and how it ended (el-14vx0), in the
+    /// order they were made — the same that the entries' histories hold.
+    pub decisions: Vec<crate::Decision>,
 }
 
 impl Tally {
@@ -152,6 +155,7 @@ impl Tally {
         self.purged_files += o.purged_files;
         self.purged_bytes += o.purged_bytes;
         self.set_aside += o.set_aside;
+        self.decisions.extend(o.decisions.iter().cloned());
     }
 
     pub fn is_empty(&self) -> bool {
@@ -226,6 +230,20 @@ impl Tally {
                     ["файл", "файла", "файлов"],
                     ["file", "files"]
                 )
+            ));
+        }
+        if !self.decisions.is_empty() {
+            let by: Vec<String> = crate::Outcome::ALL
+                .iter()
+                .filter_map(|o| {
+                    let n = self.decisions.iter().filter(|d| d.outcome == *o).count();
+                    (n > 0).then(|| format!("{} {n}", o.words()))
+                })
+                .collect();
+            parts.push(pc_core::tf!(
+                "решения по занятым местам: {0}",
+                "decisions on taken places: {0}",
+                by.join(", ")
             ));
         }
         if self.files_back > 0 {

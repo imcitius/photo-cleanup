@@ -489,7 +489,7 @@ async fn cli_and_api_render_the_same_retained_outcome() {
 #[tokio::test]
 async fn the_web_offers_the_choice_on_a_taken_place_and_carries_it_out_like_the_cli() {
     let f = Fixture::new();
-    let (home, held, id) = legacy_held(&f);
+    let (home, held, id) = proven_held(&f);
     std::fs::write(&home, b"someone else's frame").unwrap();
 
     let p = f.preview("journal-undo", json!({"journal_id":id})).await;
@@ -537,7 +537,7 @@ async fn the_web_offers_the_choice_on_a_taken_place_and_carries_it_out_like_the_
 #[tokio::test]
 async fn a_file_swapped_in_after_the_preview_is_never_replaced_by_the_job() {
     let f = Fixture::new();
-    let (home, held, id) = legacy_held(&f);
+    let (home, held, id) = proven_held(&f);
     std::fs::write(&home, b"someone else's frame").unwrap();
     let p = f
         .preview(
@@ -572,7 +572,7 @@ async fn a_file_swapped_in_after_the_preview_is_never_replaced_by_the_job() {
 #[tokio::test]
 async fn reviewer_reconcile_conflicts_must_offer_the_same_four_choices() {
     let f = Fixture::new();
-    let (home, held, id) = legacy_held(&f);
+    let (home, held, id) = proven_held(&f);
     {
         let db = f.state.db.lock().unwrap();
         db.journal_finish(id, pc_db::JournalStatus::Pending, None)
@@ -599,7 +599,7 @@ async fn reviewer_reconcile_conflicts_must_offer_the_same_four_choices() {
 #[tokio::test]
 async fn reviewer_api_refuses_a_new_companion_before_setting_existing_unit_aside() {
     let f = Fixture::new();
-    let (home, held, id) = legacy_held(&f);
+    let (home, held, id) = proven_held(&f);
     std::fs::write(&home, b"foreign existing frame").unwrap();
     let p = f
         .preview(
@@ -746,7 +746,7 @@ async fn reviewer_web_mixed_keep_decision_is_structurally_journaled() {
 #[tokio::test]
 async fn a_reconcile_choice_is_carried_out_through_the_job_and_keep_is_written_down() {
     let f = Fixture::new();
-    let (home, held, id) = legacy_held(&f);
+    let (home, held, id) = proven_held(&f);
     {
         let db = f.state.db.lock().unwrap();
         db.journal_finish(id, pc_db::JournalStatus::Pending, None)
@@ -800,7 +800,7 @@ async fn a_reconcile_choice_is_carried_out_through_the_job_and_keep_is_written_d
 #[tokio::test]
 async fn reviewer_replace_is_listed_with_origin_and_undoing_it_preserves_both_units() {
     let f = Fixture::new();
-    let (home, held, id) = legacy_held(&f);
+    let (home, held, id) = proven_held(&f);
     std::fs::write(&home, b"foreign existing frame").unwrap();
     let p = f
         .preview(

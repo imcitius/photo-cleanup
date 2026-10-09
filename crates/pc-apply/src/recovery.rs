@@ -20,8 +20,8 @@
 //! row stays open, the file stays in quarantine, and the refusal names both
 //! paths (director decision, el-usdqi: no name-based recognition). What to
 //! do then — keep it in quarantine, replace, rename either file — is the
-//! user's choice, for such rows and new ones alike ([`crate::conflict`],
-//! el-14vx0).
+//! user's choice ([`crate::conflict`], el-14vx0); for such rows only "keep"
+//! is offered, since nothing proves which file is which.
 
 use anyhow::{bail, Context, Result};
 use pc_core::proof::{Proof, Verdict};
@@ -620,7 +620,7 @@ pub fn undo_with(
     }
     let pairs = pairs_of(&entry, list);
     let (arrived, came) = walk_back(db, journal_id, "undo", &pairs)?;
-    finish(db, &entry, &pairs, arrived, came, Tally::default())
+    finish(db, &entry, &pairs, arrived, came, Tally::default(), None)
 }
 
 /// Record an undo whose files are back: the index follows, and the entry
@@ -633,6 +633,7 @@ pub(crate) fn finish(
     arrived: Vec<crate::bound::Arrived>,
     came: Vec<Moved>,
     earlier: Tally,
+    decided: Option<&pc_db::ConflictNote>,
 ) -> Result<Tally> {
     let journal_id = entry.id;
     let dst = entry.dst.clone().unwrap_or_default();
@@ -686,6 +687,24 @@ pub(crate) fn finish(
     })();
     if let Err(e) = indexed {
         return Err(unrecorded(e, &done));
+    }
+    // The decision on a taken place that brought it back, with its outcome,
+    // written down before the entry closes (el-14vx0).
+    let phase = if entry.status == JournalStatus::Pending {
+        "reconcile"
+    } else {
+        "undo"
+    };
+    if let Some(note) = decided {
+        let kind = note.outcome.as_deref().unwrap_or("done");
+        let text = pc_core::tf!(
+            "выбор «{0}» выполнен",
+            "the choice “{0}” was carried out",
+            note.choice
+        );
+        if let Err(e) = db.journal_event_conflict(journal_id, phase, kind, &text, note) {
+            return Err(unrecorded(e, &done));
+        }
     }
     // An interrupted entry brought back through a conflict choice is a
     // reconciliation, and its history says so.
@@ -755,19 +774,15 @@ pub fn reconcile(db: &Db, journal_id: i64) -> Result<Vec<Item>> {
         .collect())
 }
 
-/// The list an interrupted entry is reconciled from.
+/// The list an interrupted entry is reconciled from: the same as an undo's
+/// ([`list_of`]). A row written before the journal held a list includes
+/// what carries the photograph's name beside it in quarantine — exactly
+/// what the older versions moved with it — so that the photograph never
+/// comes back without its sidecar and the entry is never closed over one
+/// left behind (el-14vx0, R2-B1): the unit comes back whole, or nothing of
+/// it does.
 pub(crate) fn pending_list(entry: &JournalEntry) -> Result<Vec<Moved>> {
-    readable(entry)?;
-    Ok(if entry.manifest.is_empty() {
-        // Written before the journal held a list. One pair is all it knows.
-        let dst = entry.dst.clone().context(pc_core::tr!(
-            "в записи нет пути назначения",
-            "the entry has no destination path"
-        ))?;
-        vec![Moved::new(entry.src.clone(), dst)]
-    } else {
-        entry.manifest.clone()
-    })
+    list_of(entry)
 }
 
 /// A row written without evidence, about to be walked back: the files held

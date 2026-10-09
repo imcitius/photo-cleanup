@@ -304,6 +304,12 @@ pub struct ConflictNote {
     /// The journal entry that set the occupants aside, itself undoable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aside_entry: Option<i64>,
+    /// How the decision ended, on the event that says so: `kept`,
+    /// `replaced`, `renamed-existing`, `renamed-returning`, `refused` or
+    /// `changed-since-preview`. Absent on the progress events written
+    /// before a move (`attempt`, `set-aside`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 /// One event in the history of a journal entry. Appended, never replaced:
@@ -739,8 +745,10 @@ impl Db {
     }
 
     /// [`Db::journal_event`] with the decision on an undo whose place was
-    /// taken ([`ConflictNote`]); an attempt under free names in it is read
-    /// back into [`JournalEntry::returned_as`].
+    /// taken ([`ConflictNote`]); an attempt under free names, written as an
+    /// `attempt` event, is read back into [`JournalEntry::returned_as`] —
+    /// the outcome event that repeats it once it came back is not another
+    /// attempt.
     pub fn journal_event_conflict(
         &self,
         id: i64,
@@ -873,7 +881,8 @@ impl Db {
         }
         let mut st = self.conn.prepare_cached(
             "SELECT data FROM journal_events
-              WHERE journal_id = ?1 AND instr(data, '\"returned_as\"') > 0 ORDER BY id",
+              WHERE journal_id = ?1 AND kind = 'attempt'
+                AND instr(data, '\"returned_as\"') > 0 ORDER BY id",
         )?;
         for row in &mut rows {
             let datas = st

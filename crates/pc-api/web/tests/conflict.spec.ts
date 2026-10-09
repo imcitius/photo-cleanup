@@ -93,14 +93,15 @@ test("a restore whose place is taken keeps the file by default and returns it as
     conflicts.getByRole("heading", { name: "The original place is taken" }),
   ).toBeVisible();
   await expect(conflicts).toContainText(copy);
-  // Nothing to run while the answer is "keep": the file stays where it is.
+  // "Keep" is the default — and a decision that can be confirmed too
+  // (el-14vx0 round 3); here the answer is changed before confirming.
   const keep = conflicts.getByRole("radio", {
     name: "keep it in quarantine, return it by hand later",
   });
   await expect(keep).toBeChecked();
   await expect(
     dialog.getByRole("button", { name: "Restore", exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
 
   await conflicts
     .getByRole("radio", {

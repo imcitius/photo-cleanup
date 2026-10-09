@@ -1184,12 +1184,12 @@ pub fn apply_action(
                 ..Default::default()
             }),
             Err(e) if pc_apply::is_run_stop(&e) => Err(e),
-            Err(e) => {
-                let done = pc_apply::stopped_run(&e)
-                    .map(|s| s.done.clone())
-                    .unwrap_or_default();
-                Ok(ActionResult::refused(format!("{e:#}"), done))
-            }
+            // What it did before refusing, and the decision on a taken
+            // place it met, typed by pc-apply as for the command line.
+            Err(e) => Ok(ActionResult::refused(
+                format!("{e:#}"),
+                pc_apply::outcome_of(&e),
+            )),
         }
     };
     Ok(match a {

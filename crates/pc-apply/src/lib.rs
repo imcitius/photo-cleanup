@@ -33,8 +33,9 @@ mod roots;
 mod unit;
 
 pub use conflict::{
-    conflict_kept, reconcile_conflict, reconcile_reviewed, reviewed_choice, undo_conflict,
-    undo_reviewed, Choice, Conflict, ConflictKept, Occupant, Returning, Reviewed,
+    conflict_kept, outcome_of, reconcile_conflict, reconcile_reviewed, undo_conflict,
+    undo_reviewed, Choice, Conflict, ConflictKept, Decided, Decision, Occupant, Outcome, Returning,
+    Reviewed,
 };
 pub use files::{
     apply, companion_plan, companions, same_picture, ApplyReport, Companion, FileOutcome, Filed,

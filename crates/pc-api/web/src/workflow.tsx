@@ -680,7 +680,12 @@ export function Review({
               </div>
               <Button
                 kind={purge ? "danger" : "primary"}
-                disabled={disabled || !plan.items.length}
+                // A plan of conflicts only — every one of them "keep" —
+                // is a decision too: confirmed, it is written down and
+                // moves nothing (el-14vx0).
+                disabled={
+                  disabled || (!plan.items.length && !plan.conflicts?.length)
+                }
                 onClick={() => {
                   setWord("");
                   setAccepted(false);
@@ -773,6 +778,9 @@ export function Review({
               "puti_naznacheniya_ukazany_v_predprosmotre_esli_sostav_plana_izmen",
             )}
           </p>
+          {!!plan.conflicts?.length && (
+            <p className="muted">{ui.conflictsConfirm}</p>
+          )}
           {purge ? (
             <>
               <Notice tone="error">{ui.purgeWarning}</Notice>

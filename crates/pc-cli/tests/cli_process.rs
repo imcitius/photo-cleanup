@@ -209,6 +209,8 @@ fn a_taken_place_keeps_the_file_without_a_terminal_and_on_conflict_decides_it() 
     );
     assert!(said.contains("kept in quarantine"), "{said}");
     assert!(said.contains(pc_core::QUARANTINE_DIR), "{said}");
+    // The decision is part of the result, in the words the web shows.
+    assert!(said.contains("decisions on taken places: kept 1"), "{said}");
     assert_eq!(
         std::fs::read(&copy).unwrap(),
         b"a newer file under the same name"
@@ -227,6 +229,10 @@ fn a_taken_place_keeps_the_file_without_a_terminal_and_on_conflict_decides_it() 
         "rename-returning",
     ]);
     assert!(said.contains("rename-returning"), "{said}");
+    assert!(
+        said.contains("decisions on taken places: renamed-returning 1"),
+        "{said}"
+    );
     assert_eq!(
         std::fs::read(&copy).unwrap(),
         b"a newer file under the same name"

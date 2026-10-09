@@ -29,11 +29,22 @@
 //! there between the choice and the move — moves nothing and the next name
 //! is tried. A look before the rename only skips names already taken.
 //!
-//! The occupants are bound to the evidence read when the choice was offered
-//! ([`Conflict`]): an occupant replaced or changed since — a foreign file
-//! that appeared after the preview — is refused, never set aside in its
-//! place. And a conflict that was not there when the choice was made gets
-//! the default: it is kept, never replaced.
+//! The preview is binding (el-14vx0, director decision after el-zvg9s): a
+//! choice is made on a conflict as the preview read it — the unit coming
+//! back, by its evidence, and the existing unit with every companion it
+//! had, by theirs — and holds only while that is still what is there.
+//! Immediately before the first move every member is read again; any
+//! difference — something appeared, vanished, changed, was renamed, a
+//! companion more — refuses that unit: nothing of it moves, the refusal is
+//! written down as `changed-since-preview`, and the person is told to
+//! preview again. It never falls back to another choice or another name;
+//! a place that became free since is not a reason to bring the unit back
+//! by an ordinary undo, and a place taken since the preview is not
+//! decided for anyone.
+//!
+//! A unit with any member journaled before evidence was kept is offered
+//! only "keep": nothing proves which file is which, so nothing of it is
+//! moved on a choice.
 //!
 //! Lightroom is never touched (user decision 2026-10-06, invariant 7): when
 //! any file of the conflict is in a live catalogue or on a Lightroom path,
@@ -41,18 +52,25 @@
 //! file is neither renamed nor carried away. A bundle comes back only to its
 //! own place.
 //!
-//! Every decision and its outcome are appended to the entry's history as a
-//! structured event ([`pc_db::ConflictNote`]); a return under free names is
-//! recorded *before* its rename, so a retry after an interruption finds what
-//! already came back there — by its evidence ([`crate::recovery`]). A retry
-//! after a stop between setting the occupants aside and the return finds the
-//! place free and is an ordinary undo.
+//! Every decision and its outcome — kept, replaced, renamed-existing,
+//! renamed-returning, refused, changed-since-preview — is appended to the
+//! entry's history as a structured event ([`pc_db::ConflictNote`] with its
+//! `outcome`), and is part of the typed result ([`Decision`], in
+//! [`Tally::decisions`] or carried by the error, [`outcome_of`]); the
+//! command line and the web render the same. A return under free names is
+//! also recorded *before* its rename, so a retry after an interruption
+//! finds what already came back there — by its evidence
+//! ([`crate::recovery`]). A retry after a stop between setting the
+//! occupants aside and the return finds the place free and is an ordinary
+//! undo.
 
 use anyhow::{anyhow, Context, Result};
 use pc_core::proof::{Kind, Proof};
 use pc_db::{ConflictNote, Db, JournalEntry, JournalStatus, Moved, ReturnedAs};
 use std::fs;
 use std::path::Path;
+
+use crate::outcome::{stopped_run, Halted};
 
 use crate::located::{Told, Way};
 use crate::recovery::{self, Back, Item, Pair, Spot, Standing};
@@ -121,6 +139,146 @@ impl Choice {
     }
 }
 
+/// How a decision on a taken place ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Outcome {
+    /// Left in quarantine, as chosen; nothing moved.
+    Kept,
+    /// The existing unit went to quarantine and this one came home.
+    Replaced,
+    /// The existing unit took a free name and this one came home.
+    RenamedExisting,
+    /// This one came back under a free name; the existing one stayed.
+    RenamedReturning,
+    /// Not carried out — not offered, a member unproven, no free name, a
+    /// move refused; the words say which. Nothing of the unit moved unless
+    /// the result says so.
+    Refused,
+    /// What is there is not what the preview showed; nothing moved, and the
+    /// person is asked to preview again.
+    ChangedSincePreview,
+}
+
+impl Outcome {
+    pub const ALL: [Outcome; 6] = [
+        Outcome::Kept,
+        Outcome::Replaced,
+        Outcome::RenamedExisting,
+        Outcome::RenamedReturning,
+        Outcome::Refused,
+        Outcome::ChangedSincePreview,
+    ];
+
+    /// The word in the journal's structured history.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Kept => "kept",
+            Outcome::Replaced => "replaced",
+            Outcome::RenamedExisting => "renamed-existing",
+            Outcome::RenamedReturning => "renamed-returning",
+            Outcome::Refused => "refused",
+            Outcome::ChangedSincePreview => "changed-since-preview",
+        }
+    }
+
+    /// In words, for a person; the same on the command line and the web.
+    pub fn words(self) -> &'static str {
+        match self {
+            Outcome::Kept => pc_core::tr!("оставлено в карантине", "kept"),
+            Outcome::Replaced => pc_core::tr!("заменено", "replaced"),
+            Outcome::RenamedExisting => {
+                pc_core::tr!("существующий переименован", "renamed-existing")
+            }
+            Outcome::RenamedReturning => {
+                pc_core::tr!("возвращено под свободным именем", "renamed-returning")
+            }
+            Outcome::Refused => pc_core::tr!("отказано", "refused"),
+            Outcome::ChangedSincePreview => pc_core::tr!(
+                "изменилось с предпросмотра — обновите предпросмотр",
+                "changed since the preview — refresh the preview"
+            ),
+        }
+    }
+
+    /// The outcome of carrying out `choice`.
+    fn of(choice: Choice) -> Outcome {
+        match choice {
+            Choice::Keep => Outcome::Kept,
+            Choice::Replace => Outcome::Replaced,
+            Choice::RenameExisting => Outcome::RenamedExisting,
+            Choice::RenameReturning => Outcome::RenamedReturning,
+        }
+    }
+}
+
+/// One decision on a taken place and how it ended: what the typed result
+/// of an undo or a reconciliation carries for it, alongside the event in
+/// the entry's history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    pub journal_id: i64,
+    /// The choice made; `None` when there was none to make — a conflict
+    /// that appeared after a preview that did not show it.
+    pub choice: Option<Choice>,
+    pub outcome: Outcome,
+}
+
+/// An undo or reconciliation that ended in a decision other than a move —
+/// kept, refused, changed since the preview — typed: the decision, and the
+/// words of why.
+#[derive(Debug)]
+pub struct Decided {
+    pub decision: Decision,
+    pub cause: anyhow::Error,
+}
+
+impl std::fmt::Display for Decided {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.cause)
+    }
+}
+
+// No `source()`: the cause is already in the words above.
+impl std::error::Error for Decided {}
+
+fn decided_in(e: &anyhow::Error) -> Option<&Decided> {
+    if let Some(d) = e.chain().find_map(|c| c.downcast_ref::<Decided>()) {
+        return Some(d);
+    }
+    e.downcast_ref::<Halted>()
+        .and_then(|h| decided_in(&h.cause))
+}
+
+/// What an undo or a reconciliation that ended in `e` did, typed: the work
+/// done before it stopped, if any, and the decision on its taken place, if
+/// it met one — for the command line and the web alike.
+pub fn outcome_of(e: &anyhow::Error) -> Tally {
+    let mut t = stopped_run(e).map(|s| s.done.clone()).unwrap_or_default();
+    if let Some(d) = decided_in(e) {
+        if !t.decisions.contains(&d.decision) {
+            t.decisions.push(d.decision.clone());
+        }
+    }
+    t
+}
+
+/// `e`, carrying `d`: kept with the work it reports, if it reports any (a
+/// stop of the run stays one), and typed as [`Decided`] otherwise.
+fn carrying(e: anyhow::Error, d: Decision) -> anyhow::Error {
+    if stopped_run(&e).is_some() || crate::is_run_stop(&e) {
+        let t = Tally {
+            decisions: vec![d],
+            ..Default::default()
+        };
+        return crate::stop_run(e, &t, Route::Restore, Vec::new());
+    }
+    Decided {
+        decision: d,
+        cause: e,
+    }
+    .into()
+}
+
 /// One member of the unit coming back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Returning {
@@ -134,9 +292,9 @@ pub struct Returning {
     pub proof: Option<Proof>,
     /// In such a row, the evidence of what is held at its recorded
     /// quarantine path, read when the choice was offered: a change to it
-    /// while the choice is pending is a different conflict, and it is this
-    /// evidence that is written down and every move is bound to (el-14vx0
-    /// B2). `None` when the journal recorded evidence.
+    /// since is a different conflict. Such a unit is only ever kept, so
+    /// this is part of the snapshot a decision is bound to, never a reason
+    /// to move anything. `None` when the journal recorded evidence.
     pub seen: Option<Proof>,
 }
 
@@ -209,6 +367,18 @@ impl Conflict {
     /// The default's words: where the file stays and where it belongs.
     pub fn kept_words(&self) -> String {
         let r = &self.returning[0];
+        if self.choices == [Choice::Keep] {
+            return pc_core::tf!(
+                "{0}; оставлено в карантине: {1} — место, куда возвращать: {2}. Ничего не \
+                 перенесено, запись остаётся открытой ({3})",
+                "{0}; kept in quarantine: {1} — it belongs at {2}. Nothing was moved and the \
+                 entry stays open ({3})",
+                self.describe(),
+                r.held,
+                r.home,
+                self.limits.join("; ")
+            );
+        }
         pc_core::tf!(
             "{0}; оставлено в карантине: {1} — место, куда возвращать: {2}. Ничего не перенесено, \
              запись остаётся открытой; выберите «заменить» или «переименовать», чтобы вернуть \
@@ -245,6 +415,7 @@ impl Conflict {
                 .collect(),
             returned_as: Vec::new(),
             aside_entry: None,
+            outcome: None,
         }
     }
 }
@@ -267,113 +438,132 @@ impl std::error::Error for ConflictKept {}
 
 /// The kept conflict an undo's error carries, if that is why it refused.
 pub fn conflict_kept(e: &anyhow::Error) -> Option<&ConflictKept> {
-    e.chain().find_map(|c| c.downcast_ref::<ConflictKept>())
+    e.chain()
+        .find_map(|c| c.downcast_ref::<ConflictKept>())
+        .or_else(|| decided_in(e).and_then(|d| conflict_kept(&d.cause)))
 }
 
-/// A choice made on a conflict seen earlier — in the web's preview — and
-/// carried out later. It holds only while the conflict read then is the
-/// conflict read now: the same files coming back, and the same objects, by
-/// their evidence, bearing their places.
+/// A choice made on a conflict seen earlier — in a preview — and carried out
+/// later. It holds only while the conflict read then is the conflict read
+/// now: the same files coming back, and the same objects, by their
+/// evidence, bearing their places.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reviewed {
     pub seen: Conflict,
     pub choice: Choice,
 }
 
-/// The choice to carry out on the conflict `now`, given the one reviewed
-/// for its entry: without one, a conflict found now is kept (it was not
-/// there to be reviewed); with one, a conflict that is no longer the one
-/// reviewed is refused.
-pub fn reviewed_choice(reviewed: Option<&Reviewed>, now: &Conflict) -> Result<Choice> {
-    match reviewed {
-        None => Ok(Choice::Keep),
-        Some(r) if r.seen == *now => Ok(r.choice),
-        Some(_) => Err(anyhow!(pc_core::tf!(
-            "запись {0}: с предпросмотра на исходном месте что-то изменилось; ничего не \
-             перенесено — обновите предпросмотр и выберите снова. Сейчас: {1}",
-            "entry {0}: something changed at the original place since the preview; nothing was \
-             moved — refresh the preview and choose again. Now: {1}",
-            now.journal_id,
-            now.describe()
-        ))),
-    }
-}
-
-/// [`crate::undo`] with a choice reviewed beforehand ([`reviewed_choice`]).
-/// A reviewed "keep" is carried out as such: written down and reported,
-/// and nothing moves even if the place has meanwhile become free (el-14vx0
-/// B4).
+/// [`crate::undo`] bound to a preview (el-14vx0): `reviewed` is the
+/// conflict the preview showed for this entry and the choice made on it,
+/// `None` when the preview showed none. The conflict read now must be
+/// exactly that one — or, without one, there must be none — and the
+/// choice is then carried out; anything else is refused as changed since
+/// the preview, nothing moved and the refusal written down. A reviewed
+/// "keep" is carried out as such: written down and reported.
 pub fn undo_reviewed(db: &Db, journal_id: i64, reviewed: Option<&Reviewed>) -> Result<Tally> {
-    if let Some(r) = reviewed.filter(|r| r.choice == Choice::Keep) {
-        return Err(keep_reviewed(db, journal_id, r));
+    let Some(entry) = db.journal_entry(journal_id)? else {
+        return crate::undo(db, journal_id);
+    };
+    let now = undo_conflict(db, &entry)?;
+    match reviewed {
+        Some(r) => match now {
+            Some(now) if now == r.seen => resolve(db, &entry, now, r.choice),
+            now => Err(changed(db, &entry, Some(r), now.as_ref())),
+        },
+        // None shown, and a conflict now: one that appeared since, and no
+        // one has chosen anything about it.
+        None => crate::undo_with(db, journal_id, &mut |now| {
+            Err(changed(db, &entry, None, Some(now)))
+        }),
     }
-    crate::undo_with(db, journal_id, &mut |now| reviewed_choice(reviewed, now))
 }
 
-/// [`crate::reconcile_undo`] with a choice reviewed beforehand
-/// ([`reviewed_choice`]); a reviewed "keep" as in [`undo_reviewed`].
+/// [`crate::reconcile_undo`] bound to a preview, as [`undo_reviewed`].
 pub fn reconcile_reviewed(
     db: &Db,
     journal_id: i64,
     reviewed: Option<&Reviewed>,
 ) -> Result<recovery::Reconciled> {
-    if let Some(r) = reviewed.filter(|r| r.choice == Choice::Keep) {
-        return Err(keep_reviewed(db, journal_id, r));
+    let Some(entry) = db.journal_entry(journal_id)? else {
+        return recovery::reconcile_undo(db, journal_id);
+    };
+    let now = reconcile_conflict(db, &entry)?;
+    match reviewed {
+        Some(r) => match now {
+            Some(now) if now == r.seen => {
+                let items = recovery::reconcile(db, journal_id)?;
+                let done = resolve(db, &entry, now, r.choice)?;
+                Ok(recovery::Reconciled { items, done })
+            }
+            now => Err(changed(db, &entry, Some(r), now.as_ref())),
+        },
+        None => recovery::reconcile_undo_with(db, journal_id, &mut |now| {
+            Err(changed(db, &entry, None, Some(now)))
+        }),
     }
-    recovery::reconcile_undo_with(db, journal_id, &mut |now| reviewed_choice(reviewed, now))
 }
 
-/// Carry out a reviewed "keep": the decision and its outcome go into the
-/// entry's history as a structured event, the same as a "keep" made on the
-/// command line, and the error is the typed [`ConflictKept`]. Nothing is
-/// moved, whatever is at the place now; a conflict different from the one
-/// reviewed is kept too, and the words say it changed.
-fn keep_reviewed(db: &Db, journal_id: i64, r: &Reviewed) -> anyhow::Error {
-    let entry = match db.journal_entry(journal_id) {
-        Ok(Some(e)) => e,
-        Ok(None) => {
-            return anyhow!(pc_core::tf!(
-                "нет записи журнала {0}",
-                "no journal entry {0}",
-                journal_id
-            ))
+/// The refusal of a unit whose conflict is not the one the preview showed
+/// (`r`, or none): written down with the choice made, the conflict seen and
+/// the conflict now, typed as [`Outcome::ChangedSincePreview`]. Nothing is
+/// moved.
+fn changed(
+    db: &Db,
+    entry: &JournalEntry,
+    r: Option<&Reviewed>,
+    now: Option<&Conflict>,
+) -> anyhow::Error {
+    let then = match r {
+        Some(r) => r.seen.describe(),
+        None => pc_core::tr!("место было свободно", "the place was free").to_string(),
+    };
+    let now_words = match now {
+        Some(c) => c.describe(),
+        None => {
+            let items = if entry.status == JournalStatus::Pending {
+                recovery::reconcile(db, entry.id)
+            } else {
+                recovery::undo_preview(entry)
+            };
+            items
+                .map(|items| recovery::listing(&items))
+                .unwrap_or_else(|e| format!("{e:#}"))
         }
-        Err(e) => return e,
     };
-    let now = match entry.status {
-        JournalStatus::Done => undo_conflict(db, &entry),
-        JournalStatus::Pending => reconcile_conflict(db, &entry),
-        _ => Ok(None),
-    };
-    match now {
-        Ok(Some(now)) if now == r.seen => match resolve(db, &entry, now, Choice::Keep) {
-            Err(e) => e,
-            // A keep never moves anything; resolve says so by its error.
-            Ok(_) => anyhow!("{}", r.seen.kept_words()),
+    let why = pc_core::tf!(
+        "запись {0}: с предпросмотра на исходном месте или в карантине что-то изменилось; \
+         ничего не перенесено — обновите предпросмотр и выберите снова. Было: {1}. Сейчас: {2}",
+        "entry {0}: something changed at the original place or in quarantine since the preview; \
+         nothing was moved — refresh the preview and choose again. Then: {1}. Now: {2}",
+        entry.id,
+        then,
+        now_words
+    );
+    let note = match (r, now) {
+        (Some(r), _) => r.seen.note(r.choice),
+        (None, Some(c)) => {
+            let mut n = c.note(Choice::Keep);
+            n.choice = String::new();
+            n
+        }
+        (None, None) => ConflictNote {
+            choice: String::new(),
+            returning: Vec::new(),
+            occupants: Vec::new(),
+            returned_as: Vec::new(),
+            aside_entry: None,
+            outcome: None,
         },
-        Ok(_) => {
-            let why = pc_core::tf!(
-                "{0}. С предпросмотра на исходном месте или в карантине что-то изменилось; \
-                 выбрано «оставить», и ничего не перенесено",
-                "{0}. Something changed at the original place or in quarantine since the \
-                 preview; “keep” was chosen, and nothing was moved",
-                r.seen.kept_words()
-            );
-            noted(
-                db,
-                &entry,
-                "kept",
-                &why,
-                &r.seen.note(Choice::Keep),
-                ConflictKept {
-                    conflict: r.seen.clone(),
-                    why: why.clone(),
-                }
-                .into(),
-            )
-        }
-        Err(e) => e,
-    }
+    };
+    noted(
+        db,
+        entry,
+        r.map(|r| r.choice),
+        Outcome::ChangedSincePreview,
+        &why,
+        note,
+        anyhow!("{why}"),
+    )
 }
 
 /// The conflict an undo of `entry` would meet now, if its only obstacle is
@@ -537,7 +727,21 @@ pub(crate) fn of(db: &Db, entry: &JournalEntry, pairs: &[Pair]) -> Result<Option
         entry.op.as_str(),
         "quarantine-file" | "organize" | "set-aside"
     );
-    if !file_op {
+    // A member journaled before evidence was kept: nothing proves which
+    // file is which, so the unit is not moved on a choice — only kept
+    // (director decision after el-zvg9s). A unit is never split, so one
+    // such member decides for all of it.
+    if returning.iter().any(|r| r.proof.is_none()) {
+        limits.push(
+            pc_core::tr!(
+                "запись сделана старой версией без доказательств: файлы не переносятся по \
+                 выбору — только «оставить»; верните их вручную",
+                "the entry was written by an older version without evidence: nothing is moved \
+                 on a choice — only “keep”; return the files by hand"
+            )
+            .to_string(),
+        );
+    } else if !file_op {
         limits.push(
             pc_core::tr!(
                 "папка возвращается только на своё место",
@@ -598,17 +802,25 @@ fn occupant(path: &str) -> Option<Occupant> {
     })
 }
 
-/// Add a decision to the entry's history; if the journal cannot take it,
-/// `e` says so as well.
+/// Add a decision that moved nothing to the entry's history — `kept`, or
+/// `refused` with its outcome — and type `e` with it ([`Decided`]); if the
+/// journal cannot take it, `e` says so as well.
 fn noted(
     db: &Db,
     entry: &JournalEntry,
-    kind: &str,
+    choice: Option<Choice>,
+    outcome: Outcome,
     text: &str,
-    note: &ConflictNote,
+    mut note: ConflictNote,
     e: anyhow::Error,
 ) -> anyhow::Error {
-    match db.journal_event_conflict(entry.id, phase_of(entry), kind, text, note) {
+    note.outcome = Some(outcome.as_str().to_string());
+    let kind = if outcome == Outcome::Kept {
+        "kept"
+    } else {
+        "refused"
+    };
+    let e = match db.journal_event_conflict(entry.id, phase_of(entry), kind, text, &note) {
         Ok(()) => e,
         Err(pe) => e.context(pc_core::tf!(
             "журнал не принял запись об этом ({0}); запись {1} не дополнена",
@@ -616,11 +828,21 @@ fn noted(
             format!("{pe:#}"),
             entry.id
         )),
-    }
+    };
+    carrying(
+        e,
+        Decision {
+            journal_id: entry.id,
+            choice,
+            outcome,
+        },
+    )
 }
 
 /// Carry out `choice` on the conflict `c` an undo or a reconciliation of
-/// `entry` met.
+/// `entry` met. However it ends, the decision is in the entry's history
+/// with its outcome and in the typed result: the [`Tally`] of a choice
+/// carried out, the error ([`outcome_of`]) of any other.
 pub(crate) fn resolve(db: &Db, entry: &JournalEntry, c: Conflict, choice: Choice) -> Result<Tally> {
     if !c.choices.contains(&choice) {
         let why = pc_core::tf!(
@@ -637,9 +859,10 @@ pub(crate) fn resolve(db: &Db, entry: &JournalEntry, c: Conflict, choice: Choice
         return Err(noted(
             db,
             entry,
-            "refused",
+            Some(choice),
+            Outcome::Refused,
             &why,
-            &c.note(choice),
+            c.note(choice),
             anyhow!("{why}"),
         ));
     }
@@ -649,9 +872,10 @@ pub(crate) fn resolve(db: &Db, entry: &JournalEntry, c: Conflict, choice: Choice
         return Err(noted(
             db,
             entry,
-            "kept",
+            Some(choice),
+            Outcome::Kept,
             &why,
-            &note,
+            note,
             ConflictKept {
                 conflict: c,
                 why: why.clone(),
@@ -664,22 +888,48 @@ pub(crate) fn resolve(db: &Db, entry: &JournalEntry, c: Conflict, choice: Choice
     // its evidence, the existing frame with every companion it has now —
     // and anything different from what the choice was made on refuses it,
     // nothing moved (el-14vx0 B1, B2).
-    let (entry, list) = match again(db, entry, &c) {
+    let (fresh, list) = match again(db, entry, &c) {
         Ok(x) => x,
         Err(why) => {
             return Err(noted(
                 db,
                 entry,
-                "refused",
+                Some(choice),
+                Outcome::ChangedSincePreview,
                 &why,
-                &c.note(choice),
+                c.note(choice),
                 anyhow!("{why}"),
             ))
         }
     };
-    match choice {
-        Choice::RenameReturning => returning_renamed(db, &entry, list, &c),
-        _ => aside_then_back(db, &entry, list, &c, choice),
+    let carried = match choice {
+        Choice::RenameReturning => returning_renamed(db, &fresh, list, &c),
+        _ => aside_then_back(db, &fresh, list, &c, choice),
+    };
+    match carried {
+        Ok(mut done) => {
+            done.decisions.push(Decision {
+                journal_id: entry.id,
+                choice: Some(choice),
+                outcome: Outcome::of(choice),
+            });
+            Ok(done)
+        }
+        Err(e) if decided_in(&e).is_some() => Err(e),
+        // Refused on the way — a move, the journal: written down as this
+        // decision's outcome, with the words of what happened.
+        Err(e) => {
+            let why = format!("{e:#}");
+            Err(noted(
+                db,
+                entry,
+                Some(choice),
+                Outcome::Refused,
+                &why,
+                c.note(choice),
+                e,
+            ))
+        }
     }
 }
 
@@ -692,10 +942,12 @@ fn again(
 ) -> std::result::Result<(JournalEntry, Vec<Moved>), String> {
     let changed = |now: String| {
         pc_core::tf!(
-            "запись {0}: пока делался выбор, на исходном месте или в карантине что-то \
-             изменилось; ничего не перенесено — выберите снова. Было: {1}. Сейчас: {2}",
-            "entry {0}: something changed at the original place or in quarantine while the \
-             choice was being made; nothing was moved — choose again. Then: {1}. Now: {2}",
+            "запись {0}: с тех пор как был показан выбор, на исходном месте или в карантине \
+             что-то изменилось; ничего не перенесено — обновите предпросмотр и выберите снова. \
+             Было: {1}. Сейчас: {2}",
+            "entry {0}: something changed at the original place or in quarantine since the \
+             choice was shown; nothing was moved — refresh the preview and choose again. \
+             Then: {1}. Now: {2}",
             c.journal_id,
             c.describe(),
             now
@@ -728,26 +980,6 @@ fn again(
         }
         Err(e) => Err(changed(format!("{e:#}"))),
     }
-}
-
-/// A row written without evidence: what is held at its recorded quarantine
-/// paths is what it has. The evidence read when the choice was offered —
-/// and found unchanged just now — is written down before anything moves
-/// (el-1y8uo B4), and every move is bound to it: a file changed after that
-/// reading is refused, not carried. Rows with evidence are left as they are.
-fn adopt_seen(db: &Db, entry: &JournalEntry, list: &mut [Moved], c: &Conflict) -> Result<()> {
-    let mut adopted = false;
-    for m in list.iter_mut().filter(|m| m.proof.is_none()) {
-        if let Some(r) = c.returning.iter().find(|r| r.home == m.src) {
-            m.proof = r.seen.clone();
-            adopted |= m.proof.is_some();
-        }
-    }
-    if adopted {
-        db.journal_record_manifest(entry.id, list)?;
-    }
-    // Anything the conflict did not cover gets the ordinary adoption.
-    recovery::adopt_held_evidence(db, entry.id, list)
 }
 
 /// Every member of the unit coming back proven where it is held, by its
@@ -795,11 +1027,10 @@ fn newcomers(c: &Conflict) -> Vec<String> {
 fn returning_renamed(
     db: &Db,
     entry: &JournalEntry,
-    mut list: Vec<Moved>,
+    list: Vec<Moved>,
     c: &Conflict,
 ) -> Result<Tally> {
     let id = entry.id;
-    adopt_seen(db, entry, &mut list, c)?;
     let base = recovery::pairs_of(entry, list);
     let s = stem(&c.returning[0].home);
     for n in 1..=MAX_SUFFIX {
@@ -836,9 +1067,10 @@ fn returning_renamed(
             return Err(noted(
                 db,
                 entry,
-                "refused",
+                Some(Choice::RenameReturning),
+                Outcome::Refused,
                 &why,
-                &c.note(Choice::RenameReturning),
+                c.note(Choice::RenameReturning),
                 anyhow!("{why}"),
             ));
         }
@@ -861,7 +1093,16 @@ fn returning_renamed(
         db.journal_event_conflict(id, phase_of(entry), "attempt", &text, &note)?;
         match recovery::move_back(&pairs) {
             Back::Done(arrived, came) => {
-                return recovery::finish(db, entry, &pairs, arrived, came, Tally::default())
+                note.outcome = Some(Outcome::RenamedReturning.as_str().to_string());
+                return recovery::finish(
+                    db,
+                    entry,
+                    &pairs,
+                    arrived,
+                    came,
+                    Tally::default(),
+                    Some(&note),
+                );
             }
             Back::Failed(Unit::Refused(e)) if crate::is_taken(&e) => continue,
             Back::Failed(Unit::PutBack(pb))
@@ -885,9 +1126,10 @@ fn returning_renamed(
     Err(noted(
         db,
         entry,
-        "refused",
+        Some(Choice::RenameReturning),
+        Outcome::Refused,
         &why,
-        &c.note(Choice::RenameReturning),
+        c.note(Choice::RenameReturning),
         anyhow!("{why}"),
     ))
 }
@@ -898,13 +1140,12 @@ fn returning_renamed(
 fn aside_then_back(
     db: &Db,
     entry: &JournalEntry,
-    mut list: Vec<Moved>,
+    list: Vec<Moved>,
     c: &Conflict,
     choice: Choice,
 ) -> Result<Tally> {
     let id = entry.id;
     let phase = phase_of(entry);
-    adopt_seen(db, entry, &mut list, c)?;
     // The whole unit coming back is proven by its evidence before the
     // existing one is touched: a unit that could not come back must not
     // have displaced anything (el-14vx0 B2).
@@ -920,9 +1161,10 @@ fn aside_then_back(
         return Err(noted(
             db,
             entry,
-            "refused",
+            Some(choice),
+            Outcome::Refused,
             &why,
-            &c.note(choice),
+            c.note(choice),
             anyhow!("{why}"),
         ));
     }
@@ -930,7 +1172,15 @@ fn aside_then_back(
         Ok(x) => x,
         Err(e) => {
             let why = format!("{e:#}");
-            return Err(noted(db, entry, "refused", &why, &c.note(choice), e));
+            return Err(noted(
+                db,
+                entry,
+                Some(choice),
+                Outcome::Refused,
+                &why,
+                c.note(choice),
+                e,
+            ));
         }
     };
     let done = Tally {
@@ -973,7 +1223,15 @@ fn aside_then_back(
             new.join("; "),
             c.returning[0].held
         );
-        let e = noted(db, entry, "refused", &why, &note, anyhow!("{why}"));
+        let e = noted(
+            db,
+            entry,
+            Some(choice),
+            Outcome::Refused,
+            &why,
+            note,
+            anyhow!("{why}"),
+        );
         return Err(stop_run(e, &done, Route::Restore, Vec::new()));
     }
     let entry = db
@@ -981,7 +1239,10 @@ fn aside_then_back(
         .with_context(|| pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", id))?;
     let pairs = recovery::pairs_of(&entry, list);
     match recovery::walk_back(db, id, phase, &pairs) {
-        Ok((arrived, came)) => recovery::finish(db, &entry, &pairs, arrived, came, done),
+        Ok((arrived, came)) => {
+            note.outcome = Some(Outcome::of(choice).as_str().to_string());
+            recovery::finish(db, &entry, &pairs, arrived, came, done, Some(&note))
+        }
         // What was set aside stays set aside, under its own undoable entry;
         // asking again brings this one back once its place is free.
         Err(e) => Err(stop_run(e, &done, Route::Restore, Vec::new())),

@@ -555,9 +555,9 @@ fn walk_run(
                 return Err(crate::stop_run(err, &back, crate::Route::Restore, failed));
             }
             Err(err) => {
-                if let Some(part) = crate::stopped_run(&err) {
-                    back.add(&part.done);
-                }
+                // What it did before refusing, and the decision on its
+                // taken place, if it met one (el-14vx0).
+                back.add(&crate::outcome_of(&err));
                 failed.push(format!("{} — {err:#}", e.src));
             }
         }

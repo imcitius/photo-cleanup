@@ -383,12 +383,16 @@ fn a_foreign_file_that_appears_after_the_preview_is_refused_not_replaced() {
             .unwrap();
     assert_eq!(ops, 1, "nothing was set aside");
 
-    // No conflict when it was reviewed, one now: kept, never replaced.
+    // No conflict when it was reviewed, one now: refused as changed since
+    // the preview — nothing decided for anyone, never replaced.
     let b = archive();
     let (id, home, xmp) = quarantined(&b, "IMG.CR2");
     taken(&home, &xmp);
     let err = crate::undo_reviewed(&b.db, id, None).unwrap_err();
-    assert!(crate::conflict_kept(&err).is_some(), "{err:#}");
+    let decided = crate::outcome_of(&err).decisions;
+    assert_eq!(decided.len(), 1, "{err:#}");
+    assert_eq!(decided[0].outcome, crate::Outcome::ChangedSincePreview);
+    assert_eq!(decided[0].choice, None);
     assert_eq!(fs::read(&home).unwrap(), THEIRS);
     assert_eq!(fs::read(q(&home)).unwrap(), OURS);
 }
@@ -491,6 +495,7 @@ fn a_return_under_free_names_interrupted_after_its_frame_finishes_on_retry() {
             })
             .collect(),
         aside_entry: None,
+        outcome: None,
     };
     a.db.journal_event_conflict(id, "undo", "attempt", "", &note)
         .unwrap();
@@ -526,6 +531,7 @@ fn a_stranger_at_a_recorded_free_name_is_not_taken_for_the_frame() {
             to: s(&one),
         }],
         aside_entry: None,
+        outcome: None,
     };
     a.db.journal_event_conflict(id, "undo", "attempt", "", &note)
         .unwrap();
@@ -537,48 +543,6 @@ fn a_stranger_at_a_recorded_free_name_is_not_taken_for_the_frame() {
     assert!(crate::conflict_kept(&err).is_some(), "{err:#}");
     assert_eq!(fs::read(q(&home)).unwrap(), OURS);
     assert_eq!(status(&a.db, id), JournalStatus::Done);
-}
-
-#[test]
-fn a_row_without_evidence_offers_the_choice_and_records_evidence_before_it_moves() {
-    let a = archive();
-    let home = a.dir.join("old.jpg");
-    let held = q(&home);
-    fs::create_dir_all(held.parent().unwrap()).unwrap();
-    fs::write(&held, OURS).unwrap();
-    fs::write(&home, THEIRS).unwrap();
-    let id =
-        a.db.journal_begin(&pc_db::NewJournalEntry {
-            run_id: a.run,
-            op: "quarantine-file",
-            target_id: None,
-            src: &s(&home),
-            dst: Some(&s(&held)),
-            size: OURS.len() as i64,
-            file_count: 1,
-            manifest: &[],
-        })
-        .unwrap();
-    a.db.journal_finish(id, JournalStatus::Done, None).unwrap();
-
-    // The file at home is never taken for the one that left: a conflict.
-    let e = a.db.journal_entry(id).unwrap().unwrap();
-    let c = crate::undo_conflict(&a.db, &e)
-        .unwrap()
-        .expect("a conflict");
-    assert_eq!(c.returning[0].proof, None);
-    assert!(crate::undo(&a.db, id).is_err());
-
-    crate::undo_with(&a.db, id, &mut with(Choice::RenameReturning)).unwrap();
-
-    assert_eq!(fs::read(&home).unwrap(), THEIRS);
-    assert_eq!(fs::read(a.dir.join("old_1.jpg")).unwrap(), OURS);
-    let e = a.db.journal_entry(id).unwrap().unwrap();
-    assert!(
-        e.manifest[0].proof.is_some(),
-        "evidence recorded before the move"
-    );
-    assert_eq!(e.status, JournalStatus::Undone);
 }
 
 #[test]
@@ -860,18 +824,16 @@ fn a_reviewed_replace_on_reconcile_sets_the_existing_unit_aside_first() {
 }
 
 /// el-14vx0 B4. "Keep", once chosen and confirmed, is carried out as such:
-/// written down and reported, and nothing comes back even though the place
-/// has meanwhile become free.
+/// written down and typed in the result, and nothing moves. (Once the
+/// place has become free, the conflict is no longer the one reviewed: that
+/// is refused as changed since the preview, below.)
 #[test]
-fn a_reviewed_keep_moves_nothing_even_once_the_place_is_free() {
+fn a_reviewed_keep_is_carried_out_written_down_and_typed() {
     let a = archive();
     let (id, home, xmp) = quarantined(&a, "IMG.CR2");
     taken(&home, &xmp);
     let entry = a.db.journal_entry(id).unwrap().unwrap();
     let seen = crate::undo_conflict(&a.db, &entry).unwrap().unwrap();
-    // The other program moves its files away before the job runs.
-    fs::rename(&home, a.dir.join("theirs.CR2")).unwrap();
-    fs::rename(&xmp, a.dir.join("theirs.xmp")).unwrap();
 
     let e = crate::undo_reviewed(
         &a.db,
@@ -884,13 +846,23 @@ fn a_reviewed_keep_moves_nothing_even_once_the_place_is_free() {
     .unwrap_err();
 
     assert!(crate::conflict_kept(&e).is_some(), "{e:#}");
-    assert!(!home.exists() && !xmp.exists());
+    let decided = crate::outcome_of(&e).decisions;
+    assert_eq!(
+        decided,
+        [crate::Decision {
+            journal_id: id,
+            choice: Some(Choice::Keep),
+            outcome: crate::Outcome::Kept,
+        }]
+    );
+    assert_eq!(fs::read(&home).unwrap(), THEIRS);
     assert_eq!(fs::read(q(&home)).unwrap(), OURS);
     assert_eq!(fs::read(q(&xmp)).unwrap(), OUR_EDITS);
     assert_eq!(status(&a.db, id), JournalStatus::Done);
-    assert!(events(&a.db, id)
-        .iter()
-        .any(|(p, k, d)| p == "undo" && k == "kept" && d.contains("\"choice\":\"keep\"")));
+    assert!(events(&a.db, id).iter().any(|(p, k, d)| p == "undo"
+        && k == "kept"
+        && d.contains("\"choice\":\"keep\"")
+        && d.contains("\"outcome\":\"kept\"")));
 }
 
 // ---- el-14vx0 round 3: the preview is binding (rejection el-zvg9s) --------
@@ -1049,7 +1021,11 @@ fn a_carried_out_choice_is_written_down_with_its_outcome() {
         let (id, home, xmp) = quarantined(&a, "IMG.CR2");
         taken(&home, &xmp);
         let r = reviewed_now(&a, id, choice);
-        crate::undo_reviewed(&a.db, id, Some(&r)).unwrap();
+        let done = crate::undo_reviewed(&a.db, id, Some(&r)).unwrap();
+        assert_eq!(done.decisions.len(), 1, "{choice:?}");
+        assert_eq!(done.decisions[0].choice, Some(choice));
+        assert_eq!(done.decisions[0].outcome.as_str(), outcome);
+        assert!(done.summary().contains(outcome), "{}", done.summary());
         let needle = format!("\"outcome\":\"{outcome}\"");
         assert!(
             events(&a.db, id)

@@ -1104,6 +1104,12 @@ fn cmd_plan(
 /// entries the database could not complete, which are named as pending.
 fn print_stop(e: &anyhow::Error) {
     let Some(stop) = pc_apply::stopped_run(e) else {
+        // Nothing moved; the decision on a taken place it met, if any, is
+        // part of the result — the same words the web shows (el-14vx0).
+        let decided = pc_apply::outcome_of(e);
+        if !decided.is_empty() {
+            println!("\n{}.", decided.summary());
+        }
         return;
     };
     let what = match stop.route {
