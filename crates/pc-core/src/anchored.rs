@@ -156,6 +156,29 @@ impl Dir {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
+    /// Open `name` for appending, making it with `mode` if it is not there;
+    /// a link at the name is refused, never followed. The caller checks
+    /// what it opened (`fstat`) before writing.
+    pub fn open_append(&self, name: &str, mode: u32) -> io::Result<File> {
+        let c = cname(name)?;
+        // SAFETY: valid descriptor and name; the descriptor is owned below.
+        let fd = cvt(unsafe {
+            libc::openat(
+                self.fd.as_raw_fd(),
+                c.as_ptr(),
+                libc::O_WRONLY
+                    | libc::O_APPEND
+                    | libc::O_CREAT
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+                mode as libc::c_uint,
+            )
+        })?;
+        // SAFETY: a fresh descriptor nobody else owns.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
     /// Open an existing plain entry at `name` for reading (and writing),
     /// refusing a symlink at the name.
     pub fn open_file(&self, name: &str, write: bool) -> io::Result<File> {

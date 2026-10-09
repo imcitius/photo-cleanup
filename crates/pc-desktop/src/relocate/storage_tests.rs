@@ -238,9 +238,20 @@ async fn an_ordinary_reset_restart_and_recovery_work_on_the_bound_folder() {
     let p = b.prepared();
     let server = start(&p).await.unwrap();
     confirm_started(&b.env.dirs, &p).unwrap();
+    // A thumbnail the store writes on the bound folder goes; the one the
+    // move copied (new inode, no record of its making) stays and is named.
+    let store = pc_core::ThumbStore::bound(&p.layout.thumbs, p.storage_binding().unwrap());
+    let key = format!("5e{}", "1".repeat(30));
+    store.put_at(&key, b"own thumbnail 2417").unwrap();
     let (status, body) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("\"thumbs_removed\":1"), "{body}");
+    assert!(body.contains("\"thumbs_kept\":1"), "{body}");
+    assert!(store.get(&key).is_none(), "{body}");
+    assert_eq!(
+        fs::read(p.layout.thumbs.join(THUMB)).unwrap(),
+        vec![7u8; 5_123]
+    );
     p.verify_binding().unwrap();
     server.shutdown(pc_api::Shutdown::CancelJob).await.unwrap();
     // Recovery: the same prepared folder and guard, started again.
@@ -378,29 +389,37 @@ fn a_linked_source_file_is_refused_before_anything_is_written() {
     }
 }
 
-/// C2 (el-5x1uh): a reset on the genuine bound cache takes only what the
-/// cache itself wrote. Somebody's file at the top, a folder of somebody's,
-/// a file under a foreign name in a fan-out folder and a link under a
-/// thumbnail's name all stay, with their bytes, and the reply counts them.
+/// C2 (el-5x1uh, B1 of review el-bdi66): a reset on the genuine bound
+/// cache takes only what the store itself wrote and recorded. Somebody's
+/// file at the top, a folder of somebody's, a foreign name and a link under
+/// a thumbnail's name in a fan-out folder the store made, and the whole
+/// fan-out folder the move copied (no record of its making) all stay, with
+/// their bytes, and the reply counts and names them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reset_takes_only_the_caches_own_thumbnails_and_names_the_rest() {
     let b = Bound::new();
     let p = b.prepared();
     let thumbs = p.layout.thumbs.clone();
+    let store = pc_core::ThumbStore::bound(&thumbs, p.storage_binding().unwrap());
+    let key = format!("5e11{}", "2".repeat(28));
+    store.put_at(&key, b"own thumbnail 3918").unwrap();
     let outside = b.env.root.join("outside-photo-3917.jpg");
     fs::write(&outside, b"outside photo 3917").unwrap();
     fs::write(thumbs.join("notes-1204.txt"), b"notes 1204").unwrap();
     fs::create_dir(thumbs.join("album")).unwrap();
     fs::write(thumbs.join("album/IMG_5521.JPG"), b"album photo 5521").unwrap();
-    fs::write(thumbs.join("ab/cd/IMG_7730.JPG"), b"foreign 7730").unwrap();
-    let link = thumbs.join("ab/cd/abcd99999999999999999999999999aa.jpg");
+    fs::write(thumbs.join("5e/11/IMG_7730.JPG"), b"foreign 7730").unwrap();
+    let link = thumbs.join("5e/11/5e1199999999999999999999999999aa.jpg");
     symlink(&outside, &link).unwrap();
     let planted = [
         thumbs.join("notes-1204.txt"),
         thumbs.join("album"),
         thumbs.join("album/IMG_5521.JPG"),
-        thumbs.join("ab/cd/IMG_7730.JPG"),
+        thumbs.join("5e/11/IMG_7730.JPG"),
         link.clone(),
+        thumbs.join("ab"),
+        thumbs.join("ab/cd"),
+        thumbs.join(THUMB),
     ];
     for f in &planted {
         if f != &link {
@@ -414,15 +433,16 @@ async fn a_reset_takes_only_the_caches_own_thumbnails_and_names_the_rest() {
     assert_eq!(status, 200, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["thumbs_removed"], 1, "{body}");
-    // notes, album (one entry, not walked into), the foreign name, the link.
-    assert_eq!(v["thumbs_kept"], 4, "{body}");
+    // notes, album and ab (one entry each, not walked into), the foreign
+    // name, the link.
+    assert_eq!(v["thumbs_kept"], 5, "{body}");
     assert_eq!(
         v["thumbs_kept_examples"].as_array().unwrap().len(),
-        4,
+        5,
         "{body}"
     );
     assert!(
-        !thumbs.join(THUMB).exists(),
+        store.get(&key).is_none(),
         "the cache's own thumbnail stayed"
     );
     let after: Vec<_> = planted.iter().map(|f| signature(f)).collect();

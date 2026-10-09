@@ -496,8 +496,9 @@ pub async fn reset(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Res
         // as they were, and the replacement keeps every file.
         st.thumbs.confirm()?;
         db.reset_index()?;
-        // Only the cache's own files go; anything else found in it stays
-        // and is named here (el-5x1uh C2).
+        // Only what the cache recorded making when it made it goes; anything
+        // else found in it — however it is named — stays and is named here
+        // (el-5x1uh C2, B1/B2 of review el-bdi66).
         let cleared = st.thumbs.clear()?;
         for (path, why) in &cleared.examples {
             tracing::warn!(path = %path.display(), %why, "kept in the thumbnail cache");
