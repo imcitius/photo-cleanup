@@ -440,6 +440,43 @@ pub enum Seen {
 }
 
 impl Seen {
+    /// Whether `now` is still what this preview read: equal in every member
+    /// on either side, every place, every choice — except that a file
+    /// beside the unit that is not part of it may have gone (another
+    /// entry's sidecar of the same name, carried home by that entry's own
+    /// undo a moment before). One that appeared, or changed, is a
+    /// difference: it may be this frame's (R3-B1).
+    pub fn holds(&self, now: &Seen) -> bool {
+        fn within(now: &[Occupant], seen: &[Occupant]) -> bool {
+            now.iter().all(|n| seen.contains(n))
+        }
+        match (self, now) {
+            (
+                Seen::Free {
+                    journal_id: a,
+                    places: pa,
+                    beside: ba,
+                },
+                Seen::Free {
+                    journal_id: b,
+                    places: pb,
+                    beside: bb,
+                },
+            ) => a == b && pa == pb && within(bb, ba),
+            (Seen::Taken(a), Seen::Taken(b)) => {
+                within(&b.beside, &a.beside)
+                    && Conflict {
+                        beside: Vec::new(),
+                        ..a.clone()
+                    } == Conflict {
+                        beside: Vec::new(),
+                        ..b.clone()
+                    }
+            }
+            (a, b) => a == b,
+        }
+    }
+
     /// The journal entry this reading is of.
     pub fn journal_id(&self) -> i64 {
         match self {
@@ -584,6 +621,11 @@ fn not_offered(entry: &JournalEntry) -> Held {
 /// anything else is refused as changed since the preview, nothing moved and
 /// the refusal written down.
 pub fn undo_reviewed(db: &Db, journal_id: i64, reviewed: Option<&Reviewed>) -> Result<Tally> {
+    if let Some(entry) = db.journal_entry(journal_id)? {
+        if !recovery::undo_offered(&entry) {
+            return Err(no_longer(db, &entry, reviewed, journal_id, true));
+        }
+    }
     let entry = recovery::undoable(db, journal_id)?;
     let now = seen_of(&entry)?;
     carry(db, &entry, reviewed, now)
@@ -595,11 +637,40 @@ pub fn reconcile_reviewed(
     journal_id: i64,
     reviewed: Option<&Reviewed>,
 ) -> Result<recovery::Reconciled> {
+    if let Some(entry) = db.journal_entry(journal_id)? {
+        if entry.status != JournalStatus::Pending {
+            return Err(no_longer(db, &entry, reviewed, journal_id, false));
+        }
+    }
     let entry = recovery::reconcilable(db, journal_id)?;
     let items = recovery::reconcile(db, journal_id)?;
     let now = seen_of(&entry)?;
     let done = carry(db, &entry, reviewed, now)?;
     Ok(recovery::Reconciled { items, done })
+}
+
+/// An entry no longer in the state its undo (`undo`) or reconciliation
+/// needs. If the preview read it so too, this is the ordinary refusal; if
+/// the preview read it otherwise — it was finished, or interrupted, then —
+/// it changed since, and that is written down and typed like any other
+/// change.
+fn no_longer(
+    db: &Db,
+    entry: &JournalEntry,
+    reviewed: Option<&Reviewed>,
+    journal_id: i64,
+    undo: bool,
+) -> anyhow::Error {
+    let now = Seen::Held(not_offered(entry));
+    if reviewed.is_some_and(|r| !r.seen.holds(&now)) {
+        return changed(db, entry, reviewed, &now);
+    }
+    let e = if undo {
+        recovery::undoable(db, journal_id).err()
+    } else {
+        recovery::reconcile(db, journal_id).err()
+    };
+    e.unwrap_or_else(|| anyhow!("{}", now.words()))
 }
 
 /// An undo of `journal_id` as read now, nothing chosen: what
@@ -623,7 +694,7 @@ pub(crate) fn reconcile_now(db: &Db, journal_id: i64) -> Result<recovery::Reconc
 
 /// Carry out what was reviewed on `entry`, which reads `now` as `now`.
 fn carry(db: &Db, entry: &JournalEntry, reviewed: Option<&Reviewed>, now: Seen) -> Result<Tally> {
-    let Some(r) = reviewed.filter(|r| r.seen == now) else {
+    let Some(r) = reviewed.filter(|r| r.seen.holds(&now)) else {
         return Err(changed(db, entry, reviewed, &now));
     };
     match now {

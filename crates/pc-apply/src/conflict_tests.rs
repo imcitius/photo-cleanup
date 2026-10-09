@@ -950,3 +950,88 @@ mod review_round3 {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
+
+/// A file beside the unit that is not part of it, there at the preview and
+/// gone by the time the job reaches the entry — another entry's sidecar of
+/// the same name, carried home by that entry's own undo — is no reason to
+/// refuse: nothing of it was ever to move. One that appears is (R3-B1).
+#[test]
+fn a_neighbour_that_left_since_the_preview_does_not_hold_the_unit_back() {
+    let a = archive();
+    let (id, home, _xmp) = quarantined(&a, "IMG.CR2");
+    let neighbour = q(&home).with_extension("aae");
+    fs::write(
+        &neighbour,
+        b"another entry's edits, there before the preview",
+    )
+    .unwrap();
+    let r = reviewed_now(&a, id, Choice::Keep);
+    match &r.seen {
+        Seen::Free { beside, .. } => assert_eq!(beside.len(), 1, "{:?}", r.seen),
+        other => panic!("not free: {other:?}"),
+    }
+    fs::rename(&neighbour, a.dir.join("IMG.aae")).unwrap();
+
+    let done = crate::undo_reviewed(&a.db, id, Some(&r)).unwrap();
+
+    assert_eq!(done.files_back, 2);
+    assert_eq!(fs::read(&home).unwrap(), OURS);
+    assert_eq!(
+        fs::read(a.dir.join("IMG.aae")).unwrap(),
+        b"another entry's edits, there before the preview"
+    );
+    assert_eq!(status(&a.db, id), JournalStatus::Undone);
+}
+
+/// The other way round: a neighbour there at the preview stays where it
+/// is, and the unit comes back without it — as before el-14vx0 — while one
+/// that changed since is a different reading.
+#[test]
+fn a_neighbour_seen_at_the_preview_stays_and_one_changed_since_refuses() {
+    for changed in [false, true] {
+        let a = archive();
+        let (id, home, _xmp) = quarantined(&a, "IMG.CR2");
+        let neighbour = q(&home).with_extension("aae");
+        fs::write(&neighbour, b"there before the preview").unwrap();
+        let r = reviewed_now(&a, id, Choice::Keep);
+        if changed {
+            fs::write(&neighbour, b"edited after the preview, longer").unwrap();
+        }
+        let result = crate::undo_reviewed(&a.db, id, Some(&r));
+        if changed {
+            let e = result.unwrap_err();
+            assert!(format!("{e:#}").contains("preview"), "{e:#}");
+            assert!(!home.exists());
+            assert!(q(&home).exists());
+        } else {
+            result.unwrap();
+            assert_eq!(fs::read(&home).unwrap(), OURS);
+        }
+        assert!(neighbour.exists(), "a file not of this entry moved");
+    }
+}
+
+/// An entry previewed as finished and undone by something else before the
+/// job reached it: nothing to move, and the difference is written down and
+/// typed as changed since the preview — not an untyped refusal.
+#[test]
+fn an_entry_undone_elsewhere_since_the_preview_is_changed_not_untyped() {
+    let a = archive();
+    let (id, home, _xmp) = quarantined(&a, "IMG.CR2");
+    let r = reviewed_now(&a, id, Choice::Keep);
+    crate::undo(&a.db, id).unwrap();
+    assert_eq!(fs::read(&home).unwrap(), OURS);
+
+    let e = crate::undo_reviewed(&a.db, id, Some(&r)).unwrap_err();
+
+    let decided = crate::outcome_of(&e).decisions;
+    assert_eq!(decided.len(), 1, "{e:#}");
+    assert_eq!(decided[0].outcome, crate::Outcome::ChangedSincePreview);
+    assert_eq!(fs::read(&home).unwrap(), OURS);
+    // Read so at the preview too: the ordinary refusal, nothing written.
+    let r = reviewed_now(&a, id, Choice::Keep);
+    let before = events(&a.db, id).len();
+    let e = crate::undo_reviewed(&a.db, id, Some(&r)).unwrap_err();
+    assert!(format!("{e:#}").contains("cannot be undone"), "{e:#}");
+    assert_eq!(events(&a.db, id).len(), before);
+}
