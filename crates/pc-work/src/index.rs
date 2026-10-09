@@ -521,8 +521,14 @@ mod thumbnail_refusal_tests {
         let refused = ThumbStore::bound(&thumbs, Arc::new(Cache { refuse: true }));
         let control = pc_core::work::Control::default();
 
-        let err = run_controlled(&db, &[archive.clone()], &refused, &options(), &control)
-            .expect_err("the index finished as if the thumbnails were stored");
+        let err = run_controlled(
+            &db,
+            std::slice::from_ref(&archive),
+            &refused,
+            &options(),
+            &control,
+        )
+        .expect_err("the index finished as if the thumbnails were stored");
         assert!(err.downcast_ref::<NotBound>().is_some(), "{err:#}");
         assert!(format!("{err:#}").contains("5531"), "{err:#}");
         let refusals = control.progress.lock().unwrap().refusals.clone();

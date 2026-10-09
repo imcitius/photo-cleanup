@@ -436,7 +436,6 @@ async fn a_reset_takes_only_the_caches_own_thumbnails_and_names_the_rest() {
 /// one — another folder, even at the proven path's place, is refused.
 #[test]
 fn the_binding_accepts_only_the_proven_cache_folder_as_held() {
-    use pc_core::storage::StorageBinding;
     let b = Bound::new();
     let p = b.prepared();
     let guard = p.storage_binding().unwrap();

@@ -4588,7 +4588,7 @@ mod publication_tests {
     pub(super) fn foreign(parent: &Path, name: &str, with_db: bool) -> PathBuf {
         let dir = parent.join(name);
         fs::create_dir_all(dir.join("thumbs/ab")).unwrap();
-        let mut files = vec![dir.join("thumbs").join(THUMB)];
+        let mut files = vec![dir.join("thumbs/ab/abcd.jpg")];
         fs::write(&files[0], FOREIGN_THUMB).unwrap();
         if with_db {
             files.push(dir.join(DB_FILE));
