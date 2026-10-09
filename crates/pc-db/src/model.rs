@@ -291,23 +291,20 @@ pub struct ReturnedAs {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConflictNote {
-    /// `keep`, `replace`, `rename-existing` or `rename-returning`.
+    /// `keep` or `rename-returning`; empty when there was no choice to make
+    /// (the place was free, or the unit could not come back at all).
     pub choice: String,
     /// The unit coming back: `src` its place, `dst` where it is held.
     pub returning: Vec<Moved>,
-    /// What bore those places: `src` the path, `dst` where it was set aside
-    /// (empty while it was not moved), `proof` the evidence read.
+    /// What bore those places: `src` the path, `proof` the evidence read;
+    /// `dst` is always empty — the existing file is never moved.
     pub occupants: Vec<Moved>,
     /// An attempt to return the unit under free names, recorded before it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub returned_as: Vec<ReturnedAs>,
-    /// The journal entry that set the occupants aside, itself undoable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aside_entry: Option<i64>,
     /// How the decision ended, on the event that says so: `kept`,
-    /// `replaced`, `renamed-existing`, `renamed-returning`, `refused` or
-    /// `changed-since-preview`. Absent on the progress events written
-    /// before a move (`attempt`, `set-aside`).
+    /// `renamed-returning`, `refused` or `changed-since-preview`. Absent on
+    /// the progress event written before a move (`attempt`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
 }
@@ -759,20 +756,6 @@ impl Db {
     ) -> Result<()> {
         let data = serde_json::json!({ "conflict": note }).to_string();
         self.journal_event(id, phase, kind, text, Some(&data))
-    }
-
-    /// Point a `pending` entry at the destination of its next attempt, before
-    /// that attempt moves anything: a search for a free name (`_1`, `_2`, …,
-    /// el-14vx0) whose earlier attempt moved nothing — refused, or put back
-    /// whole — tries the next one under the same entry. Only a pending row
-    /// is ever retargeted.
-    pub fn journal_retarget(&self, id: i64, dst: &str, moved: &[Moved]) -> Result<()> {
-        let n = self.conn.execute(
-            "UPDATE journal SET dst=?1, manifest=?2 WHERE id=?3 AND status='pending'",
-            params![dst, manifest_json(moved), id],
-        )?;
-        anyhow::ensure!(n == 1, "journal entry {id} is not pending");
-        Ok(())
     }
 
     /// An entry's events, oldest first.

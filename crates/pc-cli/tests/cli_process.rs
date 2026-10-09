@@ -210,7 +210,7 @@ fn a_taken_place_keeps_the_file_without_a_terminal_and_on_conflict_decides_it() 
     assert!(said.contains("kept in quarantine"), "{said}");
     assert!(said.contains(pc_core::QUARANTINE_DIR), "{said}");
     // The decision is part of the result, in the words the web shows.
-    assert!(said.contains("decisions on taken places: kept 1"), "{said}");
+    assert!(said.contains("decisions: kept 1"), "{said}");
     assert_eq!(
         std::fs::read(&copy).unwrap(),
         b"a newer file under the same name"
@@ -229,10 +229,7 @@ fn a_taken_place_keeps_the_file_without_a_terminal_and_on_conflict_decides_it() 
         "rename-returning",
     ]);
     assert!(said.contains("rename-returning"), "{said}");
-    assert!(
-        said.contains("decisions on taken places: renamed-returning 1"),
-        "{said}"
-    );
+    assert!(said.contains("decisions: renamed-returning 1"), "{said}");
     assert_eq!(
         std::fs::read(&copy).unwrap(),
         b"a newer file under the same name"
@@ -952,8 +949,13 @@ fn every_conflict_is_shown_and_answered_before_the_first_file_moves() {
     for p in [&first, &second] {
         assert!(preview.contains(p.to_str().unwrap()), "{preview}");
     }
-    for word in ["keep", "replace", "rename-existing", "rename-returning"] {
+    for word in ["keep", "rename-returning"] {
         assert!(preview.contains(word), "{preview}");
+    }
+    // Only the two choices that never touch the existing file (user
+    // decision 2026-10-10).
+    for word in ["replace", "rename-existing"] {
+        assert!(!preview.contains(word), "{preview}");
     }
     assert_eq!(sorted_files(), held, "a preview moves nothing");
 
@@ -1017,7 +1019,7 @@ fn every_conflict_is_shown_and_answered_before_the_first_file_moves() {
     };
     let mut input = child.stdin.take().unwrap();
     wait_for(1);
-    input.write_all(b"4\n").unwrap();
+    input.write_all(b"2\n").unwrap();
     input.flush().unwrap();
     wait_for(2);
     assert_eq!(
@@ -1118,4 +1120,127 @@ fn without_a_terminal_every_conflict_is_listed_before_the_answer_for_all_is_carr
         ));
         assert!(back.exists(), "{back:?}: {said}");
     }
+}
+
+/// el-14vx0 R3-B1 (review el-66rxn), on a real terminal: while the question
+/// is open, an `.aae` appears in quarantine beside the frame that would come
+/// back. The answer "return as *_1" was given on a unit that is no longer
+/// the one shown: nothing of it moves, the new file stays where it
+/// appeared, the existing file is untouched, and the refusal is written
+/// down as changed since the preview.
+#[cfg(unix)]
+#[test]
+fn a_companion_added_while_the_question_is_open_refuses_the_whole_unit() {
+    use std::io::{Read, Write};
+    let cli = Cli::new();
+    cli.photo("frame.jpg", 90);
+    let copy = cli.photo("frame copy.jpg", 90);
+    cli.run(&[
+        "index",
+        "--root",
+        cli.archive.to_str().unwrap(),
+        "--min-size",
+        "0",
+    ]);
+    cli.run(&["families", "build"]);
+    cli.run(&["apply", "--yes"]);
+    assert!(!copy.exists());
+    std::fs::write(&copy, b"a foreign file under the same name").unwrap();
+    let id = {
+        let db = pc_db::Db::open(&cli.db).unwrap();
+        db.journal_quarantined(None).unwrap().pop().unwrap().id
+    };
+    let q = cli.archive.join(pc_core::QUARANTINE_DIR);
+    let late = q.join("frame copy.aae");
+
+    let bin = env!("CARGO_BIN_EXE_photo-cleanup");
+    let db = cli.db.to_str().unwrap();
+    let journal = id.to_string();
+    let mut cmd = std::process::Command::new("script");
+    if cfg!(target_os = "linux") {
+        cmd.args([
+            "-q",
+            "-e",
+            "-c",
+            &format!("'{bin}' --db '{db}' derived undo --journal {journal}"),
+            "/dev/null",
+        ]);
+    } else {
+        cmd.args([
+            "-q",
+            "/dev/null",
+            bin,
+            "--db",
+            db,
+            "derived",
+            "undo",
+            "--journal",
+            &journal,
+        ]);
+    }
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("script(1) runs the command on a terminal");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let mut out = child.stdout.take().unwrap();
+    let sink = seen.clone();
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = out.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            sink.lock().unwrap().extend_from_slice(&buf[..n]);
+        }
+    });
+    let shown = || String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !shown().contains("Choose 1-2") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the question never came:\n{}",
+            shown()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // An ordinary change while the person answers.
+    std::fs::write(&late, b"a companion that appeared after the preview").unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"2\n").unwrap();
+    input.flush().unwrap();
+    let _ = child.wait().unwrap();
+    drop(input);
+    reader.join().unwrap();
+    let said = shown();
+
+    assert!(said.contains("refresh the preview"), "{said}");
+    assert!(!cli.archive.join("frame copy_1.jpg").exists(), "{said}");
+    assert!(q.join("frame copy.jpg").exists(), "{said}");
+    assert_eq!(
+        std::fs::read(&late).unwrap(),
+        b"a companion that appeared after the preview"
+    );
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        b"a foreign file under the same name"
+    );
+    let db = pc_db::Db::open(&cli.db).unwrap();
+    assert_eq!(
+        db.journal_entry(id).unwrap().unwrap().status,
+        pc_db::JournalStatus::Done
+    );
+    assert!(
+        db.journal_events(id)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "refused"
+                && e.data
+                    .as_deref()
+                    .is_some_and(|d| d.contains("\"choice\":\"rename-returning\"")
+                        && d.contains("changed-since-preview"))),
+        "{said}"
+    );
 }

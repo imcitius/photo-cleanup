@@ -33,16 +33,14 @@ mod roots;
 mod unit;
 
 pub use conflict::{
-    conflict_kept, outcome_of, reconcile_conflict, reconcile_reviewed, undo_conflict,
-    undo_reviewed, Choice, Conflict, ConflictKept, Decided, Decision, Occupant, Outcome, Returning,
-    Reviewed,
+    conflict_kept, outcome_of, reconcile_conflict, reconcile_reviewed, reconcile_seen,
+    run_conflicts, run_seen, undo_conflict, undo_reviewed, undo_seen, Choice, Conflict,
+    ConflictKept, Decided, Decision, Held, Occupant, Outcome, Place, Returning, Reviewed, Seen,
 };
 pub use files::{
     apply, companion_plan, companions, same_picture, ApplyReport, Companion, FileOutcome, Filed,
 };
-pub use organize::{
-    organize, run_conflicts, undo_run, undo_run_reviewed, undo_run_with, OrganizeReport,
-};
+pub use organize::{organize, undo_run, undo_run_reviewed, OrganizeReport};
 pub use outcome::{
     is_folder_moved, is_no_exclusive_rename, is_run_stop, stop_run, stopped_run, FolderMoved,
     Halted, NoExclusiveRename, Placed, Role, Route, Stopped, Tally, Whereabouts,
@@ -52,8 +50,7 @@ pub use purge::{
     KeptWhy, OrphanKept, OrphanWhy, PurgeKept, PurgeStage, PurgeStopped,
 };
 pub use recovery::{
-    reconcile, reconcile_undo, reconcile_undo_with, undo, undo_offered, undo_preview, undo_with,
-    Item, Reconciled, Standing,
+    reconcile, reconcile_undo, undo, undo_offered, undo_preview, Item, Reconciled, Standing,
 };
 pub use roots::RunRoots;
 
@@ -1006,16 +1003,20 @@ mod undo_tests {
                 dst: Some(&d),
                 size: 32,
                 file_count: 2,
+                // With the evidence every current version records: a row
+                // without it is only ever kept (el-14vx0).
                 manifest: &[
                     Moved {
                         src: s.clone(),
                         dst: d.clone(),
-                        proof: None,
+                        proof: pc_core::proof::Proof::of(&fs::symlink_metadata(&dst).unwrap()),
                     },
                     Moved {
                         src: src.with_extension("xmp").display().to_string(),
                         dst: dst.with_extension("xmp").display().to_string(),
-                        proof: None,
+                        proof: pc_core::proof::Proof::of(
+                            &fs::symlink_metadata(dst.with_extension("xmp")).unwrap(),
+                        ),
                     },
                 ],
             })

@@ -566,7 +566,7 @@ mod exfat {
                 manifest: &[pc_db::Moved {
                     src: s.clone(),
                     dst: d.clone(),
-                    proof: None,
+                    proof: pc_core::proof::Proof::of(&fs::symlink_metadata(&held).unwrap()),
                 }],
             })
             .unwrap();

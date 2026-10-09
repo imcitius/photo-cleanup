@@ -516,6 +516,16 @@ function Conflicts({
               {o.path} · {bytes(o.size)}
             </code>
           ))}
+          {!!c.beside?.length && (
+            <>
+              <div className="muted">{ui.conflictBeside}</div>
+              {c.beside.map((o) => (
+                <code className="path" key={o.path}>
+                  {o.path}
+                </code>
+              ))}
+            </>
+          )}
           {c.limits.map((l) => (
             <p className="muted" key={l}>
               {l}
@@ -914,11 +924,9 @@ export function JournalPage({
                   #{j.id} ·{" "}
                   {j.op === "organize"
                     ? t("raskladka")
-                    : j.op === "set-aside"
-                      ? ui.opSetAside
-                      : j.op === "quarantine"
-                        ? t("prevyu_v_karantin")
-                        : t("fayl_v_karantin")}
+                    : j.op === "quarantine"
+                      ? t("prevyu_v_karantin")
+                      : t("fayl_v_karantin")}
                 </strong>
                 <span className="muted">
                   {when(j.applied_at)} {t("progon_2")}

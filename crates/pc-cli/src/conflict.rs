@@ -5,17 +5,24 @@
 //!
 //! Every conflict is shown, and every answer collected, before the first
 //! file moves (el-14vx0 B5): [`show`], then [`Chooser::review`], then
-//! `pc_apply::undo_reviewed` / `undo_run_reviewed`, which hold each choice
-//! only while its conflict is still the one shown.
+//! `pc_apply::undo_reviewed` / `undo_run_reviewed`, which hold each entry
+//! to what was read for it here — a choice only while its conflict is still
+//! the one shown, a free place only while the unit coming back is still
+//! the one read.
+//!
+//! Two choices exist (user decision 2026-10-10): keep it in quarantine, or
+//! return it as `*_1` beside the existing file. Nothing here can touch the
+//! existing file.
 
 use anyhow::Result;
-use pc_apply::{Choice, Conflict, Reviewed};
+use pc_apply::{Choice, Conflict, Reviewed, Seen};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 /// The preview: every conflict, what it offers and why not more. Nothing
 /// has moved when this is printed.
-pub fn show(out: &mut dyn Write, conflicts: &[Conflict]) -> Result<()> {
+pub fn show(out: &mut dyn Write, seen: &[Seen]) -> Result<()> {
+    let conflicts: Vec<&Conflict> = seen.iter().filter_map(Seen::conflict).collect();
     if conflicts.is_empty() {
         return Ok(());
     }
@@ -62,16 +69,19 @@ impl<'a> Chooser<'a> {
         }
     }
 
-    /// An answer for every conflict, all of them before anything moves, by
-    /// entry.
-    pub fn review(&mut self, conflicts: &[Conflict]) -> Result<HashMap<i64, Reviewed>> {
+    /// What every entry read here is bound to, by entry — with an answer
+    /// for every conflict, all of them before anything moves.
+    pub fn review(&mut self, seen: &[Seen]) -> Result<HashMap<i64, Reviewed>> {
         let mut out = HashMap::new();
-        for c in conflicts {
-            let choice = self.decide(c)?;
+        for s in seen {
+            let choice = match s.conflict() {
+                Some(c) => self.decide(c)?,
+                None => Choice::Keep,
+            };
             out.insert(
-                c.journal_id,
+                s.journal_id(),
                 Reviewed {
-                    seen: c.clone(),
+                    seen: s.clone(),
                     choice,
                 },
             );
@@ -134,7 +144,8 @@ impl<'a> Chooser<'a> {
 }
 
 /// `"2"` → the second choice offered; `"2a"` → it, for all the remaining
-/// conflicts too; empty → keep. A choice's word (`replace`) works as well.
+/// conflicts too; empty → keep. A choice's word (`rename-returning`) works
+/// as well.
 pub fn answer(line: &str, offered: &[Choice]) -> Option<(Choice, bool)> {
     let t = line.trim().to_lowercase();
     if t.is_empty() {
@@ -159,38 +170,10 @@ pub fn answer(line: &str, offered: &[Choice]) -> Option<(Choice, bool)> {
 mod tests {
     use super::*;
 
-    const OFFERED: [Choice; 4] = Choice::ALL;
+    const OFFERED: [Choice; 2] = Choice::ALL;
 
-    #[test]
-    fn an_empty_answer_keeps_the_file_in_quarantine() {
-        assert_eq!(answer("\n", &OFFERED), Some((Choice::Keep, false)));
-    }
-
-    #[test]
-    fn a_number_picks_from_what_is_offered_and_a_trailing_a_means_all() {
-        assert_eq!(answer("2", &OFFERED), Some((Choice::Replace, false)));
-        assert_eq!(
-            answer("4a\n", &OFFERED),
-            Some((Choice::RenameReturning, true))
-        );
-        assert_eq!(
-            answer("rename-existing all", &OFFERED),
-            Some((Choice::RenameExisting, true))
-        );
-    }
-
-    #[test]
-    fn a_choice_that_is_not_offered_is_not_an_answer() {
-        // Lightroom: only keep and return as *_1.
-        let lr = [Choice::Keep, Choice::RenameReturning];
-        assert_eq!(answer("replace", &lr), None);
-        assert_eq!(answer("3", &lr), None);
-        assert_eq!(answer("2", &lr), Some((Choice::RenameReturning, false)));
-    }
-
-    #[test]
-    fn the_terminal_answer_for_all_answers_every_later_conflict_without_asking() {
-        let c = Conflict {
+    fn conflict(choices: &[Choice]) -> Conflict {
+        Conflict {
             journal_id: 1,
             returning: vec![pc_apply::Returning {
                 home: "/a/IMG.CR2".into(),
@@ -199,36 +182,71 @@ mod tests {
                 seen: None,
             }],
             occupants: Vec::new(),
-            choices: OFFERED.to_vec(),
+            beside: Vec::new(),
+            choices: choices.to_vec(),
             limits: Vec::new(),
-        };
-        let mut input: &[u8] = b"3a\n";
+        }
+    }
+
+    #[test]
+    fn an_empty_answer_keeps_the_file_in_quarantine() {
+        assert_eq!(answer("\n", &OFFERED), Some((Choice::Keep, false)));
+    }
+
+    #[test]
+    fn a_number_picks_from_what_is_offered_and_a_trailing_a_means_all() {
+        assert_eq!(answer("1", &OFFERED), Some((Choice::Keep, false)));
+        assert_eq!(
+            answer("2", &OFFERED),
+            Some((Choice::RenameReturning, false))
+        );
+        assert_eq!(
+            answer("2a\n", &OFFERED),
+            Some((Choice::RenameReturning, true))
+        );
+        assert_eq!(
+            answer("rename-returning all", &OFFERED),
+            Some((Choice::RenameReturning, true))
+        );
+    }
+
+    #[test]
+    fn the_removed_choices_are_no_answer_at_all() {
+        // The user's decision (a): nothing that touches the existing file.
+        for gone in ["replace", "rename-existing", "3", "4"] {
+            assert_eq!(answer(gone, &OFFERED), None, "{gone}");
+        }
+        // A unit that may only be kept: nothing else is an answer.
+        assert_eq!(answer("2", &[Choice::Keep]), None);
+        assert_eq!(answer("rename-returning", &[Choice::Keep]), None);
+    }
+
+    #[test]
+    fn the_terminal_answer_for_all_answers_every_later_conflict_without_asking() {
+        let c = conflict(&OFFERED);
+        let mut input: &[u8] = b"2a\n";
         let mut output = Vec::new();
         let mut ch = Chooser::new(None, false, Some((&mut input, &mut output)));
-        assert_eq!(ch.decide(&c).unwrap(), Choice::RenameExisting);
+        assert_eq!(ch.decide(&c).unwrap(), Choice::RenameReturning);
         assert_eq!(
             ch.decide(&c).unwrap(),
-            Choice::RenameExisting,
+            Choice::RenameReturning,
             "asked again"
         );
         let shown = String::from_utf8(output).unwrap();
         assert_eq!(shown.matches("Choose").count(), 1, "{shown}");
+        assert!(shown.contains("Choose 1-2"), "{shown}");
+        assert!(!shown.contains("replace"), "{shown}");
     }
 
     #[test]
     fn a_given_answer_without_all_answers_only_the_first_conflict() {
-        let c = Conflict {
-            journal_id: 1,
-            returning: Vec::new(),
-            occupants: Vec::new(),
-            choices: OFFERED.to_vec(),
-            limits: Vec::new(),
-        };
-        let mut ch = Chooser::new(Some(Choice::Replace), false, None);
-        assert_eq!(ch.decide(&c).unwrap(), Choice::Replace);
+        let c = conflict(&OFFERED);
+        let mut ch = Chooser::new(Some(Choice::RenameReturning), false, None);
+        assert_eq!(ch.decide(&c).unwrap(), Choice::RenameReturning);
         assert_eq!(ch.decide(&c).unwrap(), Choice::Keep);
-        let mut ch = Chooser::new(Some(Choice::Replace), true, None);
-        assert_eq!(ch.decide(&c).unwrap(), Choice::Replace);
-        assert_eq!(ch.decide(&c).unwrap(), Choice::Replace);
+        let mut ch = Chooser::new(Some(Choice::RenameReturning), true, None);
+        assert_eq!(ch.decide(&c).unwrap(), Choice::RenameReturning);
+        assert_eq!(ch.decide(&c).unwrap(), Choice::RenameReturning);
     }
 }

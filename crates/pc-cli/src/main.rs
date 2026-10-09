@@ -157,11 +157,10 @@ struct OrganizeUndoArgs {
 /// What to do when the place a file comes back to is taken by another file.
 #[derive(Args)]
 struct ConflictArgs {
-    /// keep (the default: it stays in quarantine), replace (the existing
-    /// file goes to quarantine), rename-existing (the existing file becomes
-    /// *_1), rename-returning (this one comes back as *_1). Answers the
-    /// first conflict; with --all, every one. On a terminal the others are
-    /// asked; otherwise they are kept
+    /// keep (the default: it stays in quarantine) or rename-returning (it
+    /// comes back as *_1 beside the existing file, which is not touched).
+    /// Answers the first conflict; with --all, every one. On a terminal the
+    /// others are asked; otherwise they are kept
     #[arg(long, value_parser = parse_choice)]
     on_conflict: Option<pc_apply::Choice>,
     /// Apply --on-conflict to every conflict, not only the first
@@ -170,8 +169,7 @@ struct ConflictArgs {
 }
 
 fn parse_choice(s: &str) -> std::result::Result<pc_apply::Choice, String> {
-    pc_apply::Choice::parse(s)
-        .ok_or_else(|| "expected keep, replace, rename-existing or rename-returning".to_string())
+    pc_apply::Choice::parse(s).ok_or_else(|| "expected keep or rename-returning".to_string())
 }
 
 /// The terminal to ask on, when both ends of it are one.
@@ -474,14 +472,15 @@ fn main() -> Result<()> {
         Command::Derived(DerivedCmd::Clean(a)) => cmd_clean(&db, a),
         Command::Derived(DerivedCmd::Purge(a)) => cmd_purge(&db, a),
         Command::Derived(DerivedCmd::Undo(a)) => {
-            // The conflict shown and answered before anything moves; pc-apply
-            // holds the answer only while the conflict is still this one.
+            // The entry read, its conflict shown and answered, before anything
+            // moves; pc-apply holds the answer only while the entry still
+            // reads the same.
             let entry = db
                 .journal_entry(a.journal)?
                 .with_context(|| format!("no journal entry {}", a.journal))?;
-            let conflicts: Vec<_> = pc_apply::undo_conflict(&db, &entry)?.into_iter().collect();
-            pc_cli::conflict::show(&mut std::io::stdout(), &conflicts)?;
-            let reviewed = with_chooser(&a.conflict, |ch| ch.review(&conflicts))?;
+            let seen = vec![pc_apply::undo_seen(&entry)?];
+            pc_cli::conflict::show(&mut std::io::stdout(), &seen)?;
+            let reviewed = with_chooser(&a.conflict, |ch| ch.review(&seen))?;
             let back = pc_apply::undo_reviewed(&db, a.journal, reviewed.get(&a.journal))
                 .inspect_err(print_stop)?;
             println!("Entry {} rolled back: {}.", a.journal, back.summary());
@@ -1315,10 +1314,10 @@ fn cmd_organize_undo(db: &Db, a: &OrganizeUndoArgs) -> Result<()> {
     );
     // Every conflict is shown, and every answer collected, before the first
     // file moves (el-14vx0 B5) — with --yes as well as without.
-    let conflicts = pc_apply::run_conflicts(db, run_id)?;
-    pc_cli::conflict::show(&mut std::io::stdout(), &conflicts)?;
+    let seen = pc_apply::run_seen(db, run_id)?;
+    pc_cli::conflict::show(&mut std::io::stdout(), &seen)?;
     if !a.yes {
-        if !conflicts.is_empty() {
+        if seen.iter().any(|s| s.conflict().is_some()) {
             println!(
                 "\nWithout --on-conflict, each one is kept in quarantine (asked on a terminal)."
             );
@@ -1326,7 +1325,7 @@ fn cmd_organize_undo(db: &Db, a: &OrganizeUndoArgs) -> Result<()> {
         println!("Add --yes to carry it out.");
         return Ok(());
     }
-    let reviewed = with_chooser(&a.conflict, |ch| ch.review(&conflicts))?;
+    let reviewed = with_chooser(&a.conflict, |ch| ch.review(&seen))?;
     let (back, failed) =
         pc_apply::undo_run_reviewed(db, run_id, &reviewed).inspect_err(print_stop)?;
     println!("Restored: {}.", back.summary());

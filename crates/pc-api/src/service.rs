@@ -881,25 +881,19 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 // is offered; a stranger at its name is refused, here and
                 // on the command line alike.
                 let looks = pc_apply::undo_preview(&e)?;
-                // The frame and its companions come back together or not at
-                // all (user decision (c)): one doubt refuses the entry, as
-                // the undo itself does.
-                let doubts: Vec<(String, String)> = looks
-                    .iter()
-                    .filter_map(|i| i.why().map(|w| (i.src.clone(), w)))
-                    .collect();
-                if !doubts.is_empty() {
-                    // Its only obstacle is that its place is taken: the
-                    // choice is the user's (el-14vx0). What each choice
-                    // does, and which are offered, is pc-apply's; the
-                    // reviewed conflict goes with the action, and a
-                    // conflict that changed since is refused there.
-                    if let Some(c) = pc_apply::undo_conflict(db, &e)? {
+                // What pc-apply reads for the entry is what its undo is
+                // bound to (el-14vx0): read again when the job reaches it,
+                // anything different is refused there as changed since this
+                // preview. Which choices exist and what they do is
+                // pc-apply's; nothing about safety is decided here.
+                let seen = pc_apply::undo_seen(&e)?;
+                match &seen {
+                    pc_apply::Seen::Taken(c) => {
                         let chosen = r.params["choices"][e.id.to_string()]
                             .as_str()
                             .and_then(pc_apply::Choice::parse)
                             .unwrap_or(pc_apply::Choice::Keep);
-                        conflicts.push(conflict_json(&c, chosen));
+                        conflicts.push(conflict_json(c, chosen));
                         // A "keep" moves nothing, so it is no reviewed
                         // item; it still goes with the job, so that the
                         // decision is written down and reported when the
@@ -913,28 +907,46 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                         actions.push(Action::Undo(
                             e,
                             Some(pc_apply::Reviewed {
-                                seen: c,
+                                seen,
                                 choice: chosen,
                             }),
                         ));
-                        continue;
                     }
-                    for (src, why) in doubts {
-                        add_refusal(src, why);
+                    // A unit without evidence is only ever kept: said here,
+                    // and written down when the job is confirmed.
+                    pc_apply::Seen::Held(h) if h.legacy => {
+                        add_refusal(e.src.clone(), h.why.clone());
+                        actions.push(Action::Undo(e, Some(pc_apply::Reviewed::keep(seen))));
                     }
-                    continue;
+                    // The frame and its companions come back together or
+                    // not at all (user decision (c)): one doubt refuses the
+                    // entry, as the undo itself does.
+                    pc_apply::Seen::Held(h) => {
+                        let mut said = false;
+                        for i in &looks {
+                            if let Some(why) = i.why() {
+                                add_refusal(i.src.clone(), why);
+                                said = true;
+                            }
+                        }
+                        if !said {
+                            add_refusal(e.src.clone(), h.why.clone());
+                        }
+                    }
+                    pc_apply::Seen::Free { .. } => {
+                        let mut rest = Vec::new();
+                        for i in looks.iter().filter(|i| i.src != e.src) {
+                            if i.standing == pc_apply::Standing::Moved {
+                                let size = std::fs::metadata(&i.dst).map(|m| m.len()).unwrap_or(0);
+                                rest.push(json!({"path": i.dst, "dst": i.src, "size": size}));
+                            }
+                        }
+                        let mut item = json!({"journal_id":e.id,"path":e.dst,"dst":e.src,"size":e.size,"file_count":e.file_count});
+                        item["companions"] = json!(rest);
+                        items.push(item);
+                        actions.push(Action::Undo(e, Some(pc_apply::Reviewed::keep(seen))));
+                    }
                 }
-                let mut rest = Vec::new();
-                for i in looks.iter().filter(|i| i.src != e.src) {
-                    if i.standing == pc_apply::Standing::Moved {
-                        let size = std::fs::metadata(&i.dst).map(|m| m.len()).unwrap_or(0);
-                        rest.push(json!({"path": i.dst, "dst": i.src, "size": size}));
-                    }
-                }
-                let mut item = json!({"journal_id":e.id,"path":e.dst,"dst":e.src,"size":e.size,"file_count":e.file_count});
-                item["companions"] = json!(rest);
-                items.push(item);
-                actions.push(Action::Undo(e, None));
             }
         }
         // An operation a killed process left half-done. The journal says what
@@ -949,62 +961,86 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             let read = pc_apply::reconcile(db, id)?;
             // Nothing is carried anywhere while one file of the operation is
             // unaccounted for: a half-reconciled entry is the state this is
-            // meant to get the archive out of.
-            let clear = read.iter().all(|i| i.why().is_none());
-            // Unless its only obstacle is that its places are taken: then
-            // the choices are the same as an undo's, from the same pc-apply
-            // function (el-14vx0 B3).
-            let conflict = if clear {
-                None
-            } else {
-                pc_apply::reconcile_conflict(db, &entry)?
-            };
-            if let Some(c) = conflict {
-                let chosen = r.params["choices"][id.to_string()]
-                    .as_str()
-                    .and_then(pc_apply::Choice::parse)
-                    .unwrap_or(pc_apply::Choice::Keep);
-                conflicts.push(conflict_json(&c, chosen));
-                if chosen == pc_apply::Choice::Keep {
-                    add_refusal(entry.src.clone(), c.kept_words());
-                } else {
-                    items.push(json!({"journal_id":id,"path":entry.dst,"dst":entry.src,"size":entry.size,"file_count":entry.file_count,"choice":chosen.as_str()}));
+            // meant to get the archive out of. Unless its only obstacle is
+            // that its places are taken: then the choices are the same as an
+            // undo's, from the same pc-apply function (el-14vx0 B3). What is
+            // read here is what the reconciliation is bound to.
+            let seen = pc_apply::reconcile_seen(&entry)?;
+            match &seen {
+                pc_apply::Seen::Taken(c) => {
+                    let chosen = r.params["choices"][id.to_string()]
+                        .as_str()
+                        .and_then(pc_apply::Choice::parse)
+                        .unwrap_or(pc_apply::Choice::Keep);
+                    conflicts.push(conflict_json(c, chosen));
+                    if chosen == pc_apply::Choice::Keep {
+                        add_refusal(entry.src.clone(), c.kept_words());
+                    } else {
+                        items.push(json!({"journal_id":id,"path":entry.dst,"dst":entry.src,"size":entry.size,"file_count":entry.file_count,"choice":chosen.as_str()}));
+                    }
+                    actions.push(Action::Reconcile(
+                        entry,
+                        Some(pc_apply::Reviewed {
+                            seen,
+                            choice: chosen,
+                        }),
+                    ));
                 }
-                actions.push(Action::Reconcile(
-                    entry,
-                    Some(pc_apply::Reviewed {
-                        seen: c,
-                        choice: chosen,
-                    }),
-                ));
-            } else {
-                for item in read {
-                    match item.standing {
-                    pc_apply::Standing::Moved => items.push(
-                        json!({"journal_id":id,"path":item.dst,"dst":item.src,"size":0,"file_count":1}),
-                    ),
-                    pc_apply::Standing::Home => {}
-                    pc_apply::Standing::Both => add_refusal(
-                        item.src.clone(),
-                        pc_core::tr!(
-                            "Файл есть и на исходном месте, и в карантине: выберите сами",
-                            "The file is at its source and in quarantine: settle it yourself"
-                        )
-                        .into(),
-                    ),
-                    pc_apply::Standing::Gone => add_refusal(
-                        item.src.clone(),
-                        pc_core::tr!(
-                            "Файла нет ни там, ни там",
-                            "The file is at neither path"
-                        )
-                        .into(),
-                    ),
-                    pc_apply::Standing::Doubt(ref why) => add_refusal(item.src.clone(), why.clone()),
+                pc_apply::Seen::Held(h) if h.legacy => {
+                    add_refusal(entry.src.clone(), h.why.clone());
+                    actions.push(Action::Reconcile(
+                        entry,
+                        Some(pc_apply::Reviewed::keep(seen)),
+                    ));
                 }
-                }
-                if clear {
-                    actions.push(Action::Reconcile(entry, None));
+                _ => {
+                    let mut said = false;
+                    for item in read {
+                        match item.standing {
+                            pc_apply::Standing::Moved => items.push(
+                                json!({"journal_id":id,"path":item.dst,"dst":item.src,"size":0,"file_count":1}),
+                            ),
+                            pc_apply::Standing::Home => {}
+                            pc_apply::Standing::Both => {
+                                said = true;
+                                add_refusal(
+                                    item.src.clone(),
+                                    pc_core::tr!(
+                                        "Файл есть и на исходном месте, и в карантине: выберите сами",
+                                        "The file is at its source and in quarantine: settle it yourself"
+                                    )
+                                    .into(),
+                                )
+                            }
+                            pc_apply::Standing::Gone => {
+                                said = true;
+                                add_refusal(
+                                    item.src.clone(),
+                                    pc_core::tr!(
+                                        "Файла нет ни там, ни там",
+                                        "The file is at neither path"
+                                    )
+                                    .into(),
+                                )
+                            }
+                            pc_apply::Standing::Doubt(ref why) => {
+                                said = true;
+                                add_refusal(item.src.clone(), why.clone())
+                            }
+                        }
+                    }
+                    match &seen {
+                        pc_apply::Seen::Free { .. } => {
+                            actions.push(Action::Reconcile(
+                                entry,
+                                Some(pc_apply::Reviewed::keep(seen)),
+                            ));
+                        }
+                        pc_apply::Seen::Held(h) if !said => {
+                            add_refusal(entry.src.clone(), h.why.clone())
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -1116,7 +1152,8 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
 }
 /// An undo's conflict as the web shows it: pc-apply's words and choices,
 /// and the evidence of each occupant, so that the preview's token changes
-/// when what bears the place does.
+/// when what bears the place does. The existing file is never moved by any
+/// choice; only "keep" and "return as *_1" exist.
 fn conflict_json(c: &pc_apply::Conflict, chosen: pc_apply::Choice) -> Value {
     json!({
         "journal_id": c.journal_id,
@@ -1124,6 +1161,7 @@ fn conflict_json(c: &pc_apply::Conflict, chosen: pc_apply::Choice) -> Value {
         "kept": c.kept_words(),
         "returning": c.returning.iter().map(|r| json!({"home": r.home, "held": r.held})).collect::<Vec<_>>(),
         "occupants": c.occupants.iter().map(|o| json!({"path": o.path, "size": o.size(), "evidence": o.evidence()})).collect::<Vec<_>>(),
+        "beside": c.beside.iter().map(|o| json!({"path": o.path, "evidence": o.evidence()})).collect::<Vec<_>>(),
         "choices": c.choices.iter().map(|ch| json!({"choice": ch.as_str(), "words": ch.words()})).collect::<Vec<_>>(),
         "limits": c.limits,
         "choice": chosen.as_str(),

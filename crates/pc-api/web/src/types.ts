@@ -207,6 +207,7 @@ export interface Conflict {
   kept: string;
   returning: { home: string; held: string }[];
   occupants: { path: string; size: number; evidence: string }[];
+  beside?: { path: string; evidence: string }[];
   choices: { choice: string; words: string }[];
   limits: string[];
   choice: string;

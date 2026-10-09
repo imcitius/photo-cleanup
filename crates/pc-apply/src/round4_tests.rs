@@ -9,8 +9,8 @@
 //! taken for a row that recorded no evidence.
 //! B3 — a database failure after a physical move still returns the typed
 //! partial with what actually moved.
-//! B4 — a legacy reconciliation writes the evidence it adopts before it
-//! moves anything, so its retry continues by proof.
+//! B4 — a legacy reconciliation never guesses: since el-14vx0 (user
+//! decision 2026-10-10) it adopts no evidence and moves nothing at all.
 //! B6 — every forward outcome appends a typed event, note or no note.
 
 use super::*;
@@ -305,8 +305,14 @@ fn undo_persistence_failure_keeps_returned_file_in_typed_result() {
 
 // ------------------------------------------------------------------ B4 ----
 
+/// A legacy row (no evidence) interrupted after its files reached
+/// quarantine: its reconciliation never adopts evidence and never moves it,
+/// whether a place is taken or free (user decision 2026-10-10, el-14vx0;
+/// this test used to require adoption before the first move). The files
+/// stay held, the row stays pending and unrewritten, and the keep is
+/// written down.
 #[test]
-fn legacy_reconcile_partial_can_retry_without_guessing_home() {
+fn legacy_reconcile_is_kept_whole_and_never_guesses_home() {
     let a = archive();
     fs::create_dir_all(&a.quarantine).unwrap();
     let home = a.dir.join("frame.arw");
@@ -331,26 +337,27 @@ fn legacy_reconcile_partial_can_retry_without_guessing_home() {
             manifest: &list,
         })
         .unwrap();
-    let at = side.clone();
-    let g = race::before_move(move |_, d| {
-        if d == at {
-            fs::write(d, b"foreign edits")?;
+    for foreign in [true, false] {
+        if foreign {
+            fs::write(&side, b"foreign edits").unwrap();
+        } else {
+            fs::rename(&side, a.dir.join("saved-foreign.xmp")).unwrap();
         }
-        Ok(())
-    });
-    assert!(crate::reconcile_undo(&a.db, id).is_err());
-    drop(g);
-    assert_eq!(fs::read(&side).unwrap(), b"foreign edits");
-    assert_eq!(fs::read(&held_side).unwrap(), b"our edits");
-    fs::rename(&side, a.dir.join("saved-foreign.xmp")).unwrap();
-
-    let r = crate::reconcile_undo(&a.db, id);
-    assert!(
-        r.is_ok(),
-        "the operation must persist adopted held proof before its first move: {r:?}"
-    );
-    assert_eq!(fs::read(&home).unwrap(), b"frame one");
-    assert_eq!(fs::read(&side).unwrap(), b"our edits");
+        let e = crate::reconcile_undo(&a.db, id).unwrap_err();
+        assert!(
+            crate::outcome_of(&e)
+                .decisions
+                .iter()
+                .any(|d| d.outcome == crate::Outcome::Kept),
+            "{e:#}"
+        );
+        assert!(fs::symlink_metadata(&home).is_err());
+        assert_eq!(fs::read(&held).unwrap(), b"frame one");
+        assert_eq!(fs::read(&held_side).unwrap(), b"our edits");
+        assert_eq!(journal_row(&a.db, id).0, "pending");
+        let entry = a.db.journal_entry(id).unwrap().unwrap();
+        assert!(entry.manifest.iter().all(|m| m.proof.is_none()));
+    }
     assert_eq!(
         fs::read(a.dir.join("saved-foreign.xmp")).unwrap(),
         b"foreign edits"

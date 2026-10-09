@@ -131,13 +131,10 @@ pub struct Tally {
     pub purged_files: u64,
     /// Bytes that came back: of files whose last link went.
     pub purged_bytes: u64,
-    /// Files that bore the place of something coming back and were moved
-    /// out of its way by the user's choice (el-14vx0) — renamed beside it,
-    /// or carried into quarantine under an entry of their own. Never
-    /// deleted, never replaced.
-    pub set_aside: u64,
-    /// Every decision on a taken place and how it ended (el-14vx0), in the
-    /// order they were made — the same that the entries' histories hold.
+    /// Every decision on a previewed undo and how it ended (el-14vx0) —
+    /// kept, returned under a free name, refused, changed since the preview
+    /// — in the order they were made: the same that the entries' histories
+    /// hold.
     pub decisions: Vec<crate::Decision>,
 }
 
@@ -154,7 +151,6 @@ impl Tally {
         self.purged_entries += o.purged_entries;
         self.purged_files += o.purged_files;
         self.purged_bytes += o.purged_bytes;
-        self.set_aside += o.set_aside;
         self.decisions.extend(o.decisions.iter().cloned());
     }
 
@@ -221,17 +217,6 @@ impl Tally {
                 ["entry walked back", "entries walked back"],
             ));
         }
-        if self.set_aside > 0 {
-            parts.push(pc_core::tf!(
-                "отложено, чтобы освободить место: {0}",
-                "set aside to make room: {0}",
-                pc_core::count(
-                    self.set_aside as i64,
-                    ["файл", "файла", "файлов"],
-                    ["file", "files"]
-                )
-            ));
-        }
         if !self.decisions.is_empty() {
             let by: Vec<String> = crate::Outcome::ALL
                 .iter()
@@ -241,8 +226,8 @@ impl Tally {
                 })
                 .collect();
             parts.push(pc_core::tf!(
-                "решения по занятым местам: {0}",
-                "decisions on taken places: {0}",
+                "решения: {0}",
+                "decisions: {0}",
                 by.join(", ")
             ));
         }

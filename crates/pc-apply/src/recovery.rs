@@ -13,15 +13,14 @@
 //! held where the operation put it, nothing at home.
 //!
 //! Rows written before evidence was recorded can only ever be read as far
-//! as their paths go. A file held at the exact quarantine path the journal
-//! recorded may come back (that path was the operation's own); evidence is
-//! taken from it before it moves, so that a retry can recognise it at home.
-//! A file at home in such a row is never taken for the one that left: the
-//! row stays open, the file stays in quarantine, and the refusal names both
-//! paths (director decision, el-usdqi: no name-based recognition). What to
-//! do then — keep it in quarantine, replace, rename either file — is the
-//! user's choice ([`crate::conflict`], el-14vx0); for such rows only "keep"
-//! is offered, since nothing proves which file is which.
+//! as their paths go, and nothing proves which file is which: such a unit
+//! is never moved back by an undo or a reconciliation, whether its place is
+//! free or taken — it is kept in quarantine, and the refusal names where it
+//! is and where it belongs, for a person to return by hand (user decision
+//! 2026-10-10, el-14vx0; earlier versions adopted the evidence of a file
+//! held at the recorded quarantine path and brought it back). What an undo
+//! does, and what the person may choose when the place is taken, is
+//! [`crate::conflict`]'s.
 
 use anyhow::{bail, Context, Result};
 use pc_core::proof::{Proof, Verdict};
@@ -30,7 +29,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::located::Way;
-use crate::unit::{move_unit, Member, Unit};
+use crate::unit::{move_unit_checked, Member, Unit};
 use crate::{files, organize, stop_run, Route, Tally};
 
 /// Where one file of an entry is, against its evidence.
@@ -455,6 +454,7 @@ pub(crate) fn walk_back(
     id: i64,
     phase: &str,
     pairs: &[Pair],
+    known: &[crate::Occupant],
 ) -> Result<(Vec<crate::bound::Arrived>, Vec<Moved>)> {
     let items: Vec<Item> = pairs.iter().map(item_of).collect();
     if items.iter().any(|i| i.why().is_some()) {
@@ -475,7 +475,7 @@ pub(crate) fn walk_back(
             anyhow::anyhow!("{why}"),
         ));
     }
-    match move_back(pairs) {
+    match move_back(pairs, known) {
         Back::Done(arrived, came) => Ok((arrived, came)),
         Back::Failed(unit) => Err(unit_failed(db, id, phase, &items, unit)),
     }
@@ -489,8 +489,9 @@ pub(crate) enum Back {
 }
 
 /// Bring back, as one unit, every item of `pairs` that is away — to the
-/// place its `look.src` names. Asked only once no item is in doubt.
-pub(crate) fn move_back(pairs: &[Pair]) -> Back {
+/// place its `look.src` names. Asked only once no item is in doubt; `known`
+/// are the files the preview read beside it that are not part of it.
+pub(crate) fn move_back(pairs: &[Pair], known: &[crate::Occupant]) -> Back {
     let moving: Vec<&Pair> = pairs
         .iter()
         .filter(|p| item_of(p).standing == Standing::Moved)
@@ -502,7 +503,15 @@ pub(crate) fn move_back(pairs: &[Pair]) -> Back {
         .iter()
         .map(|p| Member::back(&p.rec, &p.look))
         .collect();
-    match move_unit(&members, Way::Back, None, &[]) {
+    // Something named as a companion of a member, appearing beside where
+    // the unit was held while it moves, would be split from it (el-14vx0
+    // R3-B1): the whole unit goes back and is refused.
+    let origins: Vec<String> = moving.iter().map(|p| p.look.dst.clone()).collect();
+    let left = || -> Option<String> {
+        let new = crate::conflict::left_behind(&origins, known);
+        (!new.is_empty()).then(|| crate::conflict::stranger_words(&new))
+    };
+    match move_unit_checked(&members, Way::Back, None, &[], &left) {
         Unit::Moved(arrived) => {
             // As it went: a return under a free name names the free name.
             let came = moving
@@ -572,20 +581,16 @@ pub(crate) fn unit_failed(
 /// Walk a finished entry back: every file it moved, by its evidence, as one
 /// unit. Where its original place is taken by another file, it stays in
 /// quarantine — the default choice (el-14vx0) — and the refusal says where
-/// it is and where it belongs; [`undo_with`] offers the other choices.
+/// it is and where it belongs; [`crate::undo_reviewed`] carries out the
+/// other choice. A unit without evidence is kept, never moved.
 pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
-    undo_with(db, journal_id, &mut |_| Ok(crate::Choice::Keep))
+    crate::conflict::undo_now(db, journal_id)
 }
 
-/// [`undo`], asking `decide` what to do when the place the entry comes back
-/// to is taken (el-14vx0). `decide` sees the conflict as read now; the
-/// moves that follow are bound to the occupants exactly as that reading
-/// found them, and a choice the conflict does not offer is refused.
-pub fn undo_with(
-    db: &Db,
-    journal_id: i64,
-    decide: &mut dyn FnMut(&crate::Conflict) -> Result<crate::Choice>,
-) -> Result<Tally> {
+/// The finished entry `journal_id`, if it can be undone at all: offered,
+/// with a destination and a list this version reads — a list it cannot
+/// read is refused and written down.
+pub(crate) fn undoable(db: &Db, journal_id: i64) -> Result<JournalEntry> {
     let entry = db.journal_entry(journal_id)?.with_context(|| {
         pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
     })?;
@@ -604,41 +609,42 @@ pub fn undo_with(
         "в записи нет пути назначения",
         "the entry has no destination path"
     ))?;
-    let mut list = match list_of(&entry) {
-        Ok(list) => list,
-        Err(e) => {
-            let why = format!("{e:#}");
-            return Err(told(db, journal_id, "undo", "refused", &why, e));
-        }
-    };
-    let pairs = pairs_of(&entry, list.clone());
-    if pairs.iter().map(item_of).all(|i| i.why().is_none()) {
-        adopt_held_evidence(db, journal_id, &mut list)?;
-    } else if let Some(c) = crate::conflict::of(db, &entry, &pairs)? {
-        let choice = decide(&c)?;
-        return crate::conflict::resolve(db, &entry, c, choice);
+    if let Err(e) = list_of(&entry) {
+        let why = format!("{e:#}");
+        return Err(told(db, journal_id, "undo", "refused", &why, e));
     }
-    let pairs = pairs_of(&entry, list);
-    let (arrived, came) = walk_back(db, journal_id, "undo", &pairs)?;
-    finish(db, &entry, &pairs, arrived, came, Tally::default(), None)
+    Ok(entry)
+}
+
+/// The interrupted entry `journal_id`, if its list can be read; one that
+/// cannot is refused and written down.
+pub(crate) fn reconcilable(db: &Db, journal_id: i64) -> Result<JournalEntry> {
+    let entry = db.journal_entry(journal_id)?.with_context(|| {
+        pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
+    })?;
+    if let Err(e) = readable(&entry) {
+        let why = format!("{e:#}");
+        return Err(told(db, journal_id, "reconcile", "refused", &why, e));
+    }
+    Ok(entry)
 }
 
 /// Record an undo whose files are back: the index follows, and the entry
-/// is closed `undone` with what came back and where. `earlier` is what the
-/// same undo did before it (files set aside to make room), counted once.
+/// is closed `undone` with what came back and where.
 pub(crate) fn finish(
     db: &Db,
     entry: &JournalEntry,
     pairs: &[Pair],
     arrived: Vec<crate::bound::Arrived>,
     came: Vec<Moved>,
-    earlier: Tally,
     decided: Option<&pc_db::ConflictNote>,
 ) -> Result<Tally> {
     let journal_id = entry.id;
     let dst = entry.dst.clone().unwrap_or_default();
-    let mut done = earlier;
-    done.files_back += came.len() as u64;
+    let mut done = Tally {
+        files_back: came.len() as u64,
+        ..Default::default()
+    };
     // Where the entry's own file is now when it came back under a free name.
     let renamed = pairs
         .iter()
@@ -785,26 +791,6 @@ pub(crate) fn pending_list(entry: &JournalEntry) -> Result<Vec<Moved>> {
     list_of(entry)
 }
 
-/// A row written without evidence, about to be walked back: the files held
-/// at its own recorded quarantine paths are what it has. Their evidence is
-/// taken now and written down *before* anything moves (el-1y8uo B4), so a
-/// retry recognises what is home by proof — never by its name. Rows that recorded evidence are left exactly as they are.
-pub(crate) fn adopt_held_evidence(db: &Db, journal_id: i64, list: &mut [Moved]) -> Result<()> {
-    let mut adopted = false;
-    for m in list.iter_mut() {
-        if m.proof.is_none() {
-            if let Ok(md) = fs::symlink_metadata(&m.dst) {
-                m.proof = Proof::of(&md);
-                adopted |= m.proof.is_some();
-            }
-        }
-    }
-    if adopted {
-        db.journal_record_manifest(journal_id, list)?;
-    }
-    Ok(())
-}
-
 /// What a recovery brought back.
 #[derive(Debug, Clone)]
 pub struct Reconciled {
@@ -816,58 +802,22 @@ pub struct Reconciled {
 ///
 /// Only when every file of it is accounted for: at home and shown to be
 /// this one, or held and free to come back. Anything else leaves the entry
-/// `pending`, which is what it is, with the reason added to its history.
+/// `pending`, which is what it is, with the reason added to its history;
+/// where the only obstacle is that its places are taken, the same choice as
+/// an undo's is the person's ([`crate::reconcile_reviewed`]).
 pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
-    reconcile_undo_with(db, journal_id, &mut |_| Ok(crate::Choice::Keep))
+    crate::conflict::reconcile_now(db, journal_id)
 }
 
-/// [`reconcile_undo`], asking `decide` what to do when the only obstacle is
-/// that the places the entry comes back to are taken: the same choices, from
-/// the same function, as an undo (el-14vx0 B3).
-pub fn reconcile_undo_with(
+/// Close an interrupted entry whose files came back: the index follows,
+/// and the entry is `undone`.
+pub(crate) fn reconcile_close(
     db: &Db,
-    journal_id: i64,
-    decide: &mut dyn FnMut(&crate::Conflict) -> Result<crate::Choice>,
-) -> Result<Reconciled> {
-    if let Some(entry) = db.journal_entry(journal_id)? {
-        if let Err(e) = readable(&entry) {
-            let why = format!("{e:#}");
-            return Err(told(db, journal_id, "reconcile", "refused", &why, e));
-        }
-    }
-    let items = reconcile(db, journal_id)?;
-    if items.iter().any(|i| i.why().is_some()) {
-        let entry = db.journal_entry(journal_id)?.with_context(|| {
-            pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
-        })?;
-        let pairs = pairs_of(&entry, pending_list(&entry)?);
-        if let Some(c) = crate::conflict::of(db, &entry, &pairs)? {
-            let choice = decide(&c)?;
-            let done = crate::conflict::resolve(db, &entry, c, choice)?;
-            return Ok(Reconciled { items, done });
-        }
-        let why = pc_core::tf!(
-            "сверка: ничего не перенесено — кадр со спутниками возвращается только целиком, а \
-             не всё доказано: {0}",
-            "reconcile: nothing was moved — the frame and its companions come back only \
-             together, and not all of them are proven: {0}",
-            listing(&items)
-        );
-        let e = anyhow::anyhow!("{why}");
-        return Err(told(db, journal_id, "reconcile", "refused", &why, e));
-    }
-    // The evidence each move back is bound to (el-3wizg): as journaled, or
-    // as just taken from the file at its recorded quarantine path.
-    let (entry, pairs) = {
-        let entry = db.journal_entry(journal_id)?.with_context(|| {
-            pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
-        })?;
-        let mut list = pending_list(&entry)?;
-        adopt_held_evidence(db, journal_id, &mut list)?;
-        let pairs = pairs_of(&entry, list);
-        (entry, pairs)
-    };
-    let (arrived, returned) = walk_back(db, journal_id, "reconcile", &pairs)?;
+    entry: &JournalEntry,
+    arrived: Vec<crate::bound::Arrived>,
+    returned: Vec<Moved>,
+) -> Result<Tally> {
+    let journal_id = entry.id;
     let mut done = Tally {
         files_back: returned.len() as u64,
         ..Default::default()
@@ -906,5 +856,5 @@ pub fn reconcile_undo_with(
         return Err(crate::outcome::left_pending(e, journal_id, Route::Restore));
     }
     done.entries_back += 1;
-    Ok(Reconciled { items, done })
+    Ok(done)
 }

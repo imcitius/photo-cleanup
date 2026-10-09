@@ -46,7 +46,8 @@ fn legacy_held(f: &Fixture) -> (PathBuf, PathBuf, i64) {
 #[tokio::test]
 async fn diagnosis_api_offers_identity_proven_partial_undo() {
     let f = Fixture::new();
-    let (home, _held, id) = legacy_held(&f);
+    // Journaled with evidence: a row without it is only ever kept (el-14vx0).
+    let (home, _held, id) = proven_held(&f);
     let side = home.with_extension("xmp");
     std::fs::write(&side, b"foreign edits").unwrap();
     {
@@ -71,7 +72,7 @@ async fn diagnosis_api_offers_identity_proven_partial_undo() {
 #[tokio::test]
 async fn cli_and_api_share_recovery_classification() {
     let f = Fixture::new();
-    let (home, held, id) = legacy_held(&f);
+    let (home, held, id) = proven_held(&f);
     let side = home.with_extension("xmp");
     std::fs::write(&side, b"foreign edits").unwrap();
     {
@@ -503,10 +504,9 @@ async fn the_web_offers_the_choice_on_a_taken_place_and_carries_it_out_like_the_
         .iter()
         .map(|x| x["choice"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        offered,
-        ["keep", "replace", "rename-existing", "rename-returning"]
-    );
+    // Only the two choices that never touch the existing file (user
+    // decision 2026-10-10).
+    assert_eq!(offered, ["keep", "rename-returning"]);
     let kept = p["refusals"][0]["why"].as_str().unwrap();
     assert!(kept.contains(&held.display().to_string()), "{kept}");
 
@@ -530,9 +530,9 @@ async fn the_web_offers_the_choice_on_a_taken_place_and_carries_it_out_like_the_
     );
 }
 
-/// el-14vx0. A replace reviewed against one file, and another file in its
-/// place by the time the job runs: the plan changed, nothing moves, the
-/// newcomer is neither replaced nor set aside.
+/// el-14vx0. A return as *_1 reviewed against one file, and another file in
+/// its place by the time the job runs: the plan changed, nothing moves, the
+/// newcomer is never touched.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_file_swapped_in_after_the_preview_is_never_replaced_by_the_job() {
@@ -542,7 +542,7 @@ async fn a_file_swapped_in_after_the_preview_is_never_replaced_by_the_job() {
     let p = f
         .preview(
             "journal-undo",
-            json!({"journal_id":id,"choices":{id.to_string():"replace"}}),
+            json!({"journal_id":id,"choices":{id.to_string():"rename-returning"}}),
         )
         .await;
     assert_eq!(p["items"].as_array().unwrap().len(), 1, "{p}");
@@ -562,6 +562,7 @@ async fn a_file_swapped_in_after_the_preview_is_never_replaced_by_the_job() {
     }
     assert_eq!(std::fs::read(&home).unwrap(), b"a newcomer, never reviewed");
     assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
+    assert!(!f.archive.join("frame_1.arw").exists());
     let db = f.state.db.lock().unwrap();
     assert_eq!(
         db.journal_entry(id).unwrap().unwrap().status,
@@ -570,7 +571,7 @@ async fn a_file_swapped_in_after_the_preview_is_never_replaced_by_the_job() {
 }
 
 #[tokio::test]
-async fn reviewer_reconcile_conflicts_must_offer_the_same_four_choices() {
+async fn reviewer_reconcile_conflicts_must_offer_the_same_choices() {
     let f = Fixture::new();
     let (home, held, id) = proven_held(&f);
     {
@@ -596,43 +597,60 @@ async fn reviewer_reconcile_conflicts_must_offer_the_same_four_choices() {
     );
 }
 
+/// A companion that appears beside the existing frame while the unit comes
+/// back as *_1: the existing unit is never touched by any choice, so it
+/// stays exactly as it is, and ours arrives whole beside it.
+#[cfg(unix)]
 #[tokio::test]
-async fn reviewer_api_refuses_a_new_companion_before_setting_existing_unit_aside() {
+async fn a_companion_appearing_beside_the_existing_frame_is_never_touched() {
     let f = Fixture::new();
     let (home, held, id) = proven_held(&f);
     std::fs::write(&home, b"foreign existing frame").unwrap();
     let p = f
         .preview(
             "journal-undo",
-            json!({"journal_id":id,"choices":{id.to_string():"rename-existing"}}),
+            json!({"journal_id":id,"choices":{id.to_string():"rename-returning"}}),
         )
         .await;
     let marker = f.archive.to_string_lossy().into_owned();
-    let existing = home.clone();
+    let ours = held.clone();
     let late = home.with_extension("aae");
     let put = late.clone();
     let _g = pc_apply::race::before_move_under(&marker, move |src, _| {
-        if src == existing {
+        if src == ours && !put.exists() {
             std::fs::write(&put, b"late foreign edits")?;
         }
         Ok(())
     });
+    let existing = r3_metadata(&home);
     let job = f.apply(&p).await;
-    eprintln!("NEW_COMPANION_HTTP_JOB={job}");
-    assert_eq!(std::fs::read(&late).unwrap(), b"late foreign edits");
     assert_eq!(
-        std::fs::read(&home).unwrap(),
-        b"foreign existing frame",
-        "API reports successful undo after splitting existing unit"
+        std::fs::read(&late).unwrap(),
+        b"late foreign edits",
+        "{job}"
     );
-    assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
+    assert_eq!(r3_metadata(&home), existing, "{job}");
+    assert_eq!(
+        std::fs::read(f.archive.join("frame_1.arw")).unwrap(),
+        b"our frame",
+        "{job}"
+    );
+    assert_eq!(
+        std::fs::read(f.archive.join("frame_1.xmp")).unwrap(),
+        b"our edits",
+        "{job}"
+    );
 }
 
+/// Lightroom files get the same two choices as everyone: neither touches
+/// the catalogued file. A removed choice sent by an old page is no choice:
+/// the file is kept, written down, and nothing moves.
+#[cfg(unix)]
 #[tokio::test]
 async fn reviewer_forced_lightroom_choices_keep_every_payload_in_api() {
     for ch in ["replace", "rename-existing"] {
         let f = Fixture::new();
-        let (home, held, id) = legacy_held(&f);
+        let (home, held, id) = proven_held(&f);
         std::fs::write(&home, b"catalogued existing frame").unwrap();
         {
             let db = f.state.db.lock().unwrap();
@@ -651,21 +669,25 @@ async fn reviewer_forced_lightroom_choices_keep_every_payload_in_api() {
             db.replace_catalog_files(cat, &[(home.display().to_string(), Some(5), None)])
                 .unwrap();
         }
+        let existing = r3_metadata(&home);
         let p = f
             .preview(
                 "journal-undo",
                 json!({"journal_id":id,"choices":{id.to_string():ch}}),
             )
             .await;
-        let offered = p["conflicts"][0]["choices"].as_array().unwrap();
-        assert!(offered
+        let offered: Vec<&str> = p["conflicts"][0]["choices"]
+            .as_array()
+            .unwrap()
             .iter()
-            .all(|c| c["choice"] != "replace" && c["choice"] != "rename-existing"));
+            .map(|c| c["choice"].as_str().unwrap())
+            .collect();
+        assert_eq!(offered, ["keep", "rename-returning"], "{p}");
+        assert_eq!(p["conflicts"][0]["choice"], "keep", "{p}");
         let job = f.apply(&p).await;
-        eprintln!("FORCED_LIGHTROOM_{ch}={job}");
-        assert_eq!(std::fs::read(&home).unwrap(), b"catalogued existing frame");
+        assert_eq!(r3_metadata(&home), existing, "{job}");
         assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
-        assert!(job.to_string().contains("not offered"), "{job}");
+        assert!(job.to_string().contains("kept in quarantine"), "{job}");
     }
 }
 
@@ -797,61 +819,6 @@ async fn a_reconcile_choice_is_carried_out_through_the_job_and_keep_is_written_d
     );
 }
 
-#[tokio::test]
-async fn reviewer_replace_is_listed_with_origin_and_undoing_it_preserves_both_units() {
-    let f = Fixture::new();
-    let (home, held, id) = proven_held(&f);
-    std::fs::write(&home, b"foreign existing frame").unwrap();
-    let p = f
-        .preview(
-            "journal-undo",
-            json!({"journal_id":id,"choices":{id.to_string():"replace"}}),
-        )
-        .await;
-    let job = f.apply(&p).await;
-    assert_eq!(job["state"], "done", "{job}");
-    let (status, q) = f.req("GET", "/api/quarantine", Value::Null).await;
-    assert_eq!(status, 200);
-    let rows = q.as_array().unwrap();
-    assert_eq!(rows.len(), 1, "{q}");
-    assert_eq!(rows[0]["src"], home.display().to_string());
-    let aside = rows[0]["journal_id"].as_i64().unwrap();
-    let place = rows[0]["dst"].as_str().unwrap();
-    assert_eq!(std::fs::read(place).unwrap(), b"foreign existing frame");
-    {
-        let db = f.state.db.lock().unwrap();
-        let e = db.journal_entry(aside).unwrap().unwrap();
-        assert_eq!(e.op, "quarantine-file");
-        assert!(e.manifest.iter().all(|m| m.proof.is_some()));
-        assert!(db.journal_events(id).unwrap().iter().any(|e| e
-            .data
-            .as_ref()
-            .is_some_and(|d| d.contains(&format!("\"aside_entry\":{aside}")))));
-        assert!(db
-            .journal_events(aside)
-            .unwrap()
-            .iter()
-            .any(|e| e.kind == "done"));
-    }
-    let p = f
-        .preview(
-            "journal-undo",
-            json!({"journal_id":aside,"choices":{aside.to_string():"replace"}}),
-        )
-        .await;
-    let job = f.apply(&p).await;
-    assert_eq!(job["state"], "done", "{job}");
-    assert_eq!(std::fs::read(&home).unwrap(), b"foreign existing frame");
-    assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
-    assert_eq!(
-        std::fs::read(held.with_extension("xmp")).unwrap(),
-        b"our edits"
-    );
-    let (_, q) = f.req("GET", "/api/quarantine", Value::Null).await;
-    assert_eq!(q.as_array().unwrap().len(), 1, "{q}");
-    eprintln!("REPLACE_CHAIN_AND_QUARANTINE_ORIGIN_PASS={q}");
-}
-
 // ---- el-14vx0 round 3: the preview is binding (rejection el-zvg9s) --------
 
 /// The same photograph and sidecar as [`legacy_held`], journaled the way
@@ -922,7 +889,14 @@ async fn a_legacy_unit_is_offered_only_keep_and_nothing_of_it_moves_whatever_is_
         ("journal-undo", pc_db::JournalStatus::Done),
         ("journal-reconcile", pc_db::JournalStatus::Pending),
     ] {
-        for choice in ["replace", "rename-existing", "rename-returning", "keep"] {
+        // The removed words included: an old page's "replace" is no choice
+        // at all, and is kept like the default.
+        for (choice, recorded) in [
+            ("replace", "keep"),
+            ("rename-existing", "keep"),
+            ("rename-returning", "rename-returning"),
+            ("keep", "keep"),
+        ] {
             let f = Fixture::new();
             let (home, held, id) = legacy_held(&f);
             f.state
@@ -960,7 +934,7 @@ async fn a_legacy_unit_is_offered_only_keep_and_nothing_of_it_moves_whatever_is_
             assert!(!f.archive.join("frame_1.xmp").exists(), "{kind}/{choice}");
             let db = f.state.db.lock().unwrap();
             assert_eq!(db.journal_entry(id).unwrap().unwrap().status, status);
-            let needle = format!("\"choice\":\"{choice}\"");
+            let needle = format!("\"choice\":\"{recorded}\"");
             assert!(
                 db.journal_events(id)
                     .unwrap()
@@ -974,8 +948,9 @@ async fn a_legacy_unit_is_offered_only_keep_and_nothing_of_it_moves_whatever_is_
 }
 
 /// R2-B1, the other half: an interrupted legacy entry whose place is free.
-/// The sidecar the older version carried beside the frame comes back with
-/// it, or neither does — never the frame alone with the entry closed.
+/// Never the frame alone with the entry closed — and since the user's
+/// decision of 2026-10-10 (R3-B2), neither of them: a unit without evidence
+/// is only ever kept.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_legacy_interrupted_entry_brings_its_frame_back_only_with_its_sidecar() {
@@ -993,20 +968,13 @@ async fn a_legacy_interrupted_entry_brings_its_frame_back_only_with_its_sidecar(
     let job = f.apply(&p).await;
     let db = f.state.db.lock().unwrap();
     let status = db.journal_entry(id).unwrap().unwrap().status;
-    if home.exists() {
-        assert_eq!(
-            std::fs::read(home.with_extension("xmp")).unwrap(),
-            b"our edits",
-            "the frame came back without its sidecar: {job}"
-        );
-        assert!(!held.with_extension("xmp").exists(), "{job}");
-    } else {
-        assert!(
-            held.exists() && held.with_extension("xmp").exists(),
-            "{job}"
-        );
-        assert_eq!(status, pc_db::JournalStatus::Pending, "{job}");
-    }
+    assert!(!home.exists(), "{job}");
+    assert!(!home.with_extension("xmp").exists(), "{job}");
+    assert!(
+        held.exists() && held.with_extension("xmp").exists(),
+        "{job}"
+    );
+    assert_eq!(status, pc_db::JournalStatus::Pending, "{job}");
 }
 
 /// R2-B2 across entries (reviewer el-67ku, copied unchanged in substance):
@@ -1133,11 +1101,8 @@ async fn a_reviewed_conflict_changed_during_an_earlier_entry_is_journaled_as_cha
 #[cfg(unix)]
 #[tokio::test]
 async fn every_carried_out_decision_is_in_the_history_and_the_result() {
-    for (choice, outcome) in [
-        ("replace", "replaced"),
-        ("rename-existing", "renamed-existing"),
-        ("rename-returning", "renamed-returning"),
-    ] {
+    let (choice, outcome) = ("rename-returning", "renamed-returning");
+    {
         let f = Fixture::new();
         let (home, _held, id) = proven_held(&f);
         std::fs::write(&home, b"foreign existing frame").unwrap();

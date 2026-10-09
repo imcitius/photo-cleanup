@@ -1809,10 +1809,12 @@ async fn an_interrupted_move_can_be_read_against_the_disk_and_undone() {
             dst: Some(&d),
             size: 12,
             file_count: 1,
+            // With the evidence this version records: a row without it is
+            // only ever kept (el-14vx0).
             manifest: &[pc_db::Moved {
                 src: s.clone(),
                 dst: d.clone(),
-                proof: None,
+                proof: pc_core::proof::Proof::of(&std::fs::symlink_metadata(&dst).unwrap()),
             }],
         })
         .unwrap()

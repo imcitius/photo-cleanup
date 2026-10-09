@@ -91,11 +91,15 @@ fn entry(
     id
 }
 
+/// One item with the evidence every current version records, taken from
+/// what is held: a row without it is only ever kept (el-14vx0).
 fn pair(src: &Path, dst: &Path) -> pc_db::Moved {
     pc_db::Moved {
         src: src.display().to_string(),
         dst: dst.display().to_string(),
-        proof: None,
+        proof: fs::symlink_metadata(dst)
+            .ok()
+            .and_then(|md| pc_core::proof::Proof::of(&md)),
     }
 }
 
@@ -259,55 +263,46 @@ fn the_layout_is_written_once_and_grows() {
 
 // ---------------------------------------------------------------- B2 -----
 
-/// An entry from before the journal held a list: the frame comes home, its
-/// sidecar is refused (a stranger turned up at home), and the frame goes
-/// back into quarantine with it — no half undo (user decision (c)). Once the
-/// stranger is moved aside, asking again brings both home.
+/// An entry from before the journal held a list, and so without evidence:
+/// nothing proves which file is which, so it is only ever kept (user
+/// decision 2026-10-10, el-14vx0) — nothing comes home, not even with every
+/// place free, and the keep is written down with where it is and where it
+/// belongs. (Older versions brought such a frame back, and once its
+/// sidecar was refused, sent it back to quarantine.)
 #[cfg(unix)]
 #[test]
-fn a_legacy_undo_that_stopped_at_a_sidecar_can_be_asked_again() {
+fn a_legacy_undo_is_kept_and_never_moves_even_with_its_places_free() {
     let a = archive();
     let home = a.dir.join("legacy.arw");
     let held = a.quarantine.join("legacy.arw");
+    let held_side = a.quarantine.join("legacy.xmp");
     fs::create_dir_all(&a.quarantine).unwrap();
     fs::write(&held, b"raw frame").unwrap();
-    fs::write(a.quarantine.join("legacy.xmp"), b"original edits").unwrap();
+    fs::write(&held_side, b"original edits").unwrap();
     let id = entry(&a, &home, &held, &[], JournalStatus::Done);
-    let side = a.dir.join("legacy.xmp");
-    let (hook, foreign) = foreign_at(side.clone(), Stranger::File);
+    let (frame, side) = (signature(&held), signature(&held_side));
 
-    let err = crate::undo(&a.db, id).unwrap_err();
-    drop(hook);
-
-    assert!(err.to_string().contains("legacy.xmp"), "{err:#}");
-    assert_eq!(Some(signature(&side)), *foreign.borrow());
-    assert!(fs::symlink_metadata(&home).is_err(), "half undo");
-    assert_eq!(fs::read(&held).unwrap(), b"raw frame");
-    let (status, first_note) = journal_row(&a.db, id);
-    assert_eq!(status, "done");
-    assert!(first_note.contains("legacy.xmp"), "{first_note}");
-
-    fs::rename(&side, a.dir.join("saved-stranger.xmp")).unwrap();
-    let retry = crate::undo(&a.db, id);
-
-    assert!(retry.is_ok(), "{retry:?}; {:?}", journal_row(&a.db, id));
-    assert_eq!(fs::read(&side).unwrap(), b"original edits");
-    assert_eq!(fs::read(&home).unwrap(), b"raw frame");
-    assert_eq!(
-        fs::read(a.dir.join("saved-stranger.xmp")).unwrap(),
-        STRANGER
-    );
-    let (status, note) = journal_row(&a.db, id);
-    assert_eq!(status, "undone");
-    assert!(
-        note.contains(&first_note),
-        "the earlier refusal is history: {note}"
-    );
+    for _ in 0..2 {
+        let err = crate::undo(&a.db, id).unwrap_err();
+        let words = format!("{err:#}");
+        assert!(words.contains(&held.display().to_string()), "{words}");
+        assert!(words.contains(&home.display().to_string()), "{words}");
+        let decided = crate::outcome_of(&err).decisions;
+        assert_eq!(decided.len(), 1, "{words}");
+        assert_eq!(decided[0].outcome, crate::Outcome::Kept);
+        assert!(fs::symlink_metadata(&home).is_err());
+        assert!(fs::symlink_metadata(a.dir.join("legacy.xmp")).is_err());
+        assert_eq!(signature(&held), frame);
+        assert_eq!(signature(&held_side), side);
+        assert_eq!(journal_row(&a.db, id).0, "done");
+    }
+    // No evidence was adopted on the way: the row is as it was written.
+    assert!(a.db.journal_entry(id).unwrap().unwrap().manifest.is_empty());
 }
 
-/// After a refused undo a file of the frame's name turns up at home. The
-/// retry does not take that file for the frame: nothing moves, the entry
-/// stays `done`, and the frame and its sidecar stay held.
+/// A file of the frame's name turns up at home of such a row. It is not
+/// taken for the frame: nothing moves, the entry stays `done`, and the
+/// frame and its sidecar stay held.
 #[cfg(unix)]
 #[test]
 fn a_retried_undo_does_not_take_a_stranger_at_home_for_the_frame() {
@@ -320,13 +315,10 @@ fn a_retried_undo_does_not_take_a_stranger_at_home_for_the_frame() {
     fs::write(&held_side, b"original edits").unwrap();
     let id = entry(&a, &home, &held, &[], JournalStatus::Done);
     let side = a.dir.join("legacy.xmp");
-    let (hook, _) = foreign_at(side.clone(), Stranger::File);
     crate::undo(&a.db, id).unwrap_err();
-    drop(hook);
 
     // A stranger arrives at the frame's name.
     fs::write(&home, STRANGER).unwrap();
-    fs::rename(&side, a.dir.join("moved-by-user.xmp")).unwrap();
 
     let err = crate::undo(&a.db, id).unwrap_err();
 

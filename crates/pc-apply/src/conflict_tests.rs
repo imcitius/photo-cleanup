@@ -3,7 +3,7 @@
 //! `quarantine_file` with its `.xmp`, and a run of `organize` — on
 //! disposable fixtures only.
 
-use crate::{race, Choice, Conflict, Reviewed};
+use crate::{race, Choice, Reviewed, Seen};
 use pc_db::{Db, JournalStatus};
 use pc_family::plan::Candidate;
 use std::fs;
@@ -104,8 +104,11 @@ fn events(db: &Db, id: i64) -> Vec<(String, String, String)> {
         .collect()
 }
 
-fn with(choice: Choice) -> impl FnMut(&Conflict) -> anyhow::Result<Choice> {
-    move |_| Ok(choice)
+/// The entry read now, as a preview would, and `choice` made on it — then
+/// carried out.
+fn chosen(a: &Archive, id: i64, choice: Choice) -> anyhow::Result<crate::Tally> {
+    let r = reviewed_now(a, id, choice);
+    crate::undo_reviewed(&a.db, id, Some(&r))
 }
 
 #[test]
@@ -144,100 +147,6 @@ fn a_taken_place_keeps_the_file_in_quarantine_by_default_and_says_where() {
 }
 
 #[test]
-fn replace_carries_the_existing_unit_into_quarantine_under_its_own_undoable_entry() {
-    let a = archive();
-    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
-    taken(&home, &xmp);
-    // The existing frame's other sidecar travels with it too.
-    let theirs_too = a.dir.join("IMG.CR2.xmp");
-    fs::write(&theirs_too, b"their second sidecar").unwrap();
-
-    let done = crate::undo_with(&a.db, id, &mut with(Choice::Replace)).unwrap();
-
-    assert_eq!(fs::read(&home).unwrap(), OURS);
-    assert_eq!(fs::read(&xmp).unwrap(), OUR_EDITS);
-    assert!(!theirs_too.exists());
-    assert_eq!(done.files_back, 2);
-    assert_eq!(done.set_aside, 3);
-    assert_eq!(done.entries_back, 1);
-    assert_eq!(status(&a.db, id), JournalStatus::Undone);
-    // Theirs is in quarantine — under free names, since ours sat at the
-    // plain ones until it came back — never deleted.
-    let aside: i64 =
-        a.db.conn
-            .query_row("SELECT max(id) FROM journal", [], |r| r.get(0))
-            .unwrap();
-    let j2 = a.db.journal_entry(aside).unwrap().unwrap();
-    assert_eq!(j2.op, "quarantine-file");
-    assert_eq!(j2.status, JournalStatus::Done);
-    let parked: Vec<(String, Vec<u8>)> = j2
-        .manifest
-        .iter()
-        .map(|m| (m.dst.clone(), fs::read(&m.dst).unwrap()))
-        .collect();
-    let qdir = home.parent().unwrap().join(pc_core::QUARANTINE_DIR);
-    assert_eq!(
-        parked,
-        [
-            (s(&qdir.join("IMG_1.CR2")), THEIRS.to_vec()),
-            (s(&qdir.join("IMG_1.xmp")), THEIR_EDITS.to_vec()),
-            (
-                s(&qdir.join("IMG_1.CR2.xmp")),
-                b"their second sidecar".to_vec()
-            ),
-        ]
-    );
-    let ev = events(&a.db, id);
-    assert!(
-        ev.iter().any(|(p, k, d)| p == "undo"
-            && k == "set-aside"
-            && d.contains(&format!("\"aside_entry\":{aside}"))),
-        "{ev:?}"
-    );
-
-    // Their unit's own undo meets ours at its place: kept, by default.
-    assert!(crate::undo(&a.db, aside).is_err());
-    assert_eq!(fs::read(&home).unwrap(), OURS);
-    // With ours sent back to quarantine, theirs comes home whole.
-    crate::undo_with(&a.db, aside, &mut with(Choice::Replace)).unwrap();
-    assert_eq!(fs::read(&home).unwrap(), THEIRS);
-    assert_eq!(fs::read(&xmp).unwrap(), THEIR_EDITS);
-    assert_eq!(fs::read(&theirs_too).unwrap(), b"their second sidecar");
-}
-
-#[test]
-fn rename_existing_moves_the_existing_unit_to_the_first_free_name_beside_it() {
-    let a = archive();
-    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
-    taken(&home, &xmp);
-    // `_1` is someone else's already: it is skipped, never replaced.
-    let one = a.dir.join("IMG_1.CR2");
-    fs::write(&one, b"unrelated").unwrap();
-
-    let done = crate::undo_with(&a.db, id, &mut with(Choice::RenameExisting)).unwrap();
-
-    assert_eq!(fs::read(&home).unwrap(), OURS);
-    assert_eq!(fs::read(&xmp).unwrap(), OUR_EDITS);
-    assert_eq!(fs::read(&one).unwrap(), b"unrelated");
-    assert_eq!(fs::read(a.dir.join("IMG_2.CR2")).unwrap(), THEIRS);
-    assert_eq!(fs::read(a.dir.join("IMG_2.xmp")).unwrap(), THEIR_EDITS);
-    assert_eq!((done.set_aside, done.files_back), (2, 2));
-    let j2: i64 =
-        a.db.conn
-            .query_row("SELECT max(id) FROM journal", [], |r| r.get(0))
-            .unwrap();
-    let e2 = a.db.journal_entry(j2).unwrap().unwrap();
-    assert_eq!(
-        (e2.op.as_str(), e2.status),
-        ("set-aside", JournalStatus::Done)
-    );
-    assert_eq!(
-        e2.dst.as_deref(),
-        Some(s(&a.dir.join("IMG_2.CR2")).as_str())
-    );
-}
-
-#[test]
 fn rename_returning_skips_a_taken_name_and_leaves_the_existing_file_alone() {
     let a = archive();
     let (id, home, xmp) = quarantined(&a, "IMG.CR2");
@@ -246,7 +155,7 @@ fn rename_returning_skips_a_taken_name_and_leaves_the_existing_file_alone() {
     // refuse that name just the same — the unit needs every name free.
     fs::write(a.dir.join("IMG_1.CR2"), b"unrelated").unwrap();
 
-    let done = crate::undo_with(&a.db, id, &mut with(Choice::RenameReturning)).unwrap();
+    let done = chosen(&a, id, Choice::RenameReturning).unwrap();
 
     assert_eq!(fs::read(&home).unwrap(), THEIRS);
     assert_eq!(fs::read(&xmp).unwrap(), THEIR_EDITS);
@@ -254,10 +163,7 @@ fn rename_returning_skips_a_taken_name_and_leaves_the_existing_file_alone() {
     assert!(!a.dir.join("IMG_1.xmp").exists());
     assert_eq!(fs::read(a.dir.join("IMG_2.CR2")).unwrap(), OURS);
     assert_eq!(fs::read(a.dir.join("IMG_2.xmp")).unwrap(), OUR_EDITS);
-    assert_eq!(
-        (done.files_back, done.set_aside, done.entries_back),
-        (2, 0, 1)
-    );
+    assert_eq!((done.files_back, done.entries_back), (2, 1));
     assert_eq!(status(&a.db, id), JournalStatus::Undone);
     // The index follows the photograph to its new name.
     let (path, state): (String, String) =
@@ -290,7 +196,7 @@ fn a_name_created_between_the_choice_and_the_rename_is_not_replaced() {
         Ok(())
     });
 
-    crate::undo_with(&a.db, id, &mut with(Choice::RenameReturning)).unwrap();
+    chosen(&a, id, Choice::RenameReturning).unwrap();
 
     assert_eq!(fs::read(&one).unwrap(), b"created at the last moment");
     assert_eq!(fs::read(a.dir.join("IMG_2.CR2")).unwrap(), OURS);
@@ -327,23 +233,13 @@ fn lightroom_files_offer_only_keep_and_return_under_a_free_name() {
         .unwrap();
 
     let e = a.db.journal_entry(id).unwrap().unwrap();
-    let c = crate::undo_conflict(&a.db, &e).unwrap().unwrap();
+    let c = crate::undo_conflict(&e).unwrap().unwrap();
     assert_eq!(c.choices, [Choice::Keep, Choice::RenameReturning]);
-    assert!(
-        c.limits.iter().any(|l| l.contains("Lightroom")),
-        "{:?}",
-        c.limits
-    );
-
-    for refused in [Choice::Replace, Choice::RenameExisting] {
-        let err = crate::undo_with(&a.db, id, &mut with(refused)).unwrap_err();
-        assert!(format!("{err:#}").contains(refused.as_str()), "{err:#}");
-        assert_eq!(fs::read(&home).unwrap(), THEIRS);
-        assert_eq!(fs::read(&xmp).unwrap(), THEIR_EDITS);
-        assert_eq!(fs::read(q(&home)).unwrap(), OURS);
-        assert_eq!(status(&a.db, id), JournalStatus::Done);
+    // Nothing that could touch the catalogued file exists to be chosen.
+    for word in ["replace", "rename-existing"] {
+        assert_eq!(Choice::parse(word), None);
     }
-    crate::undo_with(&a.db, id, &mut with(Choice::RenameReturning)).unwrap();
+    chosen(&a, id, Choice::RenameReturning).unwrap();
     assert_eq!(
         fs::read(&home).unwrap(),
         THEIRS,
@@ -358,14 +254,14 @@ fn a_foreign_file_that_appears_after_the_preview_is_refused_not_replaced() {
     let (id, home, xmp) = quarantined(&a, "IMG.CR2");
     taken(&home, &xmp);
     let e = a.db.journal_entry(id).unwrap().unwrap();
-    let seen = crate::undo_conflict(&a.db, &e).unwrap().unwrap();
+    let seen = crate::undo_conflict(&e).unwrap().unwrap();
     // After the preview, the file at the place is swapped for another.
     fs::rename(&home, a.dir.join("moved-away.CR2")).unwrap();
     fs::write(&home, b"a different file, never reviewed").unwrap();
 
     let reviewed = Reviewed {
-        seen,
-        choice: Choice::Replace,
+        seen: Seen::Taken(seen),
+        choice: Choice::RenameReturning,
     };
     let err = crate::undo_reviewed(&a.db, id, Some(&reviewed)).unwrap_err();
 
@@ -381,7 +277,8 @@ fn a_foreign_file_that_appears_after_the_preview_is_refused_not_replaced() {
         a.db.conn
             .query_row("SELECT count(*) FROM journal", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(ops, 1, "nothing was set aside");
+    assert_eq!(ops, 1, "no other entry was written");
+    assert!(!a.dir.join("IMG_1.CR2").exists());
 
     // No conflict when it was reviewed, one now: refused as changed since
     // the preview — nothing decided for anyone, never replaced.
@@ -398,76 +295,6 @@ fn a_foreign_file_that_appears_after_the_preview_is_refused_not_replaced() {
 }
 
 #[test]
-fn an_occupant_changed_between_the_choice_and_its_move_is_refused_whole() {
-    let a = archive();
-    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
-    taken(&home, &xmp);
-    let theirs = home.clone();
-    // The existing photograph is rewritten after the choice, right before
-    // it would be set aside.
-    let _g = race::before_move(move |src, _| {
-        if src == theirs {
-            fs::write(&theirs, b"rewritten by its program, a different size")?;
-        }
-        Ok(())
-    });
-
-    let err = crate::undo_with(&a.db, id, &mut with(Choice::RenameExisting)).unwrap_err();
-
-    assert!(format!("{err:#}").contains("nothing"), "{err:#}");
-    assert_eq!(
-        fs::read(&home).unwrap(),
-        b"rewritten by its program, a different size"
-    );
-    assert_eq!(fs::read(&xmp).unwrap(), THEIR_EDITS);
-    assert!(!a.dir.join("IMG_1.CR2").exists() && !a.dir.join("IMG_1.xmp").exists());
-    assert_eq!(fs::read(q(&home)).unwrap(), OURS);
-    assert_eq!(status(&a.db, id), JournalStatus::Done);
-    let failed: String =
-        a.db.conn
-            .query_row(
-                "SELECT status FROM journal WHERE op = 'set-aside'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-    assert_eq!(failed, "failed");
-}
-
-#[test]
-fn a_replace_stopped_after_setting_aside_carries_on_from_there_on_retry() {
-    let a = archive();
-    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
-    taken(&home, &xmp);
-    let ours = q(&home);
-    // The return home fails once, after theirs was set aside.
-    let mut once = true;
-    let _g = race::before_move(move |src, _| {
-        if src == ours && std::mem::take(&mut once) {
-            return Err(std::io::Error::other("the disk went away for a moment"));
-        }
-        Ok(())
-    });
-
-    let err = crate::undo_with(&a.db, id, &mut with(Choice::Replace)).unwrap_err();
-
-    let stop = crate::stopped_run(&err).expect("what was done before the stop");
-    assert_eq!(stop.done.set_aside, 2);
-    assert_eq!(status(&a.db, id), JournalStatus::Done);
-    assert!(!home.exists(), "the place was made free");
-    assert_eq!(fs::read(q(&home)).unwrap(), OURS);
-
-    // Asked again — with the default, since nothing is in the way now.
-    let done = crate::undo(&a.db, id).unwrap();
-    assert_eq!(done.files_back, 2);
-    assert_eq!(fs::read(&home).unwrap(), OURS);
-    assert_eq!(fs::read(&xmp).unwrap(), OUR_EDITS);
-    let qdir = home.parent().unwrap().join(pc_core::QUARANTINE_DIR);
-    assert_eq!(fs::read(qdir.join("IMG_1.CR2")).unwrap(), THEIRS);
-    assert_eq!(fs::read(qdir.join("IMG_1.xmp")).unwrap(), THEIR_EDITS);
-}
-
-#[test]
 fn a_return_under_free_names_interrupted_after_its_frame_finishes_on_retry() {
     let a = archive();
     let (id, home, xmp) = quarantined(&a, "IMG.CR2");
@@ -475,7 +302,7 @@ fn a_return_under_free_names_interrupted_after_its_frame_finishes_on_retry() {
     // What a process killed mid-unit leaves: the attempt recorded, the
     // frame already under its free name, the sidecar still in quarantine.
     let e = a.db.journal_entry(id).unwrap().unwrap();
-    let c = crate::undo_conflict(&a.db, &e).unwrap().unwrap();
+    let c = crate::undo_conflict(&e).unwrap().unwrap();
     let (one, one_xmp) = (a.dir.join("IMG_1.CR2"), a.dir.join("IMG_1.xmp"));
     let note = pc_db::ConflictNote {
         choice: "rename-returning".into(),
@@ -494,7 +321,6 @@ fn a_return_under_free_names_interrupted_after_its_frame_finishes_on_retry() {
                 },
             })
             .collect(),
-        aside_entry: None,
         outcome: None,
     };
     a.db.journal_event_conflict(id, "undo", "attempt", "", &note)
@@ -530,7 +356,6 @@ fn a_stranger_at_a_recorded_free_name_is_not_taken_for_the_frame() {
             dst: e.manifest[0].dst.clone(),
             to: s(&one),
         }],
-        aside_entry: None,
         outcome: None,
     };
     a.db.journal_event_conflict(id, "undo", "attempt", "", &note)
@@ -585,12 +410,25 @@ fn every_conflict_of_a_run_is_asked_and_answered_on_its_own() {
         fs::write(a.dir.join(name), THEIRS).unwrap();
     }
 
-    let mut asked = Vec::new();
-    let (back, failed) = crate::undo_run_with(&a.db, a.run, &mut |c| {
-        asked.push(c.returning[0].home.clone());
-        Ok(Choice::RenameReturning)
-    })
-    .unwrap();
+    let seen = crate::run_seen(&a.db, a.run).unwrap();
+    let asked: Vec<String> = seen
+        .iter()
+        .filter_map(|s| s.conflict())
+        .map(|c| c.returning[0].home.clone())
+        .collect();
+    let reviewed = seen
+        .into_iter()
+        .map(|s| {
+            (
+                s.journal_id(),
+                Reviewed {
+                    seen: s,
+                    choice: Choice::RenameReturning,
+                },
+            )
+        })
+        .collect();
+    let (back, failed) = crate::undo_run_reviewed(&a.db, a.run, &reviewed).unwrap();
 
     assert!(failed.is_empty(), "{failed:?}");
     assert_eq!(asked.len(), 2);
@@ -625,11 +463,9 @@ fn reviewer_a_new_existing_companion_during_choice_must_refuse_the_whole_unit() 
     let (id, home, xmp) = quarantined(&a, "IMG.CR2");
     taken(&home, &xmp);
     let before = review_metadata(&home);
-    let mut decide = |_: &Conflict| {
-        fs::write(a.dir.join("IMG.aae"), b"late foreign edits").unwrap();
-        Ok(Choice::RenameExisting)
-    };
-    let result = crate::undo_with(&a.db, id, &mut decide);
+    let r = reviewed_now(&a, id, Choice::RenameReturning);
+    fs::write(a.dir.join("IMG.aae"), b"late foreign edits").unwrap();
+    let result = crate::undo_reviewed(&a.db, id, Some(&r));
     eprintln!(
         "NEW_COMPANION_RESULT={result:?}; late_sidecar={:?}; home={:?}; aside={:?}",
         fs::read(a.dir.join("IMG.aae")),
@@ -645,30 +481,6 @@ fn reviewer_a_new_existing_companion_during_choice_must_refuse_the_whole_unit() 
 }
 
 #[test]
-fn reviewer_a_changed_returning_member_must_not_set_the_existing_unit_aside() {
-    let a = archive();
-    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
-    taken(&home, &xmp);
-    let before = review_metadata(&home);
-    let mut decide = |_: &Conflict| {
-        fs::write(
-            q(&xmp),
-            b"a foreign change to returning sidecar after the question",
-        )
-        .unwrap();
-        Ok(Choice::Replace)
-    };
-    let err = crate::undo_with(&a.db, id, &mut decide).unwrap_err();
-    eprintln!(
-        "CHANGED_RETURNING_ERROR={err:#}; tally={:?}; home_exists={}",
-        crate::stopped_run(&err).map(|s| &s.done),
-        home.exists()
-    );
-    assert!(home.exists(),"existing frame was quarantined although returning unit was already unproven before first write");
-    assert_eq!(review_metadata(&home), before);
-}
-
-#[test]
 fn reviewer_existing_disappears_during_choice_refuses_and_keeps_payloads() {
     let a = archive();
     let (id, home, xmp) = quarantined(&a, "IMG.CR2");
@@ -676,41 +488,13 @@ fn reviewer_existing_disappears_during_choice_refuses_and_keeps_payloads() {
     let before = review_metadata(&home);
     let side_before = review_metadata(&xmp);
     let away = a.dir.join("external-move.CR2");
-    let err = crate::undo_with(&a.db, id, &mut |_| {
-        fs::rename(&home, &away).unwrap();
-        Ok(Choice::Replace)
-    })
-    .unwrap_err();
+    let r = reviewed_now(&a, id, Choice::RenameReturning);
+    fs::rename(&home, &away).unwrap();
+    let err = crate::undo_reviewed(&a.db, id, Some(&r)).unwrap_err();
     assert!(format!("{err:#}").contains("nothing"), "{err:#}");
     assert_eq!(review_metadata(&away), before);
     assert_eq!(review_metadata(&xmp), side_before);
     assert_eq!(fs::read(q(&home)).unwrap(), OURS);
-}
-
-#[test]
-fn reviewer_replace_quarantine_collision_preserves_foreign_metadata_and_retries() {
-    let a = archive();
-    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
-    taken(&home, &xmp);
-    let target = q(&home).with_file_name("IMG_1.CR2");
-    let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let capture = seen.clone();
-    let dst = target.clone();
-    let _g = race::before_move(move |_, to| {
-        if to == dst && !dst.exists() {
-            fs::write(&dst, b"foreign quarantine collision")?;
-            *capture.borrow_mut() = Some(review_metadata(&dst));
-        }
-        Ok(())
-    });
-    let done = crate::undo_with(&a.db, id, &mut with(Choice::Replace)).unwrap();
-    assert_eq!(done.set_aside, 2);
-    assert_eq!(review_metadata(&target), seen.borrow().clone().unwrap());
-    assert_eq!(
-        fs::read(q(&home).with_file_name("IMG_2.CR2")).unwrap(),
-        THEIRS
-    );
-    assert_eq!(fs::read(&home).unwrap(), OURS);
 }
 
 #[test]
@@ -721,7 +505,7 @@ fn reviewer_a_very_long_suffix_refuses_without_touching_foreign_metadata() {
     taken(&home, &xmp);
     let before = review_metadata(&home);
     let side = review_metadata(&xmp);
-    let e = crate::undo_with(&a.db, id, &mut with(Choice::RenameReturning)).unwrap_err();
+    let e = chosen(&a, id, Choice::RenameReturning).unwrap_err();
     eprintln!("LONG_NAME_ERROR={e:#}");
     assert_eq!(review_metadata(&home), before);
     assert_eq!(review_metadata(&xmp), side);
@@ -736,7 +520,7 @@ fn reviewer_unicode_case_companion_collision_is_skipped_as_a_unit() {
     let collision = a.dir.join("Été_1.XMP");
     fs::write(&collision, b"foreign uppercase sidecar").unwrap();
     let before = review_metadata(&collision);
-    let done = crate::undo_with(&a.db, id, &mut with(Choice::RenameReturning)).unwrap();
+    let done = chosen(&a, id, Choice::RenameReturning).unwrap();
     assert_eq!(done.files_back, 2);
     assert_eq!(review_metadata(&collision), before);
     // On case-insensitive native APFS the uppercase name collides with .xmp.
@@ -762,11 +546,11 @@ fn an_interrupted_entry_whose_place_is_taken_offers_the_same_choices_on_reconcil
     taken(&home, &xmp);
 
     let entry = a.db.journal_entry(id).unwrap().unwrap();
-    let c = crate::reconcile_conflict(&a.db, &entry)
+    let c = crate::reconcile_conflict(&entry)
         .unwrap()
         .expect("a conflict");
     assert_eq!(c.choices, Choice::ALL.to_vec());
-    assert!(crate::undo_conflict(&a.db, &entry).unwrap().is_none());
+    assert!(crate::undo_conflict(&entry).unwrap().is_none());
 
     let e = crate::reconcile_undo(&a.db, id).unwrap_err();
     assert!(crate::conflict_kept(&e).is_some(), "{e:#}");
@@ -777,7 +561,8 @@ fn an_interrupted_entry_whose_place_is_taken_offers_the_same_choices_on_reconcil
         .iter()
         .any(|(p, k, d)| p == "reconcile" && k == "kept" && d.contains("\"choice\":\"keep\"")));
 
-    let r = crate::reconcile_undo_with(&a.db, id, &mut with(Choice::RenameReturning)).unwrap();
+    let r = reviewed_now(&a, id, Choice::RenameReturning);
+    let r = crate::reconcile_reviewed(&a.db, id, Some(&r)).unwrap();
     assert_eq!(r.done.files_back, 2);
     assert_eq!(status(&a.db, id), JournalStatus::Undone);
     assert_eq!(fs::read(&home).unwrap(), THEIRS);
@@ -787,40 +572,6 @@ fn an_interrupted_entry_whose_place_is_taken_offers_the_same_choices_on_reconcil
     assert!(events(&a.db, id)
         .iter()
         .any(|(p, k, _)| p == "reconcile" && k == "done"));
-}
-
-/// el-14vx0 B3. A reconciliation reviewed with "replace" carries the
-/// existing unit into quarantine under its own entry first, as an undo does.
-#[test]
-fn a_reviewed_replace_on_reconcile_sets_the_existing_unit_aside_first() {
-    let a = archive();
-    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
-    a.db.journal_finish(id, JournalStatus::Pending, None)
-        .unwrap();
-    taken(&home, &xmp);
-    let entry = a.db.journal_entry(id).unwrap().unwrap();
-    let seen = crate::reconcile_conflict(&a.db, &entry).unwrap().unwrap();
-
-    let r = crate::reconcile_reviewed(
-        &a.db,
-        id,
-        Some(&Reviewed {
-            seen,
-            choice: Choice::Replace,
-        }),
-    )
-    .unwrap();
-
-    assert_eq!(r.done.set_aside, 2);
-    assert_eq!(fs::read(&home).unwrap(), OURS);
-    assert_eq!(fs::read(&xmp).unwrap(), OUR_EDITS);
-    let aside: Vec<_> = fs::read_dir(a.dir.join(pc_core::QUARANTINE_DIR))
-        .unwrap()
-        .flatten()
-        .map(|e| fs::read(e.path()).unwrap())
-        .collect();
-    assert!(aside.contains(&THEIRS.to_vec()) && aside.contains(&THEIR_EDITS.to_vec()));
-    assert_eq!(status(&a.db, id), JournalStatus::Undone);
 }
 
 /// el-14vx0 B4. "Keep", once chosen and confirmed, is carried out as such:
@@ -833,13 +584,13 @@ fn a_reviewed_keep_is_carried_out_written_down_and_typed() {
     let (id, home, xmp) = quarantined(&a, "IMG.CR2");
     taken(&home, &xmp);
     let entry = a.db.journal_entry(id).unwrap().unwrap();
-    let seen = crate::undo_conflict(&a.db, &entry).unwrap().unwrap();
+    let seen = crate::undo_conflict(&entry).unwrap().unwrap();
 
     let e = crate::undo_reviewed(
         &a.db,
         id,
         Some(&Reviewed {
-            seen,
+            seen: Seen::Taken(seen),
             choice: Choice::Keep,
         }),
     )
@@ -867,12 +618,17 @@ fn a_reviewed_keep_is_carried_out_written_down_and_typed() {
 
 // ---- el-14vx0 round 3: the preview is binding (rejection el-zvg9s) --------
 
+/// What a preview reads for the entry now — of an undo, or of the
+/// reconciliation of an interrupted one — with `choice` made on it.
 fn reviewed_now(a: &Archive, id: i64, choice: Choice) -> Reviewed {
     let entry = a.db.journal_entry(id).unwrap().unwrap();
+    let seen = if entry.status == JournalStatus::Pending {
+        crate::reconcile_seen(&entry)
+    } else {
+        crate::undo_seen(&entry)
+    };
     Reviewed {
-        seen: crate::undo_conflict(&a.db, &entry)
-            .unwrap()
-            .expect("a conflict"),
+        seen: seen.unwrap(),
         choice,
     }
 }
@@ -891,12 +647,7 @@ fn changed_event(a: &Archive, id: i64, choice: Choice) -> bool {
 /// preview again.
 #[test]
 fn a_reviewed_conflict_that_vanished_is_refused_never_undone_otherwise() {
-    for choice in [
-        Choice::Keep,
-        Choice::Replace,
-        Choice::RenameExisting,
-        Choice::RenameReturning,
-    ] {
+    for choice in Choice::ALL {
         let a = archive();
         let (id, home, xmp) = quarantined(&a, "IMG.CR2");
         taken(&home, &xmp);
@@ -928,7 +679,7 @@ fn a_reviewed_conflict_that_changed_is_refused_and_written_down_with_its_choice(
     let a = archive();
     let (id, home, xmp) = quarantined(&a, "IMG.CR2");
     taken(&home, &xmp);
-    let r = reviewed_now(&a, id, Choice::Replace);
+    let r = reviewed_now(&a, id, Choice::RenameReturning);
     fs::write(&home, b"an ordinary edit after the preview").unwrap();
 
     let e = crate::undo_reviewed(&a.db, id, Some(&r)).unwrap_err();
@@ -940,7 +691,7 @@ fn a_reviewed_conflict_that_changed_is_refused_and_written_down_with_its_choice(
     );
     assert_eq!(fs::read(q(&home)).unwrap(), OURS);
     assert!(
-        changed_event(&a, id, Choice::Replace),
+        changed_event(&a, id, Choice::RenameReturning),
         "{:?}",
         events(&a.db, id)
     );
@@ -991,15 +742,11 @@ fn a_row_without_evidence_is_offered_only_keep() {
     a.db.journal_finish(id, JournalStatus::Done, None).unwrap();
 
     let r = reviewed_now(&a, id, Choice::RenameReturning);
-    assert_eq!(r.seen.choices, vec![Choice::Keep]);
-    for choice in [
-        Choice::Replace,
-        Choice::RenameExisting,
-        Choice::RenameReturning,
-    ] {
-        assert!(crate::undo_with(&a.db, id, &mut with(choice)).is_err());
+    assert_eq!(r.seen.conflict().unwrap().choices, vec![Choice::Keep]);
+    for choice in Choice::ALL {
         let r = reviewed_now(&a, id, choice);
         assert!(crate::undo_reviewed(&a.db, id, Some(&r)).is_err());
+        assert!(crate::undo(&a.db, id).is_err());
     }
     assert_eq!(fs::read(&home).unwrap(), THEIRS);
     assert_eq!(fs::read(&held).unwrap(), OURS);
@@ -1012,11 +759,8 @@ fn a_row_without_evidence_is_offered_only_keep() {
 /// Point 3: a carried out choice is written down with its outcome.
 #[test]
 fn a_carried_out_choice_is_written_down_with_its_outcome() {
-    for (choice, outcome) in [
-        (Choice::Replace, "replaced"),
-        (Choice::RenameExisting, "renamed-existing"),
-        (Choice::RenameReturning, "renamed-returning"),
-    ] {
+    let (choice, outcome) = (Choice::RenameReturning, "renamed-returning");
+    {
         let a = archive();
         let (id, home, xmp) = quarantined(&a, "IMG.CR2");
         taken(&home, &xmp);
@@ -1117,17 +861,17 @@ mod review_round3 {
     }
 
     /// R3-B3: a "keep" answered after the existing file changed is not a
-    /// keep of what was shown — it is changed since the preview.
+    /// keep of what was shown — it is changed since the preview. (The
+    /// callback that asked while reading, `undo_with`, is gone: every
+    /// answer is now given on a preview and bound to it.)
     #[test]
     fn r3_interactive_keep_after_change_is_changed_not_kept() {
         let a = archive();
         let (id, home, xmp) = quarantined(&a, "IMG.CR2");
         taken(&home, &xmp);
-        let e = crate::undo_with(&a.db, id, &mut |_| {
-            fs::write(&home, b"edit while answering keep")?;
-            Ok(Choice::Keep)
-        })
-        .unwrap_err();
+        let r = reviewed_now(&a, id, Choice::Keep);
+        fs::write(&home, b"edit while answering keep").unwrap();
+        let e = crate::undo_reviewed(&a.db, id, Some(&r)).unwrap_err();
         assert_eq!(fs::read(&home).unwrap(), b"edit while answering keep");
         assert_eq!(fs::read(q(&home)).unwrap(), OURS);
         assert!(
@@ -1166,19 +910,38 @@ mod review_round3 {
             }
             let before = review_metadata(&held);
             let edits = review_metadata(&held.with_extension("xmp"));
+            let r = reviewed_now(&a, id, Choice::RenameReturning);
+            assert!(matches!(&r.seen, Seen::Held(h) if h.legacy), "{:?}", r.seen);
             let result = if pending {
-                crate::reconcile_reviewed(&a.db, id, None).map(|r| r.done)
+                crate::reconcile_reviewed(&a.db, id, Some(&r)).map(|r| r.done)
             } else {
-                crate::undo_reviewed(&a.db, id, None)
+                crate::undo_reviewed(&a.db, id, Some(&r))
+            };
+            let kept = result
+                .as_ref()
+                .err()
+                .map(crate::outcome_of)
+                .is_some_and(|t| {
+                    t.decisions.iter().any(|d| {
+                        d.outcome == crate::Outcome::Kept && d.choice == Some(Choice::Keep)
+                    })
+                });
+            // Nor by the plain undo or reconciliation.
+            let plain = if pending {
+                crate::reconcile_undo(&a.db, id).map(|r| r.done)
+            } else {
+                crate::undo(&a.db, id)
             };
             let preserved = held.exists()
                 && held.with_extension("xmp").exists()
                 && review_metadata(&held) == before
                 && review_metadata(&held.with_extension("xmp")) == edits
-                && !home.exists();
-            if !preserved {
+                && !home.exists()
+                && plain.is_err()
+                && a.db.journal_entry(id).unwrap().unwrap().manifest.is_empty();
+            if !(preserved && kept) {
                 failures.push(format!(
-                    "pending={pending} result={result:?} status={:?} events={:?}",
+                    "pending={pending} result={result:?} plain={plain:?} status={:?} events={:?}",
                     status(&a.db, id),
                     events(&a.db, id)
                 ));

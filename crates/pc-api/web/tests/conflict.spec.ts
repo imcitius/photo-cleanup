@@ -99,6 +99,10 @@ test("a restore whose place is taken keeps the file by default and returns it as
     name: "keep it in quarantine, return it by hand later",
   });
   await expect(keep).toBeChecked();
+  // Only the two choices that never touch the existing file (user
+  // decision 2026-10-10): no replace, no renaming of the existing file.
+  await expect(conflicts.getByRole("radio")).toHaveCount(2);
+  await expect(conflicts).not.toContainText("replace the existing file");
   await expect(
     dialog.getByRole("button", { name: "Restore", exact: true }),
   ).toBeEnabled();
