@@ -143,7 +143,10 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         assert!(db.record_thumb_generation(&dir, None, "d").unwrap());
         let other_name = tmp.path().join("thumbs/../thumbs");
-        assert_eq!(db.thumb_generation(&other_name).unwrap().as_deref(), Some("d"));
+        assert_eq!(
+            db.thumb_generation(&other_name).unwrap().as_deref(),
+            Some("d")
+        );
         // Another cache folder has its own row.
         assert_eq!(db.thumb_generation(Path::new("/other")).unwrap(), None);
     }

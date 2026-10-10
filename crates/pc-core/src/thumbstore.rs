@@ -171,10 +171,7 @@ impl ThumbStore {
     /// The active generation's folder, once there is one.
     pub fn generation_dir(&self) -> Option<PathBuf> {
         let active = self.lock();
-        active
-            .generation
-            .as_ref()
-            .map(|g| self.root.join(&g.name))
+        active.generation.as_ref().map(|g| self.root.join(&g.name))
     }
 
     /// `<generation>/ab/cd/<key>.jpg` — two levels of fan-out keeps
@@ -522,12 +519,20 @@ mod platform {
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(e) => {
                     return Err(e).with_context(|| {
-                        crate::tf!("не создать {0}", "cannot create {0}", root.join(&name).display())
+                        crate::tf!(
+                            "не создать {0}",
+                            "cannot create {0}",
+                            root.join(&name).display()
+                        )
                     })
                 }
             }
             let dir = root.open_dir(&name).with_context(|| {
-                crate::tf!("не открыть {0}", "cannot open {0}", root.join(&name).display())
+                crate::tf!(
+                    "не открыть {0}",
+                    "cannot open {0}",
+                    root.join(&name).display()
+                )
             })?;
             let md = dir.file().metadata()?;
             if md.uid() != euid() || md.mode() & 0o077 != 0 {
@@ -718,7 +723,9 @@ mod platform {
             static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
             let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
             let tmp = format!("{key}.{}.{sequence}.tmp", std::process::id());
-            let mut file = fan.create_new(&tmp, FILE_MODE).map_err(|e| cannot(e, &tmp))?;
+            let mut file = fan
+                .create_new(&tmp, FILE_MODE)
+                .map_err(|e| cannot(e, &tmp))?;
             let left = |e: io::Error| {
                 cannot(e, name).context(crate::tf!(
                     "временный файл {0} оставлен на месте",
@@ -840,7 +847,11 @@ mod platform {
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(e) => {
                     return Err(e).with_context(|| {
-                        crate::tf!("не создать {0}", "cannot create {0}", root.0.join(&name).display())
+                        crate::tf!(
+                            "не создать {0}",
+                            "cannot create {0}",
+                            root.0.join(&name).display()
+                        )
                     })
                 }
             }
@@ -1179,7 +1190,8 @@ mod generation_tests {
         let old = s.generation_dir().unwrap();
         fs::create_dir_all(root.join("ab/cd")).unwrap();
         fs::write(
-            root.join("ab/cd").join(format!("abcd{}.jpg", "6".repeat(28))),
+            root.join("ab/cd")
+                .join(format!("abcd{}.jpg", "6".repeat(28))),
             b"legacy thumbnail 4119",
         )
         .unwrap();
@@ -1214,7 +1226,11 @@ mod generation_tests {
         ] {
             assert!(named.contains(&p), "{p:?} not named: {reset:?}");
         }
-        let album = reset.kept.iter().find(|k| k.path == root.join("album")).unwrap();
+        let album = reset
+            .kept
+            .iter()
+            .find(|k| k.path == root.join("album"))
+            .unwrap();
         assert!(album.bytes >= 40_000, "{album:?}");
         assert!(reset.kept_bytes >= 40_000 + 5 * 8, "{reset:?}");
         assert!(!reset.kept_bytes_partial);
@@ -1226,8 +1242,10 @@ mod generation_tests {
         for entry in &before {
             assert!(tree(&root).contains(entry), "{entry:?} changed");
         }
-        assert_eq!(ledger.recorded(&root).unwrap().unwrap().split(' ').next(),
-            reset.generation.file_name().unwrap().to_str());
+        assert_eq!(
+            ledger.recorded(&root).unwrap().unwrap().split(' ').next(),
+            reset.generation.file_name().unwrap().to_str()
+        );
     }
 
     /// The generation is recorded in the ledger, not in the cache: a store
