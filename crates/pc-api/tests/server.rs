@@ -340,3 +340,67 @@ async fn restart_marks_abandoned_work_interrupted_without_replaying_pending_move
         assert!(pc_core::lock::take_writer(&cfg.db_path, "next owner").is_ok());
     }
 }
+
+/// A cache that refuses every thumbnail, as a bound cache replaced at its
+/// path does (el-5x1uh O2). The database itself is confirmed.
+#[derive(Debug)]
+struct RefusedCache;
+
+impl pc_core::storage::StorageBinding for RefusedCache {
+    fn check_database(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn check_thumbnails(&self) -> Result<(), String> {
+        Err("the thumbnail folder was replaced (6604)".into())
+    }
+    fn check_thumbnail_folder(&self, _: &std::fs::File) -> Result<(), String> {
+        self.check_thumbnails()
+    }
+}
+
+/// O2: the web's index job does not report `done` over a refused cache.
+/// It fails with the binding's refusal, the refusal is listed in the job's
+/// progress, no file is recorded without its thumbnail and nothing is
+/// written into the cache — as the command line, which runs the same
+/// `pc_work::index` and exits with the same error.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_index_job_over_a_refused_cache_fails_and_names_the_refusal() {
+    let tmp = tempfile::tempdir().unwrap();
+    // SQLite opens a bound database without following a link anywhere on
+    // the path (macOS's temporary folder is under one).
+    let dir = tmp.path().canonicalize().unwrap();
+    let archive = archive(&dir);
+    drop(pc_db::Db::open(&dir.join("photo-cleanup.db")).unwrap());
+    std::fs::create_dir(dir.join("thumbs")).unwrap();
+    let mut cfg = config(&dir);
+    cfg.binding = Some(std::sync::Arc::new(RefusedCache));
+    let db = cfg.db_path.clone();
+    let server = start(cfg).await.unwrap();
+    let id = start_index(server.local_addr(), &archive).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while matches!(job_state(&db, id).as_str(), "queued" | "running") {
+        assert!(std::time::Instant::now() < deadline, "the job never ended");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(job_state(&db, id), "failed");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let (error, progress): (String, String) = conn
+        .query_row("SELECT error, progress FROM jobs WHERE id=?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert!(error.contains("6604"), "{error}");
+    let progress: serde_json::Value = serde_json::from_str(&progress).unwrap();
+    let refusals = progress["refusals"].as_array().unwrap();
+    assert!(!refusals.is_empty(), "{progress}");
+    assert!(
+        refusals[0][1].as_str().unwrap().contains("6604"),
+        "{progress}"
+    );
+    let files: i64 = conn
+        .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(files, 0, "files recorded without their thumbnails");
+    assert_eq!(std::fs::read_dir(dir.join("thumbs")).unwrap().count(), 0);
+    server.shutdown(Shutdown::IfIdle).await.unwrap();
+}

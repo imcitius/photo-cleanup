@@ -466,7 +466,8 @@ pub fn reset_word() -> &'static str {
     pc_core::tr!("СБРОСИТЬ", "RESET")
 }
 
-/// Throw away the index and the thumbnail cache, and start from nothing.
+/// Throw away the index and start from nothing. The thumbnail cache is not
+/// touched.
 ///
 /// Nothing in the archive itself is touched — this only forgets what was
 /// *learned* about it. The journal stays, so anything already in quarantine
@@ -496,8 +497,12 @@ pub async fn reset(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Res
         // as they were, and the replacement keeps every file.
         st.thumbs.confirm()?;
         db.reset_index()?;
-        let thumbs = st.thumbs.clear()?;
-        Ok(json!({"ok": true, "thumbs_removed": thumbs}))
+        // The thumbnail cache is not touched (el-5x1uh, user decision
+        // 2026-10-10): thumbnails are addressed by content, so the ones
+        // already stored stay valid for the next index. Nothing in it is
+        // deleted, moved or changed, and the answer says so instead of
+        // counting anything.
+        Ok(json!({"ok": true, "thumbnail_cache": "untouched"}))
     })())
 }
 

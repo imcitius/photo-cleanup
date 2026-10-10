@@ -173,11 +173,11 @@ export const ui = {
     "0 leaves one core free. Reading and decoding run in the scheduler's background class: a browser or an editor always gets the processor first.",
   resetTitle: "Reset the index",
   resetText:
-    "Forget everything read about the archive: files, duplicate groups, bursts, kinds and the thumbnail cache. The photographs themselves are untouched. The journal and the settings stay, or there would be nothing to bring files back from quarantine with.",
+    "Forget everything read about the archive: files, duplicate groups, bursts and kinds. The photographs themselves are untouched. The journal and the settings stay, or there would be nothing to bring files back from quarantine with. The thumbnail cache is not touched: nothing in it is deleted, and thumbnails already made are used again when the archive is indexed anew. Its disk space comes back only if you delete the cache folder by hand.",
   resetWord: "RESET",
   resetAction: "Reset the index",
   resetPrompt: "Type RESET to confirm",
-  resetDone: "Index cleared. Start with the inventory.",
+  resetDone: "Index cleared; the thumbnail cache was not touched. Start with the inventory.",
   skippedNote:
     "Skipped files stayed where they were and were not touched. Usually these are videos, archives and anything that is not an image: the index does not read them.",
   nowRunning: "Running now",

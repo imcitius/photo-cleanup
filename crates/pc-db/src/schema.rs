@@ -453,6 +453,18 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX journal_events_by_entry ON journal_events(journal_id, id);
     "#,
+    // 021 — таблица поколений кэша миниатюр (el-5x1uh, review el-19kbm).
+    //
+    // Выведена из употребления (решение пользователя 2026-10-10): у кэша
+    // миниатюр нет поколений, сброс индекса кэш не трогает. Ни один код
+    // таблицу не читает и не пишет. Миграция остаётся как есть — список
+    // только дописывается, таблицы не удаляются.
+    r#"
+    CREATE TABLE thumb_generations(
+        root TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {
