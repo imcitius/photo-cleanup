@@ -490,7 +490,7 @@ async fn cli_and_api_render_the_same_retained_outcome() {
 #[tokio::test]
 async fn the_web_offers_the_choice_on_a_taken_place_and_carries_it_out_like_the_cli() {
     let f = Fixture::new();
-    let (home, held, id) = proven_held(&f);
+    let (home, held, id) = proven_alone(&f);
     std::fs::write(&home, b"someone else's frame").unwrap();
 
     let p = f.preview("journal-undo", json!({"journal_id":id})).await;
@@ -524,10 +524,7 @@ async fn the_web_offers_the_choice_on_a_taken_place_and_carries_it_out_like_the_
         std::fs::read(f.archive.join("frame_1.arw")).unwrap(),
         b"our frame"
     );
-    assert_eq!(
-        std::fs::read(f.archive.join("frame_1.xmp")).unwrap(),
-        b"our edits"
-    );
+    assert!(!f.archive.join("frame_1.xmp").exists());
 }
 
 /// el-14vx0. A return as *_1 reviewed against one file, and another file in
@@ -604,7 +601,7 @@ async fn reviewer_reconcile_conflicts_must_offer_the_same_choices() {
 #[tokio::test]
 async fn a_companion_appearing_beside_the_existing_frame_is_never_touched() {
     let f = Fixture::new();
-    let (home, held, id) = proven_held(&f);
+    let (home, held, id) = proven_alone(&f);
     std::fs::write(&home, b"foreign existing frame").unwrap();
     let p = f
         .preview(
@@ -635,11 +632,6 @@ async fn a_companion_appearing_beside_the_existing_frame_is_never_touched() {
         b"our frame",
         "{job}"
     );
-    assert_eq!(
-        std::fs::read(f.archive.join("frame_1.xmp")).unwrap(),
-        b"our edits",
-        "{job}"
-    );
 }
 
 /// Lightroom files get the same two choices as everyone: neither touches
@@ -650,7 +642,7 @@ async fn a_companion_appearing_beside_the_existing_frame_is_never_touched() {
 async fn reviewer_forced_lightroom_choices_keep_every_payload_in_api() {
     for ch in ["replace", "rename-existing"] {
         let f = Fixture::new();
-        let (home, held, id) = proven_held(&f);
+        let (home, held, id) = proven_alone(&f);
         std::fs::write(&home, b"catalogued existing frame").unwrap();
         {
             let db = f.state.db.lock().unwrap();
@@ -768,7 +760,7 @@ async fn reviewer_web_mixed_keep_decision_is_structurally_journaled() {
 #[tokio::test]
 async fn a_reconcile_choice_is_carried_out_through_the_job_and_keep_is_written_down() {
     let f = Fixture::new();
-    let (home, held, id) = proven_held(&f);
+    let (home, held, id) = proven_alone(&f);
     {
         let db = f.state.db.lock().unwrap();
         db.journal_finish(id, pc_db::JournalStatus::Pending, None)
@@ -1104,7 +1096,7 @@ async fn every_carried_out_decision_is_in_the_history_and_the_result() {
     let (choice, outcome) = ("rename-returning", "renamed-returning");
     {
         let f = Fixture::new();
-        let (home, _held, id) = proven_held(&f);
+        let (home, _held, id) = proven_alone(&f);
         std::fs::write(&home, b"foreign existing frame").unwrap();
         let p = f
             .preview(
@@ -1287,7 +1279,6 @@ async fn r3_api_legacy_free_destination_never_moves() {
 
 /// A photograph alone — no sidecar — in quarantine, journaled with its
 /// evidence the way this version writes it.
-#[cfg(unix)]
 fn proven_alone(f: &Fixture) -> (PathBuf, PathBuf, i64) {
     let home = f.archive.join("frame.arw");
     let q = f.archive.join(pc_core::QUARANTINE_DIR);
@@ -1320,6 +1311,7 @@ fn proven_alone(f: &Fixture) -> (PathBuf, PathBuf, i64) {
     (home, held, id)
 }
 
+#[cfg(unix)]
 fn offered(p: &Value) -> Vec<String> {
     p["conflicts"][0]["choices"]
         .as_array()
@@ -1439,37 +1431,42 @@ async fn r5_vanished_previewed_neighbour_in_accepted_api_batch_requires_refresh(
         }
         (run, ids)
     };
-    // Only the second has a neighbour; the first, a frame alone, returns as
-    // *_1, and its rename is when the second's neighbour is moved away.
+    // Only the first has a neighbour; the second — walked first, a run is
+    // undone newest first — is a frame alone that returns as *_1, and its
+    // rename is when the first's neighbour is moved away.
     std::fs::write(
-        f.archive.join("held-second.aae"),
+        f.archive.join("held-first.aae"),
         b"neighbour shown at preview",
     )
     .unwrap();
     let p = f
         .preview(
             "organize-undo",
-            json!({"run_id":run,"choices":{ids[0].to_string():"rename-returning",ids[1].to_string():"keep"}}),
+            json!({"run_id":run,"choices":{ids[0].to_string():"keep",ids[1].to_string():"rename-returning"}}),
         )
         .await;
     let altered = std::sync::Arc::new(std::sync::Mutex::new(None));
     let capture = altered.clone();
     let archive = f.archive.clone();
-    let away = archive.join("external-second.aae");
+    let away = archive.join("external-first.aae");
     let to = away.clone();
     let marker = f.archive.to_string_lossy().into_owned();
     let _g = pc_apply::race::before_move_under(&marker, move |_, _| {
         let mut seen = capture.lock().unwrap();
         if seen.is_none() {
-            std::fs::rename(archive.join("held-second.aae"), &to)?;
+            std::fs::rename(archive.join("held-first.aae"), &to)?;
             *seen = Some(r3_metadata(&to));
         }
         Ok(())
     });
     let job = f.apply(&p).await;
     assert_eq!(Some(r3_metadata(&away)), altered.lock().unwrap().clone());
-    let held = f.archive.join("held-second.arw");
-    let events = f.state.db.lock().unwrap().journal_events(ids[1]).unwrap();
+    let held = f.archive.join("held-first.arw");
+    let events = f.state.db.lock().unwrap().journal_events(ids[0]).unwrap();
+    assert_eq!(
+        std::fs::read(f.archive.join("second_1.arw")).unwrap(),
+        b"returning frame"
+    );
     assert!(held.exists(), "{job}");
     assert!(
         events.iter().any(|e| e.kind == "refused"
@@ -1522,5 +1519,15 @@ async fn r5_a_foreign_suffix_companion_during_accepted_job_does_not_join_the_fra
         "API job returned the photograph beside a foreign AAE: {job}"
     );
     assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
-    assert_ne!(job["state"], "done", "{job}");
+    let said = job.to_string();
+    assert!(said.contains("refused 1"), "{said}");
+    assert!(!said.contains("renamed-returning"), "{said}");
+    let events = f.state.db.lock().unwrap().journal_events(id).unwrap();
+    assert!(
+        events.iter().any(|e| e.kind == "refused"
+            && e.data
+                .as_deref()
+                .is_some_and(|d| d.contains("\"outcome\":\"refused\""))),
+        "{events:?}"
+    );
 }

@@ -51,7 +51,7 @@ use anyhow::{anyhow, Result};
 use pc_core::proof::Proof;
 use pc_db::{ConflictNote, Db, JournalEntry, JournalStatus, Moved, ReturnedAs};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::outcome::{stopped_run, Halted};
 
@@ -444,41 +444,14 @@ pub enum Seen {
 }
 
 impl Seen {
-    /// Whether `now` is still what this preview read: equal in every member
-    /// on either side, every place, every choice — except that a file
-    /// beside the unit that is not part of it may have gone (another
-    /// entry's sidecar of the same name, carried home by that entry's own
-    /// undo a moment before). One that appeared, or changed, is a
-    /// difference: it may be this frame's (R3-B1).
+    /// Whether `now` is still exactly what this preview read: every member
+    /// on either side, every place, every file beside the unit, every
+    /// choice. A file beside it that appeared, changed or vanished is a
+    /// difference (R3-B1, R4-B1); the one vanishing that is not — another
+    /// entry's own member carried home by that entry's undo — needs the
+    /// journal to prove, and is [`accounted`] by the action, not here.
     pub fn holds(&self, now: &Seen) -> bool {
-        fn within(now: &[Occupant], seen: &[Occupant]) -> bool {
-            now.iter().all(|n| seen.contains(n))
-        }
-        match (self, now) {
-            (
-                Seen::Free {
-                    journal_id: a,
-                    places: pa,
-                    beside: ba,
-                },
-                Seen::Free {
-                    journal_id: b,
-                    places: pb,
-                    beside: bb,
-                },
-            ) => a == b && pa == pb && within(bb, ba),
-            (Seen::Taken(a), Seen::Taken(b)) => {
-                within(&b.beside, &a.beside)
-                    && Conflict {
-                        beside: Vec::new(),
-                        ..a.clone()
-                    } == Conflict {
-                        beside: Vec::new(),
-                        ..b.clone()
-                    }
-            }
-            (a, b) => a == b,
-        }
+        self == now
     }
 
     /// The journal entry this reading is of.
@@ -702,7 +675,7 @@ pub(crate) fn reconcile_now(db: &Db, journal_id: i64) -> Result<recovery::Reconc
 
 /// Carry out what was reviewed on `entry`, which reads `now` as `now`.
 fn carry(db: &Db, entry: &JournalEntry, reviewed: Option<&Reviewed>, now: Seen) -> Result<Tally> {
-    let Some(r) = reviewed.filter(|r| r.seen.holds(&now)) else {
+    let Some(r) = reviewed.filter(|r| r.seen.holds(&now) || accounted(db, &r.seen, &now)) else {
         return Err(changed(db, entry, reviewed, &now));
     };
     match now {
@@ -710,6 +683,58 @@ fn carry(db: &Db, entry: &JournalEntry, reviewed: Option<&Reviewed>, now: Seen) 
         Seen::Held(h) => Err(held(db, entry, &r.seen, &h)),
         Seen::Free { .. } => free(db, entry, &r.seen),
     }
+}
+
+/// Whether `now` differs from what the preview read (`then`) only by files
+/// beside a unit free to come back that are gone, each proven to have been
+/// carried home by another entry's own undo (el-14vx0 R4-B1): `IMG.xmp`,
+/// a member of `IMG.CR2`'s entry, held beside `IMG.JPG` in quarantine and
+/// taken home with its frame a moment before. Proven means: an undone entry
+/// whose list held exactly that file — its evidence — at that place, and
+/// the very same file at that entry's own home now. Anything less — renamed
+/// away, moved by hand, nothing in the journal, the journal unreadable — is
+/// a difference, and the unit is refused as changed since the preview. A
+/// taken place never: a unit with anything beside it is keep-only there,
+/// and what it offers is part of the reading.
+fn accounted(db: &Db, then: &Seen, now: &Seen) -> bool {
+    let (
+        Seen::Free {
+            journal_id: a,
+            places: pa,
+            beside: ba,
+        },
+        Seen::Free {
+            journal_id: b,
+            places: pb,
+            beside: bb,
+        },
+    ) = (then, now)
+    else {
+        return false;
+    };
+    a == b
+        && pa == pb
+        && bb.iter().all(|n| ba.contains(n))
+        && ba
+            .iter()
+            .filter(|v| !bb.contains(v))
+            .all(|v| carried_home(db, *a, v))
+}
+
+/// [`accounted`] for one file: an undone entry other than `id` held exactly
+/// `v` at `v`'s place, and that file is at the entry's home now, unchanged.
+fn carried_home(db: &Db, id: i64, v: &Occupant) -> bool {
+    let Ok(entries) = db.journal_undone_holding(&v.path) else {
+        return false;
+    };
+    let same = |p: &Proof| p.dev == v.proof.dev && p.ino == v.proof.ino;
+    entries.iter().filter(|e| e.id != id).any(|e| {
+        e.manifest.iter().any(|m| {
+            m.dst == v.path
+                && m.proof.as_ref().is_some_and(same)
+                && occupant(&m.src).is_some_and(|o| o.evidence() == v.evidence())
+        })
+    })
 }
 
 /// A unit free to come back: back, by its evidence, as one unit. A refusal
@@ -900,6 +925,37 @@ fn seen_of(entry: &JournalEntry) -> Result<Seen> {
             held,
             home,
         }));
+    }
+    // A return under free names that got as far as a member at its new
+    // name: it is finished only while nothing named as that member's
+    // companion is there — someone else's edits beside it (R4-B2).
+    let ours: Vec<&String> = pairs.iter().map(|p| &p.look.src).collect();
+    for p in pairs.iter().filter(|p| p.renamed()) {
+        let near = companion_like(Path::new(&p.look.src)).map(|n| {
+            n.into_iter()
+                .filter(|x| !ours.contains(&x))
+                .collect::<Vec<_>>()
+        });
+        if near.as_ref().is_none_or(|n| !n.is_empty()) {
+            let why = pc_core::tf!(
+                "запись {0}: рядом с {1}, куда кадр возвращался под свободным именем, лежит файл \
+                 с именем его спутника или папку не прочитать ({2}); ничего не перенесено и не \
+                 закрыто — разберите вручную",
+                "entry {0}: beside {1}, where the frame was coming back under a free name, there \
+                 is a file named as its companion, or the folder cannot be read ({2}); nothing \
+                 was moved or closed — sort it out by hand",
+                entry.id,
+                p.look.src,
+                near.map(|n| shown(&n)).unwrap_or_default()
+            );
+            return Ok(Seen::Held(Held {
+                journal_id: entry.id,
+                legacy: false,
+                why,
+                held,
+                home,
+            }));
+        }
     }
     Ok(Seen::Free {
         journal_id: entry.id,
@@ -1156,11 +1212,48 @@ fn of(entry: &JournalEntry, pairs: &[Pair]) -> Result<Option<Conflict>> {
             .to_string(),
         );
     } else {
-        // Lightroom's files too: the existing file is not touched, and the
-        // one coming back takes a name of its own beside it (user decision
-        // 2026-10-06, the same now for everyone).
-        let s = stem(&home);
-        if returning.iter().all(|r| suffixed(&r.home, &s, 1).is_some()) {
+        // "Return as *_1" is for a frame alone (user decision 2026-10-10
+        // (a), after el-3sk3x): no companion in the journal's list, none
+        // beside it in quarantine, of any kind or case. A frame and its
+        // edits that would have to come back under a new name together —
+        // or a frame with edits beside it whose they are nothing proves —
+        // are kept, with every path, to be returned by hand. What is read
+        // here is part of the preview's reading: one that appears or goes
+        // by the time of the action changes what is offered, and the unit
+        // is refused as changed since the preview.
+        let near = companion_like(Path::new(&returning[0].held));
+        let mut sides: Vec<String> = returning[1..].iter().map(|r| r.held.clone()).collect();
+        for p in beside
+            .iter()
+            .map(|o| o.path.clone())
+            .chain(near.iter().flatten().cloned())
+        {
+            if !sides.contains(&p) {
+                sides.push(p);
+            }
+        }
+        if near.is_none() {
+            limits.push(pc_core::tf!(
+                "папку карантина {0} не прочитать — не доказано, что у кадра нет спутников: \
+                 только «оставить»",
+                "the quarantine folder of {0} cannot be read — nothing proves the frame has no \
+                 companions: only “keep”",
+                returning[0].held
+            ));
+        } else if !sides.is_empty() {
+            limits.push(pc_core::tf!(
+                "под свободным именем возвращается только кадр без спутников, а здесь рядом с \
+                 ним: {0} — только «оставить»; верните вручную: {1} → {2} и спутники рядом с ним",
+                "only a frame without companions comes back under a free name, and beside this \
+                 one: {0} — only “keep”; return them by hand: {1} → {2}, its companions beside it",
+                shown(&sides),
+                returning[0].held,
+                returning[0].home
+            ));
+        } else if suffixed(&home, &stem(&home), 1).is_some() {
+            // Lightroom's files too: the existing file is not touched, and
+            // the one coming back takes a name of its own beside it (user
+            // decision 2026-10-06, the same now for everyone).
             choices.push(Choice::RenameReturning);
         }
     }
@@ -1180,6 +1273,75 @@ fn occupant(path: &str) -> Option<Occupant> {
         path: path.to_string(),
         proof: Proof::of(&md)?,
     })
+}
+
+/// The names a companion of `path` would bear — the forms
+/// [`crate::files::companions`] moves with a frame: `IMG.xmp`,
+/// `IMG.CR2.xmp`, `IMG.aae`, `IMG.CR2.pp3`, `._IMG.CR2` — each also in the
+/// case variants that function looks for.
+fn companion_names(name: &str) -> Vec<String> {
+    let stem = name.rsplit_once('.').map_or(name, |(a, _)| a);
+    vec![
+        format!("{stem}.xmp"),
+        format!("{stem}.XMP"),
+        format!("{name}.xmp"),
+        format!("{stem}.aae"),
+        format!("{stem}.AAE"),
+        format!("{name}.pp3"),
+        format!("._{name}"),
+    ]
+}
+
+/// Everything in `path`'s folder named as a companion of it, of any kind —
+/// a file, a link (dangling too), a folder — and in any letter case
+/// (el-14vx0 round 5: a free name is one whose stem bears no companion
+/// name at all). Looked up by name, which the filesystem answers under its
+/// own case and normalisation rules, and by a listing of the folder, which
+/// catches another case on a filesystem that tells cases apart. `None` when
+/// the folder cannot be listed or the name is not text: then nothing proves
+/// there is none.
+pub(crate) fn companion_like(path: &Path) -> Option<Vec<String>> {
+    let dir = path.parent()?;
+    let name = path.file_name()?.to_str()?;
+    let names = companion_names(name);
+    let lower: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |p: PathBuf| {
+        let p = p.to_string_lossy().into_owned();
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    };
+    let mut seen_ids = std::collections::HashSet::new();
+    for n in &names {
+        let p = dir.join(n);
+        if let Ok(md) = fs::symlink_metadata(&p) {
+            if seen_ids.insert(pc_core::volume::entry_key(&md, &p)) {
+                add(p);
+            }
+        }
+    }
+    for e in fs::read_dir(dir).ok()? {
+        let e = e.ok()?;
+        let n = e.file_name().to_string_lossy().to_lowercase();
+        if lower.contains(&n) {
+            let p = e.path();
+            let fresh = fs::symlink_metadata(&p)
+                .map(|md| seen_ids.insert(pc_core::volume::entry_key(&md, &p)))
+                .unwrap_or(true);
+            if fresh {
+                add(p);
+            }
+        }
+    }
+    // In a stable order: this is part of what a preview read and is
+    // compared with the reading at the action.
+    out.sort();
+    Some(out)
+}
+
+fn shown(paths: &[String]) -> String {
+    paths.join("; ")
 }
 
 /// Add a decision that moved nothing to the entry's history — `kept`, or
@@ -1289,10 +1451,14 @@ fn returning_renamed(db: &Db, entry: &JournalEntry, c: &Conflict) -> Result<Tall
         let names: Option<Vec<String>> = base.iter().map(|p| suffixed(&p.rec.src, &s, n)).collect();
         let Some(names) = names else { break };
         // An early answer only; the rename itself is the test. A name whose
-        // companions are already there — `IMG_1.xmp` of someone else's
-        // `IMG_1.CR2` — is not free for this unit either.
+        // stem bears any companion name — `IMG_1.xmp` of someone else's
+        // `IMG_1.CR2`, a dangling link, a folder, another case — is not
+        // free for this unit either (round 5): it would come back beside
+        // edits that are not its own. A folder that cannot be listed proves
+        // nothing, so its names are not free.
         let busy = |t: &String| {
-            fs::symlink_metadata(t).is_ok() || !crate::files::companions(Path::new(t)).is_empty()
+            fs::symlink_metadata(t).is_ok()
+                || companion_like(Path::new(t)).is_none_or(|n| !n.is_empty())
         };
         if names.iter().any(busy) {
             continue;
@@ -1342,7 +1508,33 @@ fn returning_renamed(db: &Db, entry: &JournalEntry, c: &Conflict) -> Result<Tall
         if let Err(e) = db.journal_event_conflict(id, phase_of(entry), "attempt", &text, &note) {
             return Err(refused(format!("{e:#}"), e));
         }
-        match recovery::move_back(&pairs, &c.beside) {
+        // Asked again after the rename, right before the record: a
+        // companion name that appeared at the new stem — or beside where
+        // the frame was held — while it moved sends it back to quarantine
+        // and refuses (R4-B2). Never a success beside someone else's edits.
+        let targets: Vec<String> = pairs.iter().map(|p| p.look.src.clone()).collect();
+        let origins: Vec<String> = pairs.iter().map(|p| p.look.dst.clone()).collect();
+        let also = || -> Option<String> {
+            let mut found: Vec<String> = Vec::new();
+            for t in targets.iter().chain(&origins) {
+                match companion_like(Path::new(t)) {
+                    Some(n) => found.extend(n.into_iter().filter(|p| !targets.contains(p))),
+                    None => found.push(t.clone()),
+                }
+            }
+            (!found.is_empty()).then(|| {
+                pc_core::tf!(
+                    "пока кадр возвращался под свободным именем, рядом появился файл с именем \
+                     его спутника (или папку не прочитать): {0}; кадр возвращён в карантин, чужой \
+                     файл не тронут",
+                    "while the frame was coming back under a free name, a file named as its \
+                     companion appeared beside it (or the folder cannot be read): {0}; the frame \
+                     is put back in quarantine, the other file is not touched",
+                    shown(&found)
+                )
+            })
+        };
+        match recovery::move_back(&pairs, &c.beside, &also) {
             Back::Done(arrived, came) => {
                 note.outcome = Some(Outcome::RenamedReturning.as_str().to_string());
                 let mut done = recovery::finish(db, entry, &pairs, arrived, came, Some(&note))?;

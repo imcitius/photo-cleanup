@@ -71,7 +71,7 @@ test("a restore whose place is taken keeps the file by default and returns it as
   const copy = join(archive, "frame copy.jpg");
   writeFileSync(join(archive, "frame.jpg"), data);
   writeFileSync(copy, data);
-  writeFileSync(join(archive, "frame copy.xmp"), "our edits");
+  // A frame alone: only such a unit may come back as *_1 (el-14vx0 round 5).
   await job(request, "index", { roots: [archive], min_size: 0 });
   await job(request, "families", {});
   await reviewed(request, "plan-apply", { roles: ["copy"] });
@@ -121,9 +121,7 @@ test("a restore whose place is taken keeps the file by default and returns it as
   const back = join(archive, "frame copy_1.jpg");
   await expect.poll(() => existsSync(back)).toBe(true);
   expect(readFileSync(back).equals(data)).toBe(true);
-  expect(readFileSync(join(archive, "frame copy_1.xmp"), "utf8")).toBe(
-    "our edits",
-  );
+  expect(existsSync(join(archive, "frame copy_1.xmp"))).toBe(false);
   expect(readFileSync(copy, "utf8")).toBe(NEWER);
 });
 
@@ -217,15 +215,17 @@ test("an explicit keep-only decision can be confirmed, is recorded and moves not
     .filter({ has: page.getByTestId("conflicts") });
   const conflicts = dialog.getByTestId("conflicts");
   await expect(conflicts).toBeVisible();
-  await conflicts
-    .getByRole("radio", {
-      name: "return it as *_1 and leave the existing file alone",
-    })
-    .check();
+  // With its sidecar the unit is keep-only (el-14vx0 round 5, user
+  // decision (a)): one choice, and the quarantine paths of the frame and
+  // its sidecar to return them by hand.
+  await expect(conflicts.getByRole("radio")).toHaveCount(1);
+  await expect(conflicts).toContainText(
+    "only a frame without companions comes back under a free name",
+  );
+  await expect(conflicts).toContainText("frame copy.xmp");
   const keep = conflicts.getByRole("radio", {
     name: "keep it in quarantine, return it by hand later",
   });
-  await keep.check();
   await expect(keep).toBeChecked();
   const restore = dialog.getByRole("button", { name: "Restore", exact: true });
   await expect(restore).toBeEnabled();

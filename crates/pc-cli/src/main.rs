@@ -159,6 +159,9 @@ struct OrganizeUndoArgs {
 struct ConflictArgs {
     /// keep (the default: it stays in quarantine) or rename-returning (it
     /// comes back as *_1 beside the existing file, which is not touched).
+    /// rename-returning is offered only for a frame without companions
+    /// (.xmp, .aae, ._*, in its journal entry or beside it in quarantine);
+    /// any other unit is kept, with its paths for a return by hand.
     /// Answers the first conflict; with --all, every one. On a terminal the
     /// others are asked; otherwise they are kept
     #[arg(long, value_parser = parse_choice)]

@@ -475,7 +475,7 @@ pub(crate) fn walk_back(
             anyhow::anyhow!("{why}"),
         ));
     }
-    match move_back(pairs, known) {
+    match move_back(pairs, known, &|| None) {
         Back::Done(arrived, came) => Ok((arrived, came)),
         Back::Failed(unit) => Err(unit_failed(db, id, phase, &items, unit)),
     }
@@ -491,7 +491,15 @@ pub(crate) enum Back {
 /// Bring back, as one unit, every item of `pairs` that is away — to the
 /// place its `look.src` names. Asked only once no item is in doubt; `known`
 /// are the files the preview read beside it that are not part of it.
-pub(crate) fn move_back(pairs: &[Pair], known: &[crate::Occupant]) -> Back {
+/// `also` is asked with the rest after the last rename and right before the
+/// record: any answer sends the whole unit back, refused with those words
+/// (a return under a free name asks whether a companion of someone else's
+/// appeared at the new name, el-14vx0 R4-B2).
+pub(crate) fn move_back(
+    pairs: &[Pair],
+    known: &[crate::Occupant],
+    also: &dyn Fn() -> Option<String>,
+) -> Back {
     let moving: Vec<&Pair> = pairs
         .iter()
         .filter(|p| item_of(p).standing == Standing::Moved)
@@ -509,7 +517,10 @@ pub(crate) fn move_back(pairs: &[Pair], known: &[crate::Occupant]) -> Back {
     let origins: Vec<String> = moving.iter().map(|p| p.look.dst.clone()).collect();
     let left = || -> Option<String> {
         let new = crate::conflict::left_behind(&origins, known);
-        (!new.is_empty()).then(|| crate::conflict::stranger_words(&new))
+        if !new.is_empty() {
+            return Some(crate::conflict::stranger_words(&new));
+        }
+        also()
     };
     match move_unit_checked(&members, Way::Back, None, &[], &left) {
         Unit::Moved(arrived) => {

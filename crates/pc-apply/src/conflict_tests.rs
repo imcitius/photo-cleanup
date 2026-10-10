@@ -86,6 +86,45 @@ fn quarantined(a: &Archive, name: &str) -> (i64, PathBuf, PathBuf) {
     (id, home, xmp)
 }
 
+/// `name` alone — no sidecar — quarantined by the tool's own forward
+/// move; the journal entry's id and the photograph's place.
+fn quarantined_alone(a: &Archive, name: &str) -> (i64, PathBuf) {
+    let home = a.dir.join(name);
+    fs::write(&home, OURS).unwrap();
+    let file_id =
+        a.db.upsert_file(
+            &pc_db::NewFile {
+                path: s(&home),
+                name: name.into(),
+                size: OURS.len() as i64,
+                ..Default::default()
+            },
+            a.run,
+        )
+        .unwrap();
+    let c = Candidate {
+        file_id,
+        family_id: 0,
+        path: s(&home),
+        size: OURS.len() as i64,
+        role: pc_family::Role::Copy,
+        keeper_id: 0,
+        keeper_path: String::new(),
+        reason: "выбор человека".into(),
+        manual: true,
+        group_keeper: String::new(),
+    };
+    let filed = crate::files::quarantine_file(&a.db, a.run, &c, None).unwrap();
+    assert_eq!(filed.outcome, crate::FileOutcome::Moved, "{}", filed.why);
+    let entry: i64 =
+        a.db.conn
+            .query_row("SELECT max(id) FROM journal", [], |r| r.get(0))
+            .unwrap();
+    let e = a.db.journal_entry(entry).unwrap().unwrap();
+    assert_eq!(e.manifest.len(), 1, "{:?}", e.manifest);
+    (entry, home)
+}
+
 /// Another program puts its own photograph and sidecar at the old names.
 fn taken(home: &Path, xmp: &Path) {
     fs::write(home, THEIRS).unwrap();
@@ -143,16 +182,19 @@ fn a_taken_place_keeps_the_file_in_quarantine_by_default_and_says_where() {
         .map(|o| o.path.as_str())
         .collect();
     assert_eq!(occ, [s(&home), s(&xmp)]);
-    assert_eq!(kept.conflict.choices, Choice::ALL.to_vec());
+    // With its sidecar the unit is keep-only (round 5, decision (a)); the
+    // words name both of its quarantine paths for a return by hand.
+    assert_eq!(kept.conflict.choices, [Choice::Keep]);
+    assert!(words.contains(&s(&q(&xmp))), "{words}");
 }
 
 #[test]
 fn rename_returning_skips_a_taken_name_and_leaves_the_existing_file_alone() {
     let a = archive();
-    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    let (id, home) = quarantined_alone(&a, "IMG.CR2");
+    let xmp = home.with_extension("xmp");
     taken(&home, &xmp);
-    // `_1` taken by a frame alone; `_1`'s sidecar name taken alone would
-    // refuse that name just the same — the unit needs every name free.
+    // `_1` taken by a frame alone: the next name.
     fs::write(a.dir.join("IMG_1.CR2"), b"unrelated").unwrap();
 
     let done = chosen(&a, id, Choice::RenameReturning).unwrap();
@@ -162,8 +204,8 @@ fn rename_returning_skips_a_taken_name_and_leaves_the_existing_file_alone() {
     assert_eq!(fs::read(a.dir.join("IMG_1.CR2")).unwrap(), b"unrelated");
     assert!(!a.dir.join("IMG_1.xmp").exists());
     assert_eq!(fs::read(a.dir.join("IMG_2.CR2")).unwrap(), OURS);
-    assert_eq!(fs::read(a.dir.join("IMG_2.xmp")).unwrap(), OUR_EDITS);
-    assert_eq!((done.files_back, done.entries_back), (2, 1));
+    assert!(!a.dir.join("IMG_2.xmp").exists());
+    assert_eq!((done.files_back, done.entries_back), (1, 1));
     assert_eq!(status(&a.db, id), JournalStatus::Undone);
     // The index follows the photograph to its new name.
     let (path, state): (String, String) =
@@ -183,7 +225,8 @@ fn rename_returning_skips_a_taken_name_and_leaves_the_existing_file_alone() {
 #[test]
 fn a_name_created_between_the_choice_and_the_rename_is_not_replaced() {
     let a = archive();
-    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    let (id, home) = quarantined_alone(&a, "IMG.CR2");
+    let xmp = home.with_extension("xmp");
     taken(&home, &xmp);
     let one = a.dir.join("IMG_1.CR2");
     let raced = one.clone();
@@ -200,7 +243,6 @@ fn a_name_created_between_the_choice_and_the_rename_is_not_replaced() {
 
     assert_eq!(fs::read(&one).unwrap(), b"created at the last moment");
     assert_eq!(fs::read(a.dir.join("IMG_2.CR2")).unwrap(), OURS);
-    assert_eq!(fs::read(a.dir.join("IMG_2.xmp")).unwrap(), OUR_EDITS);
     assert_eq!(fs::read(&home).unwrap(), THEIRS);
     // Both attempts are in the history, recorded before their renames.
     let entry = a.db.journal_entry(id).unwrap().unwrap();
@@ -215,7 +257,8 @@ fn a_name_created_between_the_choice_and_the_rename_is_not_replaced() {
 #[test]
 fn lightroom_files_offer_only_keep_and_return_under_a_free_name() {
     let a = archive();
-    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    let (id, home) = quarantined_alone(&a, "IMG.CR2");
+    let xmp = home.with_extension("xmp");
     taken(&home, &xmp);
     let cat =
         a.db.upsert_catalog(&pc_db::NewCatalog {
@@ -515,20 +558,19 @@ fn reviewer_a_very_long_suffix_refuses_without_touching_foreign_metadata() {
 #[test]
 fn reviewer_unicode_case_companion_collision_is_skipped_as_a_unit() {
     let a = archive();
-    let (id, home, xmp) = quarantined(&a, "Été.CR2");
+    let (id, home) = quarantined_alone(&a, "Été.CR2");
+    let xmp = home.with_extension("xmp");
     taken(&home, &xmp);
     let collision = a.dir.join("Été_1.XMP");
     fs::write(&collision, b"foreign uppercase sidecar").unwrap();
     let before = review_metadata(&collision);
     let done = chosen(&a, id, Choice::RenameReturning).unwrap();
-    assert_eq!(done.files_back, 2);
+    assert_eq!(done.files_back, 1);
     assert_eq!(review_metadata(&collision), before);
-    // On case-insensitive native APFS the uppercase name collides with .xmp.
-    if a.dir.join("Été_1.xmp").exists()
-        && fs::read(a.dir.join("Été_1.xmp")).unwrap() == b"foreign uppercase sidecar"
-    {
-        assert_eq!(fs::read(a.dir.join("Été_2.CR2")).unwrap(), OURS);
-    }
+    // A companion name in any case takes the stem out (round 5), on a
+    // filesystem that tells cases apart and on one that does not.
+    assert!(!a.dir.join("Été_1.CR2").exists());
+    assert_eq!(fs::read(a.dir.join("Été_2.CR2")).unwrap(), OURS);
     assert_eq!(fs::read(&home).unwrap(), THEIRS);
 }
 
@@ -540,7 +582,8 @@ fn reviewer_unicode_case_companion_collision_is_skipped_as_a_unit() {
 #[test]
 fn an_interrupted_entry_whose_place_is_taken_offers_the_same_choices_on_reconcile() {
     let a = archive();
-    let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+    let (id, home) = quarantined_alone(&a, "IMG.CR2");
+    let xmp = home.with_extension("xmp");
     a.db.journal_finish(id, JournalStatus::Pending, None)
         .unwrap();
     taken(&home, &xmp);
@@ -563,12 +606,12 @@ fn an_interrupted_entry_whose_place_is_taken_offers_the_same_choices_on_reconcil
 
     let r = reviewed_now(&a, id, Choice::RenameReturning);
     let r = crate::reconcile_reviewed(&a.db, id, Some(&r)).unwrap();
-    assert_eq!(r.done.files_back, 2);
+    assert_eq!(r.done.files_back, 1);
     assert_eq!(status(&a.db, id), JournalStatus::Undone);
     assert_eq!(fs::read(&home).unwrap(), THEIRS);
     assert_eq!(fs::read(&xmp).unwrap(), THEIR_EDITS);
     assert_eq!(fs::read(a.dir.join("IMG_1.CR2")).unwrap(), OURS);
-    assert_eq!(fs::read(a.dir.join("IMG_1.xmp")).unwrap(), OUR_EDITS);
+    assert!(!a.dir.join("IMG_1.xmp").exists());
     assert!(events(&a.db, id)
         .iter()
         .any(|(p, k, _)| p == "reconcile" && k == "done"));
@@ -762,7 +805,8 @@ fn a_carried_out_choice_is_written_down_with_its_outcome() {
     let (choice, outcome) = (Choice::RenameReturning, "renamed-returning");
     {
         let a = archive();
-        let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+        let (id, home) = quarantined_alone(&a, "IMG.CR2");
+        let xmp = home.with_extension("xmp");
         taken(&home, &xmp);
         let r = reviewed_now(&a, id, choice);
         let done = crate::undo_reviewed(&a.db, id, Some(&r)).unwrap();
@@ -951,38 +995,6 @@ mod review_round3 {
     }
 }
 
-/// A file beside the unit that is not part of it, there at the preview and
-/// gone by the time the job reaches the entry — another entry's sidecar of
-/// the same name, carried home by that entry's own undo — is no reason to
-/// refuse: nothing of it was ever to move. One that appears is (R3-B1).
-#[test]
-fn a_neighbour_that_left_since_the_preview_does_not_hold_the_unit_back() {
-    let a = archive();
-    let (id, home, _xmp) = quarantined(&a, "IMG.CR2");
-    let neighbour = q(&home).with_extension("aae");
-    fs::write(
-        &neighbour,
-        b"another entry's edits, there before the preview",
-    )
-    .unwrap();
-    let r = reviewed_now(&a, id, Choice::Keep);
-    match &r.seen {
-        Seen::Free { beside, .. } => assert_eq!(beside.len(), 1, "{:?}", r.seen),
-        other => panic!("not free: {other:?}"),
-    }
-    fs::rename(&neighbour, a.dir.join("IMG.aae")).unwrap();
-
-    let done = crate::undo_reviewed(&a.db, id, Some(&r)).unwrap();
-
-    assert_eq!(done.files_back, 2);
-    assert_eq!(fs::read(&home).unwrap(), OURS);
-    assert_eq!(
-        fs::read(a.dir.join("IMG.aae")).unwrap(),
-        b"another entry's edits, there before the preview"
-    );
-    assert_eq!(status(&a.db, id), JournalStatus::Undone);
-}
-
 /// The other way round: a neighbour there at the preview stays where it
 /// is, and the unit comes back without it — as before el-14vx0 — while one
 /// that changed since is a different reading.
@@ -1061,45 +1073,6 @@ mod round5 {
             m.mtime_nsec(),
             fs::read(p).unwrap(),
         )
-    }
-
-    /// `name` alone — no sidecar — quarantined by the tool's own forward
-    /// move; the journal entry's id and the photograph's place.
-    fn quarantined_alone(a: &Archive, name: &str) -> (i64, PathBuf) {
-        let home = a.dir.join(name);
-        fs::write(&home, OURS).unwrap();
-        let file_id =
-            a.db.upsert_file(
-                &pc_db::NewFile {
-                    path: s(&home),
-                    name: name.into(),
-                    size: OURS.len() as i64,
-                    ..Default::default()
-                },
-                a.run,
-            )
-            .unwrap();
-        let c = Candidate {
-            file_id,
-            family_id: 0,
-            path: s(&home),
-            size: OURS.len() as i64,
-            role: pc_family::Role::Copy,
-            keeper_id: 0,
-            keeper_path: String::new(),
-            reason: "выбор человека".into(),
-            manual: true,
-            group_keeper: String::new(),
-        };
-        let filed = crate::files::quarantine_file(&a.db, a.run, &c, None).unwrap();
-        assert_eq!(filed.outcome, crate::FileOutcome::Moved, "{}", filed.why);
-        let entry: i64 =
-            a.db.conn
-                .query_row("SELECT max(id) FROM journal", [], |r| r.get(0))
-                .unwrap();
-        let e = a.db.journal_entry(entry).unwrap().unwrap();
-        assert_eq!(e.manifest.len(), 1, "{:?}", e.manifest);
-        (entry, home)
     }
 
     fn decided(r: &anyhow::Result<crate::Tally>) -> Vec<crate::Outcome> {

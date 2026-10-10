@@ -935,6 +935,20 @@ impl Db {
             &[],
         )
     }
+
+    /// Undone entries whose list names `held` as a place one of their items
+    /// was held at (el-14vx0 R4-B1): candidates only — the caller proves by
+    /// evidence that the item is the file it is asking about and that it is
+    /// home now. The text search can only miss, never invent a match, and a
+    /// miss refuses.
+    pub fn journal_undone_holding(&self, held: &str) -> Result<Vec<JournalEntry>> {
+        let needle = serde_json::to_string(held)?;
+        self.journal_rows(
+            "SELECT * FROM journal WHERE status='undone'
+               AND (dst = ?1 OR instr(manifest, ?2) > 0) ORDER BY id",
+            &[&held, &needle],
+        )
+    }
 }
 
 /// Files found sitting in our quarantine folders during a walk.
