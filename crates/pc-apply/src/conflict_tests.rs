@@ -1035,3 +1035,297 @@ fn an_entry_undone_elsewhere_since_the_preview_is_changed_not_untyped() {
     assert!(format!("{e:#}").contains("cannot be undone"), "{e:#}");
     assert_eq!(events(&a.db, id).len(), before);
 }
+
+/// el-14vx0 round 5 — user decision 2026-10-10 (a) after el-3sk3x: "return
+/// as *_1" only for a unit that is the frame alone; anything with a
+/// companion — recorded, beside it in quarantine, appeared or vanished — is
+/// keep-only. R4-B1 (a previewed neighbour that vanished) and R4-B2 (a
+/// foreign companion at the chosen suffix) reproduced on disposable
+/// fixtures.
+mod round5 {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    type Meta = (u64, u64, u32, u32, u32, u64, i64, i64, Vec<u8>);
+
+    fn meta(p: &Path) -> Meta {
+        let m = fs::symlink_metadata(p).unwrap();
+        (
+            m.dev(),
+            m.ino(),
+            m.mode(),
+            m.uid(),
+            m.gid(),
+            m.nlink(),
+            m.mtime(),
+            m.mtime_nsec(),
+            fs::read(p).unwrap(),
+        )
+    }
+
+    /// `name` alone — no sidecar — quarantined by the tool's own forward
+    /// move; the journal entry's id and the photograph's place.
+    fn quarantined_alone(a: &Archive, name: &str) -> (i64, PathBuf) {
+        let home = a.dir.join(name);
+        fs::write(&home, OURS).unwrap();
+        let file_id =
+            a.db.upsert_file(
+                &pc_db::NewFile {
+                    path: s(&home),
+                    name: name.into(),
+                    size: OURS.len() as i64,
+                    ..Default::default()
+                },
+                a.run,
+            )
+            .unwrap();
+        let c = Candidate {
+            file_id,
+            family_id: 0,
+            path: s(&home),
+            size: OURS.len() as i64,
+            role: pc_family::Role::Copy,
+            keeper_id: 0,
+            keeper_path: String::new(),
+            reason: "выбор человека".into(),
+            manual: true,
+            group_keeper: String::new(),
+        };
+        let filed = crate::files::quarantine_file(&a.db, a.run, &c, None).unwrap();
+        assert_eq!(filed.outcome, crate::FileOutcome::Moved, "{}", filed.why);
+        let entry: i64 =
+            a.db.conn
+                .query_row("SELECT max(id) FROM journal", [], |r| r.get(0))
+                .unwrap();
+        let e = a.db.journal_entry(entry).unwrap().unwrap();
+        assert_eq!(e.manifest.len(), 1, "{:?}", e.manifest);
+        (entry, home)
+    }
+
+    fn decided(r: &anyhow::Result<crate::Tally>) -> Vec<crate::Outcome> {
+        match r {
+            Ok(t) => t.decisions.iter().map(|d| d.outcome).collect(),
+            Err(e) => crate::outcome_of(e)
+                .decisions
+                .iter()
+                .map(|d| d.outcome)
+                .collect(),
+        }
+    }
+
+    /// The frame alone, its place taken: both choices, and "return as *_1"
+    /// brings it back as `IMG_1.CR2` beside the existing file.
+    #[test]
+    fn a_frame_alone_may_return_as_suffix_beside_the_existing_file() {
+        let a = archive();
+        let (id, home) = quarantined_alone(&a, "IMG.CR2");
+        fs::write(&home, THEIRS).unwrap();
+        let before = meta(&home);
+        let r = reviewed_now(&a, id, Choice::RenameReturning);
+        assert_eq!(
+            r.seen.conflict().unwrap().choices,
+            Choice::ALL.to_vec(),
+            "{:?}",
+            r.seen
+        );
+        let done = crate::undo_reviewed(&a.db, id, Some(&r)).unwrap();
+        assert_eq!(done.files_back, 1);
+        assert_eq!(meta(&home), before);
+        assert_eq!(fs::read(a.dir.join("IMG_1.CR2")).unwrap(), OURS);
+        assert_eq!(status(&a.db, id), JournalStatus::Undone);
+    }
+
+    /// A unit whose journal recorded a companion is keep-only: the preview
+    /// offers "keep" alone and names every quarantine path; asked for
+    /// "return as *_1" anyway, nothing of it moves and the refusal is typed
+    /// and written down.
+    #[test]
+    fn a_unit_with_a_recorded_companion_is_keep_only() {
+        let a = archive();
+        let (id, home, xmp) = quarantined(&a, "IMG.CR2");
+        taken(&home, &xmp);
+        let (h, x) = (meta(&home), meta(&xmp));
+        let r = reviewed_now(&a, id, Choice::RenameReturning);
+        let c = r.seen.conflict().expect("a conflict");
+        assert_eq!(c.choices, vec![Choice::Keep], "{c:?}");
+        let words = c.kept_words();
+        assert!(words.contains(&s(&q(&home))), "{words}");
+        assert!(words.contains(&s(&q(&xmp))), "{words}");
+
+        let result = crate::undo_reviewed(&a.db, id, Some(&r));
+
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(decided(&result), vec![crate::Outcome::Refused]);
+        assert_eq!((meta(&home), meta(&xmp)), (h, x));
+        assert_eq!(fs::read(q(&home)).unwrap(), OURS);
+        assert_eq!(fs::read(q(&xmp)).unwrap(), OUR_EDITS);
+        assert!(!a.dir.join("IMG_1.CR2").exists());
+        assert_eq!(status(&a.db, id), JournalStatus::Done);
+    }
+
+    /// The frame alone in the journal, but a companion-named file beside it
+    /// in quarantine: keep-only as well — whose edits those are nothing
+    /// proves, and the frame must not come back without them.
+    #[test]
+    fn a_frame_with_a_companion_beside_it_in_quarantine_is_keep_only() {
+        for side in ["IMG.aae", "IMG.xmp", "IMG.CR2.xmp", "._IMG.CR2"] {
+            let a = archive();
+            let (id, home) = quarantined_alone(&a, "IMG.CR2");
+            fs::write(&home, THEIRS).unwrap();
+            let beside = q(&home).with_file_name(side);
+            fs::write(&beside, b"edits beside the frame in quarantine").unwrap();
+            let before = meta(&beside);
+            let r = reviewed_now(&a, id, Choice::RenameReturning);
+            let c = r.seen.conflict().expect("a conflict");
+            assert_eq!(c.choices, vec![Choice::Keep], "{side}: {c:?}");
+            assert!(c.kept_words().contains(&s(&beside)), "{side}");
+
+            let result = crate::undo_reviewed(&a.db, id, Some(&r));
+
+            assert_eq!(decided(&result), vec![crate::Outcome::Refused], "{side}");
+            assert_eq!(fs::read(q(&home)).unwrap(), OURS, "{side}");
+            assert_eq!(meta(&beside), before, "{side}");
+            assert!(!a.dir.join("IMG_1.CR2").exists(), "{side}");
+        }
+    }
+
+    /// R4-B1: a file beside the unit, shown by the preview, gone by the
+    /// time of the action — and nothing proves another entry carried it
+    /// home: changed since the preview, nothing moves, whatever was chosen
+    /// and whether the place is free or taken.
+    #[test]
+    fn a_previewed_neighbour_that_vanished_unaccounted_requires_refresh() {
+        let mut failures = Vec::new();
+        for conflict in [false, true] {
+            for choice in Choice::ALL {
+                let a = archive();
+                let (id, home) = quarantined_alone(&a, "IMG.CR2");
+                if conflict {
+                    fs::write(&home, THEIRS).unwrap();
+                }
+                let extra = q(&home).with_extension("aae");
+                fs::write(&extra, b"edits already present during preview").unwrap();
+                let r = reviewed_now(&a, id, choice);
+                let away = a.dir.join("external-edits.aae");
+                fs::rename(&extra, &away).unwrap();
+                let before = meta(&away);
+                let foreign = conflict.then(|| meta(&home));
+
+                let result = crate::undo_reviewed(&a.db, id, Some(&r));
+
+                assert_eq!(meta(&away), before);
+                if let Some(m) = foreign {
+                    assert_eq!(meta(&home), m);
+                }
+                let changed = decided(&result) == vec![crate::Outcome::ChangedSincePreview];
+                if !changed || !q(&home).exists() || a.dir.join("IMG_1.CR2").exists() {
+                    failures.push(format!(
+                        "conflict={conflict} choice={choice:?} result={result:?} events={:?}",
+                        events(&a.db, id)
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The one vanishing that is accounted for: the neighbour is another
+    /// entry's own member — `IMG.xmp` of `IMG.CR2`, beside `IMG.JPG` in
+    /// quarantine — and that entry's undo carried it home, where it now is
+    /// by its evidence. The JPG still comes back as previewed; the sidecar
+    /// stays with its own frame.
+    #[test]
+    fn a_neighbour_carried_home_by_its_own_entry_does_not_hold_the_unit_back() {
+        let a = archive();
+        let (raw, raw_home, xmp) = quarantined(&a, "IMG.CR2");
+        let (jpg, jpg_home) = quarantined_alone(&a, "IMG.JPG");
+        let r = reviewed_now(&a, jpg, Choice::Keep);
+        match &r.seen {
+            Seen::Free { beside, .. } => assert_eq!(beside.len(), 1, "{:?}", r.seen),
+            other => panic!("not free: {other:?}"),
+        }
+        crate::undo(&a.db, raw).unwrap();
+        assert_eq!(fs::read(&raw_home).unwrap(), OURS);
+        assert_eq!(fs::read(&xmp).unwrap(), OUR_EDITS);
+
+        let done = crate::undo_reviewed(&a.db, jpg, Some(&r)).unwrap();
+
+        assert_eq!(done.files_back, 1);
+        assert_eq!(fs::read(&jpg_home).unwrap(), OURS);
+        assert_eq!(fs::read(&xmp).unwrap(), OUR_EDITS);
+        assert_eq!(status(&a.db, jpg), JournalStatus::Undone);
+    }
+
+    /// R4-B2: a foreign `IMG_1.aae` created after the suffix was chosen and
+    /// right before the frame's rename to `IMG_1.CR2`. The frame must not
+    /// stay paired with someone else's edits under a claim of success: it
+    /// is put back in quarantine, the refusal is typed and written down,
+    /// and the foreign file is untouched.
+    #[test]
+    fn a_companion_appearing_at_the_chosen_suffix_refuses_and_puts_the_frame_back() {
+        let a = archive();
+        let (id, home) = quarantined_alone(&a, "IMG.CR2");
+        fs::write(&home, THEIRS).unwrap();
+        let theirs = meta(&home);
+        let foreign = a.dir.join("IMG_1.aae");
+        let put = foreign.clone();
+        let first = a.dir.join("IMG_1.CR2");
+        let _g = race::before_move(move |_, to| {
+            if to == first && !put.exists() {
+                fs::write(&put, b"foreign edits for a different frame")?;
+            }
+            Ok(())
+        });
+        let r = reviewed_now(&a, id, Choice::RenameReturning);
+
+        let result = crate::undo_reviewed(&a.db, id, Some(&r));
+
+        assert_eq!(
+            fs::read(&foreign).unwrap(),
+            b"foreign edits for a different frame"
+        );
+        assert_eq!(meta(&home), theirs);
+        assert!(
+            !a.dir.join("IMG_1.CR2").exists(),
+            "returned frame paired with a foreign AAE: {result:?}"
+        );
+        assert_eq!(fs::read(q(&home)).unwrap(), OURS);
+        assert_eq!(
+            decided(&result),
+            vec![crate::Outcome::Refused],
+            "{result:?}"
+        );
+        assert_eq!(status(&a.db, id), JournalStatus::Done);
+        assert!(
+            events(&a.db, id)
+                .iter()
+                .any(|(_, k, d)| k == "refused" && d.contains("\"outcome\":\"refused\"")),
+            "{:?}",
+            events(&a.db, id)
+        );
+    }
+
+    /// A suffix is free only if no name of its stem exists for any
+    /// companion: a dangling link named `IMG_1.xmp` or a folder named
+    /// `._IMG_2.CR2` takes `_1` and `_2` out as surely as a file would.
+    #[test]
+    fn a_suffix_whose_stem_bears_any_companion_name_is_not_free() {
+        let a = archive();
+        let (id, home) = quarantined_alone(&a, "IMG.CR2");
+        fs::write(&home, THEIRS).unwrap();
+        std::os::unix::fs::symlink(a.dir.join("nowhere"), a.dir.join("IMG_1.xmp")).unwrap();
+        fs::create_dir(a.dir.join("._IMG_2.CR2")).unwrap();
+
+        let done = chosen(&a, id, Choice::RenameReturning).unwrap();
+
+        assert_eq!(done.files_back, 1);
+        assert!(!a.dir.join("IMG_1.CR2").exists());
+        assert!(!a.dir.join("IMG_2.CR2").exists());
+        assert_eq!(fs::read(a.dir.join("IMG_3.CR2")).unwrap(), OURS);
+        assert!(fs::symlink_metadata(a.dir.join("IMG_1.xmp"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(a.dir.join("._IMG_2.CR2").is_dir());
+    }
+}

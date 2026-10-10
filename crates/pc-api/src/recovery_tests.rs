@@ -1282,3 +1282,245 @@ async fn r3_api_legacy_free_destination_never_moves() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+// ---- el-14vx0 round 5: "return as *_1" only for a frame alone (el-3sk3x) ---
+
+/// A photograph alone — no sidecar — in quarantine, journaled with its
+/// evidence the way this version writes it.
+#[cfg(unix)]
+fn proven_alone(f: &Fixture) -> (PathBuf, PathBuf, i64) {
+    let home = f.archive.join("frame.arw");
+    let q = f.archive.join(pc_core::QUARANTINE_DIR);
+    std::fs::create_dir(&q).unwrap();
+    let held = q.join("frame.arw");
+    std::fs::write(&held, b"our frame").unwrap();
+    let list = [pc_db::Moved {
+        src: home.display().to_string(),
+        dst: held.display().to_string(),
+        proof: pc_core::proof::Proof::of(&std::fs::symlink_metadata(&held).unwrap()),
+    }];
+    let db = f.state.db.lock().unwrap();
+    let run = db
+        .start_run(&[f.archive.display().to_string()], "test")
+        .unwrap();
+    let id = db
+        .journal_begin(&pc_db::NewJournalEntry {
+            run_id: run,
+            op: "quarantine-file",
+            target_id: None,
+            src: &home.display().to_string(),
+            dst: Some(&held.display().to_string()),
+            size: 9,
+            file_count: 1,
+            manifest: &list,
+        })
+        .unwrap();
+    db.journal_finish(id, pc_db::JournalStatus::Done, None)
+        .unwrap();
+    (home, held, id)
+}
+
+fn offered(p: &Value) -> Vec<String> {
+    p["conflicts"][0]["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["choice"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// A frame alone: the web offers both choices and returns it as *_1 beside
+/// the existing file.
+#[cfg(unix)]
+#[tokio::test]
+async fn r5_a_frame_alone_is_offered_return_as_suffix_and_comes_back() {
+    let f = Fixture::new();
+    let (home, held, id) = proven_alone(&f);
+    std::fs::write(&home, b"someone else's frame").unwrap();
+    let p = f.preview("journal-undo", json!({"journal_id": id})).await;
+    assert_eq!(offered(&p), ["keep", "rename-returning"], "{p}");
+    let p = f
+        .preview(
+            "journal-undo",
+            json!({"journal_id":id,"choices":{id.to_string():"rename-returning"}}),
+        )
+        .await;
+    let job = f.apply(&p).await;
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(std::fs::read(&home).unwrap(), b"someone else's frame");
+    assert_eq!(
+        std::fs::read(f.archive.join("frame_1.arw")).unwrap(),
+        b"our frame"
+    );
+    assert!(!held.exists());
+}
+
+/// A unit with a sidecar is keep-only in the web, with the quarantine
+/// paths for a return by hand; asked anyway, nothing of it moves and the
+/// refusal is in its structured history.
+#[cfg(unix)]
+#[tokio::test]
+async fn r5_a_unit_with_a_companion_is_keep_only_in_the_web_and_never_moves() {
+    let f = Fixture::new();
+    let (home, held, id) = proven_held(&f);
+    std::fs::write(&home, b"someone else's frame").unwrap();
+    let foreign = r3_metadata(&home);
+    let p = f.preview("journal-undo", json!({"journal_id": id})).await;
+    assert_eq!(offered(&p), ["keep"], "{p}");
+    let kept = p["conflicts"][0]["kept"].as_str().unwrap();
+    assert!(kept.contains(&held.display().to_string()), "{kept}");
+    assert!(
+        kept.contains(&held.with_extension("xmp").display().to_string()),
+        "{kept}"
+    );
+    let p = f
+        .preview(
+            "journal-undo",
+            json!({"journal_id":id,"choices":{id.to_string():"rename-returning"}}),
+        )
+        .await;
+    let job = f.apply(&p).await;
+    assert_eq!(r3_metadata(&home), foreign);
+    assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
+    assert_eq!(
+        std::fs::read(held.with_extension("xmp")).unwrap(),
+        b"our edits"
+    );
+    assert!(!f.archive.join("frame_1.arw").exists(), "{job}");
+    let events = f.state.db.lock().unwrap().journal_events(id).unwrap();
+    assert!(
+        events.iter().any(|e| e.kind == "refused"
+            && e.data
+                .as_deref()
+                .is_some_and(|d| d.contains("\"outcome\":\"refused\""))),
+        "{events:?}"
+    );
+}
+
+/// R4-B1 through the API: two entries of a run, each with a file beside
+/// it in quarantine at the preview; while the first runs, the second's
+/// neighbour is renamed away. Nothing proves another entry took it: the
+/// second unit is changed since the preview and stays.
+#[cfg(unix)]
+#[tokio::test]
+async fn r5_vanished_previewed_neighbour_in_accepted_api_batch_requires_refresh() {
+    let f = Fixture::new();
+    let (run, ids) = {
+        let db = f.state.db.lock().unwrap();
+        let run = db
+            .start_run(&[f.archive.display().to_string()], "test")
+            .unwrap();
+        let mut ids = Vec::new();
+        for name in ["first.arw", "second.arw"] {
+            let home = f.archive.join(name);
+            let held = f.archive.join(format!("held-{name}"));
+            std::fs::write(&held, b"returning frame").unwrap();
+            std::fs::write(&home, b"foreign occupant").unwrap();
+            let m = pc_db::Moved {
+                src: home.display().to_string(),
+                dst: held.display().to_string(),
+                proof: pc_core::proof::Proof::of(&std::fs::metadata(&held).unwrap()),
+            };
+            let id = db
+                .journal_begin(&pc_db::NewJournalEntry {
+                    run_id: run,
+                    op: "organize",
+                    target_id: None,
+                    src: &m.src,
+                    dst: Some(&m.dst),
+                    size: 15,
+                    file_count: 1,
+                    manifest: std::slice::from_ref(&m),
+                })
+                .unwrap();
+            db.journal_finish(id, pc_db::JournalStatus::Done, None)
+                .unwrap();
+            ids.push(id);
+        }
+        (run, ids)
+    };
+    // Only the second has a neighbour; the first, a frame alone, returns as
+    // *_1, and its rename is when the second's neighbour is moved away.
+    std::fs::write(
+        f.archive.join("held-second.aae"),
+        b"neighbour shown at preview",
+    )
+    .unwrap();
+    let p = f
+        .preview(
+            "organize-undo",
+            json!({"run_id":run,"choices":{ids[0].to_string():"rename-returning",ids[1].to_string():"keep"}}),
+        )
+        .await;
+    let altered = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let capture = altered.clone();
+    let archive = f.archive.clone();
+    let away = archive.join("external-second.aae");
+    let to = away.clone();
+    let marker = f.archive.to_string_lossy().into_owned();
+    let _g = pc_apply::race::before_move_under(&marker, move |_, _| {
+        let mut seen = capture.lock().unwrap();
+        if seen.is_none() {
+            std::fs::rename(archive.join("held-second.aae"), &to)?;
+            *seen = Some(r3_metadata(&to));
+        }
+        Ok(())
+    });
+    let job = f.apply(&p).await;
+    assert_eq!(Some(r3_metadata(&away)), altered.lock().unwrap().clone());
+    let held = f.archive.join("held-second.arw");
+    let events = f.state.db.lock().unwrap().journal_events(ids[1]).unwrap();
+    assert!(held.exists(), "{job}");
+    assert!(
+        events.iter().any(|e| e.kind == "refused"
+            && e.data
+                .as_deref()
+                .is_some_and(|d| d.contains("changed-since-preview"))),
+        "{events:?}"
+    );
+    assert!(job.to_string().contains("refresh the preview"), "{job}");
+}
+
+/// R4-B2 through the API: a foreign `frame_1.aae` created right before the
+/// rename to `frame_1.arw`. The photograph is not left beside it under a
+/// claim of success: it is back in quarantine, the foreign file untouched.
+#[cfg(unix)]
+#[tokio::test]
+async fn r5_a_foreign_suffix_companion_during_accepted_job_does_not_join_the_frame() {
+    let f = Fixture::new();
+    let (home, held, id) = proven_alone(&f);
+    std::fs::write(&home, b"foreign existing frame").unwrap();
+    let original = r3_metadata(&home);
+    let p = f
+        .preview(
+            "journal-undo",
+            json!({"journal_id":id,"choices":{id.to_string():"rename-returning"}}),
+        )
+        .await;
+    let target = home.with_file_name("frame_1.aae");
+    let at = target.clone();
+    let first = home.with_file_name("frame_1.arw");
+    let trigger = first.clone();
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let capture = captured.clone();
+    let marker = f.archive.to_string_lossy().into_owned();
+    let _g = pc_apply::race::before_move_under(&marker, move |_, dst| {
+        if dst == trigger && !at.exists() {
+            std::fs::write(&at, b"foreign AAE edits")?;
+            *capture.lock().unwrap() = Some(r3_metadata(&at));
+        }
+        Ok(())
+    });
+    let job = f.apply(&p).await;
+    assert_eq!(
+        r3_metadata(&target),
+        captured.lock().unwrap().clone().unwrap()
+    );
+    assert_eq!(r3_metadata(&home), original);
+    assert!(
+        !first.exists(),
+        "API job returned the photograph beside a foreign AAE: {job}"
+    );
+    assert_eq!(std::fs::read(&held).unwrap(), b"our frame");
+    assert_ne!(job["state"], "done", "{job}");
+}
