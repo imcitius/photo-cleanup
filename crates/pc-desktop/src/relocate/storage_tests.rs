@@ -238,16 +238,28 @@ async fn an_ordinary_reset_restart_and_recovery_work_on_the_bound_folder() {
     let p = b.prepared();
     let server = start(&p).await.unwrap();
     confirm_started(&b.env.dirs, &p).unwrap();
-    // A thumbnail the store writes on the bound folder goes; the one the
-    // move copied (new inode, no record of its making) stays and is named.
-    let store = pc_core::ThumbStore::bound(&p.layout.thumbs, p.storage_binding().unwrap());
+    // A reset removes nothing: the thumbnail the store wrote stays in its
+    // (now old) generation, the cache the move copied stays too, and both
+    // are named; the store reads from the new, empty generation.
+    let store = own_store(&p);
     let key = format!("5e{}", "1".repeat(30));
     store.put_at(&key, b"own thumbnail 2417").unwrap();
+    let leaf = store.path_for(&key).unwrap();
     let (status, body) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
     assert_eq!(status, 200, "{body}");
-    assert!(body.contains("\"thumbs_removed\":1"), "{body}");
-    assert!(body.contains("\"thumbs_kept\":1"), "{body}");
-    assert!(store.get(&key).is_none(), "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["thumbs_removed"], 0, "{body}");
+    // The old generation and the copied `ab` fan-out folder.
+    assert_eq!(v["thumbs_kept"], 2, "{body}");
+    assert!(v["thumbs_kept_bytes"].as_u64().unwrap() > 0, "{body}");
+    assert_eq!(fs::read(&leaf).unwrap(), b"own thumbnail 2417");
+    assert!(kept_covers(&body, &leaf), "{body}");
+    assert!(kept_covers(&body, &p.layout.thumbs.join(THUMB)), "{body}");
+    // The server's store, and any store started after the reset, reads the
+    // new generation.
+    assert!(own_store(&p).get(&key).is_none(), "{body}");
+    let generation = v["thumbs_generation"].as_str().unwrap();
+    assert_eq!(names(Path::new(generation)), Vec::<String>::new());
     assert_eq!(
         fs::read(p.layout.thumbs.join(THUMB)).unwrap(),
         vec![7u8; 5_123]
@@ -389,34 +401,37 @@ fn a_linked_source_file_is_refused_before_anything_is_written() {
     }
 }
 
-/// C2 (el-5x1uh, B1 of review el-bdi66): a reset on the genuine bound
-/// cache takes only what the store itself wrote and recorded. Somebody's
-/// file at the top, a folder of somebody's, a foreign name and a link under
-/// a thumbnail's name in a fan-out folder the store made, and the whole
-/// fan-out folder the move copied (no record of its making) all stay, with
-/// their bytes, and the reply counts and names them.
+/// C2 (el-5x1uh, B1 of review el-bdi66, narrowed after el-19kbm): a reset
+/// on the genuine bound cache removes nothing at all. The store's own
+/// thumbnail, somebody's file at the top, a folder of somebody's, a foreign
+/// name and a link under a thumbnail's name in a fan-out folder the store
+/// made, and the whole fan-out folder the move copied all stay, with their
+/// bytes, and the reply counts and names every top-level entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reset_takes_only_the_caches_own_thumbnails_and_names_the_rest() {
+async fn a_reset_removes_nothing_and_names_every_entry_it_kept() {
     let b = Bound::new();
     let p = b.prepared();
     let thumbs = p.layout.thumbs.clone();
-    let store = pc_core::ThumbStore::bound(&thumbs, p.storage_binding().unwrap());
+    let store = own_store(&p);
     let key = format!("5e11{}", "2".repeat(28));
     store.put_at(&key, b"own thumbnail 3918").unwrap();
+    let own = store.path_for(&key).unwrap();
+    let generation = store.generation_dir().unwrap();
     let outside = b.env.root.join("outside-photo-3917.jpg");
     fs::write(&outside, b"outside photo 3917").unwrap();
     fs::write(thumbs.join("notes-1204.txt"), b"notes 1204").unwrap();
     fs::create_dir(thumbs.join("album")).unwrap();
     fs::write(thumbs.join("album/IMG_5521.JPG"), b"album photo 5521").unwrap();
-    fs::write(thumbs.join("5e/11/IMG_7730.JPG"), b"foreign 7730").unwrap();
-    let link = thumbs.join("5e/11/5e1199999999999999999999999999aa.jpg");
+    fs::write(generation.join("5e/11/IMG_7730.JPG"), b"foreign 7730").unwrap();
+    let link = generation.join("5e/11/5e1199999999999999999999999999aa.jpg");
     symlink(&outside, &link).unwrap();
     let planted = [
         thumbs.join("notes-1204.txt"),
         thumbs.join("album"),
         thumbs.join("album/IMG_5521.JPG"),
-        thumbs.join("5e/11/IMG_7730.JPG"),
+        generation.join("5e/11/IMG_7730.JPG"),
         link.clone(),
+        own.clone(),
         thumbs.join("ab"),
         thumbs.join("ab/cd"),
         thumbs.join(THUMB),
@@ -432,18 +447,20 @@ async fn a_reset_takes_only_the_caches_own_thumbnails_and_names_the_rest() {
     let (status, body) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
     assert_eq!(status, 200, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["thumbs_removed"], 1, "{body}");
-    // notes, album and ab (one entry each, not walked into), the foreign
-    // name, the link.
-    assert_eq!(v["thumbs_kept"], 5, "{body}");
+    assert_eq!(v["thumbs_removed"], 0, "{body}");
+    // notes, album, ab and the old generation: one entry each.
+    assert_eq!(v["thumbs_kept"], 4, "{body}");
     assert_eq!(
         v["thumbs_kept_examples"].as_array().unwrap().len(),
-        5,
+        4,
         "{body}"
     );
+    for f in &planted {
+        assert!(kept_covers(&body, f), "{} not named: {body}", f.display());
+    }
     assert!(
-        store.get(&key).is_none(),
-        "the cache's own thumbnail stayed"
+        own_store(&p).get(&key).is_none(),
+        "a store started after the reset reads the old generation"
     );
     let after: Vec<_> = planted.iter().map(|f| signature(f)).collect();
     assert_eq!(after, before, "a planted entry changed or went");
@@ -510,6 +527,23 @@ fn under_umask_000_a_moved_cache_is_not_writable_by_others() {
     assert!(status.success());
 }
 
+/// The thumbnail store the server itself uses for this folder: bound, its
+/// generation recorded in the bound database.
+fn own_store(p: &crate::Prepared) -> pc_core::ThumbStore {
+    pc_api::thumb_store(
+        &p.layout.db,
+        p.layout.thumbs.clone(),
+        p.storage_binding().as_ref(),
+    )
+}
+
+/// A reset reply names `path` as kept, itself or a folder holding it.
+fn kept_covers(body: &str, path: &Path) -> bool {
+    kept_paths(body)
+        .iter()
+        .any(|k| path.starts_with(Path::new(k)))
+}
+
 /// What a reset reply names as kept: the paths of its examples.
 fn kept_paths(body: &str) -> Vec<String> {
     let v: serde_json::Value = serde_json::from_str(body).unwrap();
@@ -530,9 +564,9 @@ async fn a_foreign_file_at_a_genuine_thumbnail_name_survives_reset() {
     let b = Bound::new();
     let p = b.prepared();
     let server = start(&p).await.unwrap();
-    let store = pc_core::ThumbStore::bound(&p.layout.thumbs, p.storage_binding().unwrap());
+    let store = own_store(&p);
     let key = store.put(b"synthetic own thumbnail 9371").unwrap();
-    let leaf = store.path_for(&key);
+    let leaf = store.path_for(&key).unwrap();
     let saved = b.env.root.join("saved-own-thumb-9371");
     fs::rename(&leaf, &saved).unwrap();
     fs::write(&leaf, b"foreign replacement payload 19371").unwrap();
@@ -544,10 +578,7 @@ async fn a_foreign_file_at_a_genuine_thumbnail_name_survives_reset() {
     assert_eq!(status, 200, "{body}");
     assert!(leaf.exists(), "the foreign file was deleted: {body}");
     assert_eq!(signature(&leaf), before, "its bytes or metadata changed");
-    assert!(
-        kept_paths(&body).contains(&leaf.display().to_string()),
-        "{body}"
-    );
+    assert!(kept_covers(&body, &leaf), "{body}");
     assert_eq!(fs::read(&saved).unwrap(), b"synthetic own thumbnail 9371");
 }
 
@@ -641,7 +672,7 @@ async fn links_and_folders_at_genuine_thumbnail_names_survive_reset() {
     let b = Bound::new();
     let p = b.prepared();
     let server = start(&p).await.unwrap();
-    let store = pc_core::ThumbStore::bound(&p.layout.thumbs, p.storage_binding().unwrap());
+    let store = own_store(&p);
     let outside = b.env.root.join("outside-payload-6381");
     fs::write(&outside, b"outside preserved 6381").unwrap();
     mark(&outside);
@@ -650,7 +681,7 @@ async fn links_and_folders_at_genuine_thumbnail_names_survive_reset() {
         let key = store
             .put(format!("own synthetic 6381-{n}").as_bytes())
             .unwrap();
-        let leaf = store.path_for(&key);
+        let leaf = store.path_for(&key).unwrap();
         fs::rename(&leaf, b.env.root.join(format!("own-saved-6381-{n}"))).unwrap();
         match n {
             0 => symlink(&outside, &leaf).unwrap(),
@@ -669,9 +700,8 @@ async fn links_and_folders_at_genuine_thumbnail_names_survive_reset() {
     let (status, body) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
     server.shutdown(pc_api::Shutdown::CancelJob).await.unwrap();
     assert_eq!(status, 200, "{body}");
-    let kept = kept_paths(&body);
     for leaf in &paths {
-        assert!(kept.contains(&leaf.display().to_string()), "{body}");
+        assert!(kept_covers(&body, leaf), "{body}");
     }
     let after: Vec<_> = paths.iter().map(|p| tree(p)).collect();
     assert_eq!(after, before);

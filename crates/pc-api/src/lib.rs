@@ -14,7 +14,7 @@ mod service;
 mod state;
 
 pub use server::{start, ActiveJob, Server, ServerConfig, Shutdown, ShutdownError};
-pub use state::AppState;
+pub use state::{thumb_store, AppState};
 
 use anyhow::Result;
 use axum::routing::{get, post};

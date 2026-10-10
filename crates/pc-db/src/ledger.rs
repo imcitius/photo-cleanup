@@ -7,14 +7,21 @@ use anyhow::Result;
 use rusqlite::OptionalExtension;
 use std::path::{Path, PathBuf};
 
-/// The key a cache folder is recorded under: its absolute path as given, so
-/// the server and the command line, started from different folders, find
-/// the same row.
+/// The key a cache folder is recorded under: its real path (links and
+/// `..` resolved), so the server and the command line, started from
+/// different folders or given the path through a link, find the same row.
+/// A folder not there yet is keyed by its parent's real path and its name —
+/// what it will resolve to once made.
 fn key(root: &Path) -> String {
-    std::path::absolute(root)
-        .unwrap_or_else(|_| root.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
+    let absolute = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let real = std::fs::canonicalize(&absolute)
+        .ok()
+        .or_else(|| {
+            let parent = std::fs::canonicalize(absolute.parent()?).ok()?;
+            Some(parent.join(absolute.file_name()?))
+        })
+        .unwrap_or(absolute);
+    real.to_string_lossy().into_owned()
 }
 
 impl Db {
@@ -130,6 +137,13 @@ mod tests {
         assert_eq!(db.thumb_generation(root).unwrap().as_deref(), Some("a"));
         assert!(db.record_thumb_generation(root, Some("a"), "c").unwrap());
         assert_eq!(db.thumb_generation(root).unwrap().as_deref(), Some("c"));
+        // The same folder named another way is the same row.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("thumbs");
+        std::fs::create_dir(&dir).unwrap();
+        assert!(db.record_thumb_generation(&dir, None, "d").unwrap());
+        let other_name = tmp.path().join("thumbs/../thumbs");
+        assert_eq!(db.thumb_generation(&other_name).unwrap().as_deref(), Some("d"));
         // Another cache folder has its own row.
         assert_eq!(db.thumb_generation(Path::new("/other")).unwrap(), None);
     }
