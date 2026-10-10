@@ -466,7 +466,8 @@ pub fn reset_word() -> &'static str {
     pc_core::tr!("СБРОСИТЬ", "RESET")
 }
 
-/// Throw away the index and the thumbnail cache, and start from nothing.
+/// Throw away the index and start from nothing; the thumbnail cache starts
+/// a new generation and keeps the old one on disk (reported, never removed).
 ///
 /// Nothing in the archive itself is touched — this only forgets what was
 /// *learned* about it. The journal stays, so anything already in quarantine
@@ -496,21 +497,26 @@ pub async fn reset(State(st): State<Arc<AppState>>, Json(v): Json<Value>) -> Res
         // as they were, and the replacement keeps every file.
         st.thumbs.confirm()?;
         db.reset_index()?;
-        // Only what the cache recorded making when it made it goes; anything
-        // else found in it — however it is named — stays and is named here
-        // (el-5x1uh C2, B1/B2 of review el-bdi66).
-        let cleared = st.thumbs.clear()?;
-        for (path, why) in &cleared.examples {
-            tracing::warn!(path = %path.display(), %why, "kept in the thumbnail cache");
+        // Nothing is removed from the thumbnail cache: it switches to a new
+        // generation, and the old cache — earlier generations, a cache from
+        // a version without them, anything else in the folder — stays where
+        // it is and is named here with its size, for the user to delete by
+        // hand if they want the space (el-5x1uh, review el-19kbm).
+        let reset = st.thumbs.reset()?;
+        for kept in &reset.kept {
+            tracing::info!(path = %kept.path.display(), bytes = kept.bytes, "old thumbnail cache kept");
         }
         Ok(json!({
             "ok": true,
-            "thumbs_removed": cleared.removed,
-            "thumbs_kept": cleared.kept,
-            "thumbs_kept_examples": cleared
-                .examples
+            "thumbs_removed": 0,
+            "thumbs_generation": reset.generation.display().to_string(),
+            "thumbs_kept": reset.kept_count,
+            "thumbs_kept_bytes": reset.kept_bytes,
+            "thumbs_kept_bytes_partial": reset.kept_bytes_partial,
+            "thumbs_kept_examples": reset
+                .kept
                 .iter()
-                .map(|(path, why)| json!({"path": path.display().to_string(), "why": why}))
+                .map(|k| json!({"path": k.path.display().to_string(), "bytes": k.bytes}))
                 .collect::<Vec<_>>(),
         }))
     })())

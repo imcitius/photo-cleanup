@@ -419,7 +419,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Scan(a) => scan::run(&db, &a.roots, VERSION),
         Command::Index(a) => {
-            let store = pc_core::ThumbStore::new(thumbs_dir(&cli.db, a.thumbs));
+            let store = thumb_store(&cli.db, a.thumbs);
             let summary = pc_cli::index::run(
                 &db,
                 &a.roots,
@@ -444,7 +444,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Families(FamiliesCmd::Build(a)) => {
-            let store = pc_core::ThumbStore::new(thumbs_dir(&cli.db, a.thumbs));
+            let store = thumb_store(&cli.db, a.thumbs);
             let params = pc_family::Params {
                 phash_max: a.phash_max,
                 ssim_min: a.ssim_min,
@@ -492,7 +492,7 @@ fn main() -> Result<()> {
             rt.block_on(pc_api::serve(&cli.db, &thumbs, a.quarantine, addr, a.open))
         }
         Command::Categories(CategoriesCmd::Build(a)) => {
-            let store = pc_core::ThumbStore::new(thumbs_dir(&cli.db, a.thumbs));
+            let store = thumb_store(&cli.db, a.thumbs);
             let r = pc_family::categories::build(&db, Some(&store))?;
             println!("Classified: {}", r.classified);
             for (label, n) in &r.by_category {
@@ -582,11 +582,11 @@ fn main() -> Result<()> {
         Command::Organize(OrganizeCmd::Runs) => cmd_organize_runs(&db),
         Command::Status => cmd_status(&db),
         Command::Inspect(a) => {
-            let store = pc_core::ThumbStore::new(thumbs_dir(&cli.db, a.thumbs.clone()));
+            let store = thumb_store(&cli.db, a.thumbs.clone());
             cmd_inspect(&db, &store, &a)
         }
         Command::Thumbs(a) => {
-            let store = pc_core::ThumbStore::new(thumbs_dir(&cli.db, a.thumbs));
+            let store = thumb_store(&cli.db, a.thumbs);
             let report = pc_work::thumbs::rebuild(
                 &db,
                 &store,
@@ -772,6 +772,13 @@ fn inspect_one(path: &std::path::Path) -> Result<()> {
         Err(e) => println!("Read:      FAILED — {e}"),
     }
     Ok(())
+}
+
+/// The thumbnail cache, its active generation recorded in the database the
+/// server uses too, so thumbnails written here are the ones it shows.
+fn thumb_store(db: &std::path::Path, given: Option<PathBuf>) -> pc_core::ThumbStore {
+    pc_core::ThumbStore::new(thumbs_dir(db, given))
+        .with_ledger(std::sync::Arc::new(pc_db::ThumbLedger::at(db)))
 }
 
 /// Thumbnails live beside the database unless told otherwise.

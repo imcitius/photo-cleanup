@@ -87,10 +87,7 @@ impl AppState {
             network: false,
             closing: AtomicBool::new(false),
             db: Mutex::new(db),
-            thumbs: match &binding {
-                None => ThumbStore::new(thumbs),
-                Some(b) => ThumbStore::bound(thumbs, b.clone()),
-            },
+            thumbs: thumb_store(&db_path, thumbs, binding.as_ref()),
             db_path,
             quarantine,
             binding,
@@ -104,6 +101,19 @@ impl AppState {
     pub fn take_writer(&self, what: &str) -> Result<pc_core::lock::WriterLock> {
         take_writer(&self.db_path, self.binding.as_ref(), what)
     }
+}
+
+/// The thumbnail cache at `thumbs`, its active generation recorded in the
+/// database at `db_path` (opened the way this server opens it), confirmed
+/// through `binding` when there is one.
+pub fn thumb_store(db_path: &Path, thumbs: PathBuf, binding: Option<&Binding>) -> ThumbStore {
+    let store = match binding {
+        None => ThumbStore::new(thumbs),
+        Some(b) => ThumbStore::bound(thumbs, b.clone()),
+    };
+    let (path, binding) = (db_path.to_path_buf(), binding.cloned());
+    let ledger = pc_db::ThumbLedger::with(db_path, move || open_db(&path, binding.as_ref()));
+    store.with_ledger(std::sync::Arc::new(ledger))
 }
 
 /// The writer lock lives beside the database, so a bound folder is

@@ -1,6 +1,7 @@
 //! SQLite storage: schema, migrations and the queries phase 0 needs.
 
 pub mod files;
+pub mod ledger;
 pub mod marks;
 pub mod model;
 pub mod organize;
@@ -11,6 +12,7 @@ pub use files::{
     FamilyBadge, FamilyRow, FileInfo, FileRow, Identity, IndexStats, MemberRow, NewFile, NewMeta,
     PlanRow, SeriesMemberRow, SeriesRow, TreeFile,
 };
+pub use ledger::ThumbLedger;
 pub use marks::{Mark, MarkScope, Marks};
 pub use model::{
     Bundle, BundleState, Catalog, Event, JournalEntry, JournalEvent, JournalStatus, KeeperSource,
@@ -209,8 +211,10 @@ impl Db {
     /// of files this tool actually moved — wiping them would strand whatever
     /// sits in quarantine with no way back.
     ///
-    /// The thumbnail cache is separate from the database and is cleared by
-    /// its owner; see `ThumbStore::clear`.
+    /// The thumbnail cache is separate from the database: a reset switches
+    /// it to a new generation and removes nothing from it; see
+    /// `ThumbStore::reset`. Its recorded generation (`thumb_generations`)
+    /// is not derived from the archive and stays.
     pub fn reset_index(&self) -> Result<()> {
         // Children before parents: the manual tables reference files(id)
         // without a cascade, on purpose, so a stray delete cannot quietly

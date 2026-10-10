@@ -453,6 +453,19 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX journal_events_by_entry ON journal_events(journal_id, id);
     "#,
+    // 021 — активное поколение кэша миниатюр (el-5x1uh, review el-19kbm).
+    //
+    // Какая папка внутри кэша — текущее поколение, записано здесь, а не
+    // файлом в самом кэше, который мог бы подменить другой процесс. Ключ —
+    // путь к папке кэша; значение — имя поколения и идентичность папки при
+    // создании. Сброс индекса эту таблицу не трогает: он сам записывает в
+    // неё новое поколение.
+    r#"
+    CREATE TABLE thumb_generations(
+        root TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {
