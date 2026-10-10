@@ -361,6 +361,12 @@ struct PurgeArgs {
 struct UndoArgs {
     #[arg(long)]
     journal: i64,
+    /// Bring the entry's one frame back from this place, where an earlier
+    /// `derived undo` found it by its evidence after its recorded place in
+    /// quarantine led nowhere (its folder renamed). Refused unless the same
+    /// search finds it there again
+    #[arg(long)]
+    found: Option<String>,
 }
 
 /// What this command is about to do to the archive, or `None` when it only
@@ -439,7 +445,12 @@ fn main() -> Result<()> {
         Command::Derived(DerivedCmd::Clean(a)) => cmd_clean(&db, a),
         Command::Derived(DerivedCmd::Purge(a)) => cmd_purge(&db, a),
         Command::Derived(DerivedCmd::Undo(a)) => {
-            let back = pc_apply::undo(&db, a.journal).inspect_err(print_stop)?;
+            let back = match &a.found {
+                None => pc_apply::undo(&db, a.journal),
+                Some(at) => pc_apply::undo_found(&db, a.journal, at),
+            }
+            .inspect_err(print_stop)
+            .inspect_err(|e| print_found(a.journal, e))?;
             println!("Entry {} rolled back: {}.", a.journal, back.summary());
             Ok(())
         }
@@ -1242,6 +1253,43 @@ fn print_refusals(plan: &pc_organize::Plan) {
     for (why, n) in by_reason {
         println!("  {n:>8}  {why}");
     }
+}
+
+/// After an undo that searched by evidence and moved nothing: every place
+/// found, and — when the tool may bring the frame back itself — the one
+/// command that does, bound to that place.
+fn print_found(journal: i64, e: &anyhow::Error) {
+    let Some(u) = pc_apply::unrecovered(e) else {
+        return;
+    };
+    for s in &u.sought {
+        match &s.finding {
+            pc_db::SoughtFinding::Found { at } => println!("  found: {} (recorded {})", at, s.dst),
+            pc_db::SoughtFinding::Ambiguous { at } => {
+                for p in at {
+                    println!("  one of several names: {p} (recorded {})", s.dst);
+                }
+            }
+            pc_db::SoughtFinding::Changed { at, why } => {
+                println!("  not proven: {at} ({why}; recorded {})", s.dst)
+            }
+            pc_db::SoughtFinding::NotFound | pc_db::SoughtFinding::NoEvidence => {}
+        }
+    }
+    if u.previewed.is_none() {
+        if let [one] = u.sought.as_slice() {
+            if let Some(at) = one.movable() {
+                println!(
+                    "To bring it back from there: photo-cleanup derived undo --journal {journal} --found {}",
+                    shell_quoted(at)
+                );
+            }
+        }
+    }
+}
+
+fn shell_quoted(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r#"'\''"#))
 }
 
 fn cmd_organize_undo(db: &Db, a: &OrganizeUndoArgs) -> Result<()> {

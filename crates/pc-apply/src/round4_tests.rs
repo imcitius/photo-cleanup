@@ -164,7 +164,7 @@ fn unsupported_proof_schema_must_not_become_legacy_adoption() {
         // The read-only preview says the same, and the purge refuses too.
         if status == JournalStatus::Done {
             let entry = a.db.journal_entry(id).unwrap().unwrap();
-            assert!(crate::undo_preview(&entry).is_err());
+            assert!(crate::undo_preview(&a.db, &entry).is_err());
             assert!(
                 crate::purge_entry_controlled(&a.db, id, &pc_core::work::Control::default())
                     .is_err()

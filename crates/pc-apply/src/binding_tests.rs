@@ -689,7 +689,7 @@ mod independent_d8 {
                 .unwrap();
         let entry = a.db.journal_entry(id).unwrap().unwrap();
         assert_eq!(entry.status, JournalStatus::Failed);
-        assert!(crate::recovery::undo_preview(&entry)
+        assert!(crate::recovery::undo_preview(&a.db, &entry)
             .unwrap()
             .iter()
             .all(|i| matches!(i.standing, crate::recovery::Standing::Doubt(_))));
@@ -1028,7 +1028,7 @@ mod reviewer_r2 {
                 .query_row("SELECT max(id) FROM journal", [], |r| r.get(0))
                 .unwrap();
         let entry = a.db.journal_entry(id).unwrap().unwrap();
-        let preview = crate::recovery::undo_preview(&entry).unwrap();
+        let preview = crate::recovery::undo_preview(&a.db, &entry).unwrap();
         assert!(preview
             .iter()
             .all(|item| matches!(item.standing, crate::recovery::Standing::Gone)));

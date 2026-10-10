@@ -823,3 +823,74 @@ fn reviewer_el_2rpxq_no_system_file_or_companion_ever_moves() {
     assert!(!said.contains("Moved:"), "{said}");
     assert!(said.contains("moves no system files"), "{said}");
 }
+
+#[test]
+fn a_copy_whose_folder_was_renamed_comes_back_only_from_the_place_the_undo_showed() {
+    // el-6byp2: the default quarantine sits in the photo's folder, and the
+    // user renamed that folder after `apply`.
+    let cli = Cli::new();
+    std::fs::create_dir_all(cli.archive.join("2015")).unwrap();
+    cli.photo("2015/frame.jpg", 70);
+    let copy = cli.photo("2015/frame copy.jpg", 70);
+    cli.run(&[
+        "index",
+        "--root",
+        cli.archive.to_str().unwrap(),
+        "--min-size",
+        "0",
+    ]);
+    cli.run(&["families", "build"]);
+    cli.run(&["apply", "--yes"]);
+    assert!(!copy.exists(), "копия не уехала");
+    let renamed = cli.archive.join("2015 Crimea");
+    std::fs::rename(cli.archive.join("2015"), &renamed).unwrap();
+    let held = renamed.join(pc_core::QUARANTINE_DIR).join("frame copy.jpg");
+    let bytes = std::fs::read(&held).unwrap();
+    let entry = {
+        let db = pc_db::Db::open(&cli.db).unwrap();
+        db.journal_quarantined(None)
+            .unwrap()
+            .pop()
+            .unwrap()
+            .id
+            .to_string()
+    };
+    let attempt = |extra: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup"))
+            .arg("--db")
+            .arg(&cli.db)
+            .args(["derived", "undo", "--journal", &entry])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    // Asked plainly: refused, and told where it is and how to bring it.
+    let out = attempt(&[]);
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stdout);
+    let hint = format!("--found '{}'", held.display());
+    assert!(said.contains(&hint), "{said}");
+    assert_eq!(
+        std::fs::read(&held).unwrap(),
+        bytes,
+        "moved without a preview"
+    );
+
+    // Bound to another place: refused, nothing moved.
+    let elsewhere = cli.archive.join("frame copy.jpg");
+    let out = attempt(&["--found", elsewhere.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert_eq!(std::fs::read(&held).unwrap(), bytes);
+    assert!(!copy.exists() && !elsewhere.exists());
+
+    // Bound to the place shown: it comes home.
+    let out = attempt(&["--found", held.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+    assert!(!held.exists());
+}

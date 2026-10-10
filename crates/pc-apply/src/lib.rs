@@ -29,6 +29,7 @@ pub mod outcome;
 mod purge;
 pub mod recovery;
 mod roots;
+mod sought;
 mod unit;
 
 pub use files::{
@@ -44,9 +45,11 @@ pub use purge::{
     KeptWhy, OrphanKept, OrphanWhy, PurgeKept, PurgeStage, PurgeStopped,
 };
 pub use recovery::{
-    reconcile, reconcile_undo, undo, undo_offered, undo_preview, Item, Reconciled, Standing,
+    reconcile, reconcile_found, reconcile_undo, undo, undo_found, undo_offered, undo_preview, Item,
+    Reconciled, Standing,
 };
 pub use roots::RunRoots;
+pub use sought::{unrecovered, Unrecovered};
 
 use anyhow::{bail, Context, Result};
 use pc_core::fmt_bytes;

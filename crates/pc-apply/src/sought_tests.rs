@@ -131,7 +131,12 @@ fn a_frame_whose_folder_was_renamed_is_found_by_evidence_and_comes_back_after_it
     let items = undo_preview(&f.db, &f.entry(e.id)).unwrap();
     assert_eq!(items.len(), 1);
     let s = items[0].sought.as_ref().expect("searched");
-    assert_eq!(s.finding, SoughtFinding::Found { at: now.display().to_string() });
+    assert_eq!(
+        s.finding,
+        SoughtFinding::Found {
+            at: now.display().to_string()
+        }
+    );
     assert_eq!(s.report_only, None);
     assert!(s.scope.contains(&q(&moved).display().to_string()), "{s:?}");
     assert_eq!(items[0].standing, Standing::Moved);
@@ -142,7 +147,10 @@ fn a_frame_whose_folder_was_renamed_is_found_by_evidence_and_comes_back_after_it
     let err = undo(&f.db, e.id).unwrap_err();
     let u = unrecovered(&err).expect("typed");
     assert_eq!(u.sought.len(), 1);
-    assert!(format!("{err:#}").contains(&now.display().to_string()), "{err:#}");
+    assert!(
+        format!("{err:#}").contains(&now.display().to_string()),
+        "{err:#}"
+    );
     unmoved(&[(&now, FRAME)]);
     assert!(!home.exists());
     assert_eq!(f.entry(e.id).status, JournalStatus::Done);
@@ -154,10 +162,18 @@ fn a_frame_whose_folder_was_renamed_is_found_by_evidence_and_comes_back_after_it
     assert!(!now.exists());
     assert_eq!(f.entry(e.id).status, JournalStatus::Undone);
     let (kinds, sought) = f.history(e.id);
-    assert!(kinds.contains(&("undo".into(), "refused".into())), "{kinds:?}");
-    assert!(kinds.contains(&("undo".into(), "found".into())), "{kinds:?}");
+    assert!(
+        kinds.contains(&("undo".into(), "refused".into())),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.contains(&("undo".into(), "found".into())),
+        "{kinds:?}"
+    );
     assert!(kinds.contains(&("undo".into(), "done".into())), "{kinds:?}");
-    assert!(sought.iter().all(|s| s.movable() == Some(&now.display().to_string())));
+    assert!(sought
+        .iter()
+        .all(|s| s.movable() == Some(&now.display().to_string())));
 }
 
 #[test]
@@ -192,7 +208,10 @@ fn two_names_for_the_frame_are_both_shown_and_neither_is_moved() {
     assert!(!PathBuf::from(&e.src).exists());
     assert_eq!(f.entry(e.id).status, JournalStatus::Done);
     let (kinds, sought) = f.history(e.id);
-    assert!(kinds.contains(&("undo".into(), "refused".into())), "{kinds:?}");
+    assert!(
+        kinds.contains(&("undo".into(), "refused".into())),
+        "{kinds:?}"
+    );
     assert!(sought.iter().all(|s| s.movable().is_none()));
 }
 
@@ -207,14 +226,22 @@ fn a_frame_with_a_companion_is_found_and_only_shown() {
     let items = undo_preview(&f.db, &f.entry(e.id)).unwrap();
     let s = sought_of(&items);
     assert_eq!(s.len(), 2, "{items:?}");
+    assert!(s.iter().any(|s| s.finding
+        == SoughtFinding::Found {
+            at: frame.display().to_string()
+        }));
+    assert!(s.iter().any(|s| s.finding
+        == SoughtFinding::Found {
+            at: side.display().to_string()
+        }));
     assert!(s
         .iter()
-        .any(|s| s.finding == SoughtFinding::Found { at: frame.display().to_string() }));
-    assert!(s
+        .all(|s| s.report_only == Some(ReportOnly::Companion)));
+    let why = items
         .iter()
-        .any(|s| s.finding == SoughtFinding::Found { at: side.display().to_string() }));
-    assert!(s.iter().all(|s| s.report_only == Some(ReportOnly::Companion)));
-    let why = items.iter().filter_map(Item::why).collect::<Vec<_>>().join("; ");
+        .filter_map(Item::why)
+        .collect::<Vec<_>>()
+        .join("; ");
     assert!(why.contains(&frame.display().to_string()), "{why}");
 
     let err = undo_found(&f.db, e.id, &frame.display().to_string()).unwrap_err();
@@ -238,9 +265,8 @@ fn a_row_without_evidence_is_not_searched_and_moves_nothing() {
         folder.join("IMG_0004.bmp").display().to_string(),
         held.display().to_string(),
     );
-    let id = f
-        .db
-        .journal_begin(&pc_db::NewJournalEntry {
+    let id =
+        f.db.journal_begin(&pc_db::NewJournalEntry {
             run_id: f.run,
             op: "quarantine-file",
             target_id: None,
@@ -260,7 +286,10 @@ fn a_row_without_evidence_is_not_searched_and_moves_nothing() {
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].finding, SoughtFinding::NoEvidence);
     assert_eq!(s[0].report_only, Some(ReportOnly::NoEvidence));
-    assert!(s[0].scope.is_empty(), "nothing is read for a row without evidence");
+    assert!(
+        s[0].scope.is_empty(),
+        "nothing is read for a row without evidence"
+    );
 
     assert!(undo(&f.db, id).is_err());
     let err = undo_found(&f.db, id, &now.display().to_string()).unwrap_err();
@@ -268,7 +297,10 @@ fn a_row_without_evidence_is_not_searched_and_moves_nothing() {
     unmoved(&[(&now, FRAME)]);
     assert_eq!(f.entry(id).status, JournalStatus::Done);
     let (kinds, _) = f.history(id);
-    assert!(kinds.contains(&("undo".into(), "refused".into())), "{kinds:?}");
+    assert!(
+        kinds.contains(&("undo".into(), "refused".into())),
+        "{kinds:?}"
+    );
 }
 
 #[test]
@@ -370,7 +402,10 @@ fn an_interrupted_entry_whose_quarantine_moved_is_reconciled_only_from_its_previ
     assert_eq!(fs::read(&e.src).unwrap(), FRAME);
     assert_eq!(f.entry(e.id).status, JournalStatus::Undone);
     let (kinds, _) = f.history(e.id);
-    assert!(kinds.contains(&("reconcile".into(), "found".into())), "{kinds:?}");
+    assert!(
+        kinds.contains(&("reconcile".into(), "found".into())),
+        "{kinds:?}"
+    );
 }
 
 #[test]
@@ -385,10 +420,13 @@ fn nothing_outside_the_run_and_its_quarantine_folders_is_read() {
     let items = undo_preview(&f.db, &f.entry(e.id)).unwrap();
     let s = sought_of(&items);
     assert_eq!(s[0].finding, SoughtFinding::NotFound);
-    assert!(s[0]
-        .scope
-        .iter()
-        .all(|p| Path::new(p).starts_with(&f.archive)), "{:?}", s[0].scope);
+    assert!(
+        s[0].scope
+            .iter()
+            .all(|p| Path::new(p).starts_with(&f.archive)),
+        "{:?}",
+        s[0].scope
+    );
     assert!(undo(&f.db, e.id).is_err());
     unmoved(&[(&q(&away).join("IMG_0008.bmp"), FRAME)]);
 }

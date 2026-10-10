@@ -548,15 +548,18 @@ pub async fn runs(State(st): State<Arc<AppState>>) -> Response {
 pub enum Action {
     Copy(pc_family::plan::Candidate),
     Move(pc_organize::Move),
-    Undo(pc_db::JournalEntry),
+    /// With the place a search by evidence found its one frame at, when the
+    /// preview showed one: the undo is bound to it (`pc_apply::undo_found`).
+    Undo(pc_db::JournalEntry, Option<String>),
     Purge(pc_db::JournalEntry),
     /// A file in a quarantine folder that this database never put there,
     /// carried back to where it came from — or, asked to be deleted for
     /// good, kept and named for a person to delete by hand (el-63ph1).
     Adopt(pc_db::QuarantineFound),
     Abandon(pc_db::QuarantineFound),
-    /// An operation a killed process left half-done, read against the disk.
-    Reconcile(pc_db::JournalEntry),
+    /// An operation a killed process left half-done, read against the disk;
+    /// with the place found, as for [`Action::Undo`].
+    Reconcile(pc_db::JournalEntry, Option<String>),
 }
 impl Action {
     pub fn path(&self) -> &str {
@@ -564,12 +567,13 @@ impl Action {
             Self::Copy(x) => &x.path,
             Self::Adopt(x) | Self::Abandon(x) => &x.path,
             Self::Move(x) => &x.src,
-            Self::Undo(x) | Self::Purge(x) | Self::Reconcile(x) => &x.src,
+            Self::Undo(x, _) | Self::Purge(x) | Self::Reconcile(x, _) => &x.src,
         }
     }
     pub fn source_path(&self) -> &str {
         match self {
-            Self::Undo(e) | Self::Purge(e) => e.dst.as_deref().unwrap_or(&e.src),
+            Self::Undo(_, Some(found)) => found,
+            Self::Undo(e, None) | Self::Purge(e) => e.dst.as_deref().unwrap_or(&e.src),
             _ => self.path(),
         }
     }
@@ -578,7 +582,7 @@ impl Action {
             Self::Copy(x) => x.size,
             Self::Move(x) => x.size,
             Self::Adopt(x) | Self::Abandon(x) => x.size,
-            Self::Undo(x) | Self::Purge(x) | Self::Reconcile(x) => x.size,
+            Self::Undo(x, _) | Self::Purge(x) | Self::Reconcile(x, _) => x.size,
         }
         .max(0) as u64
     }
@@ -878,7 +882,7 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                 // brought back is recognised by its evidence and the retry
                 // is offered; a stranger at its name is refused, here and
                 // on the command line alike.
-                let looks = pc_apply::undo_preview(&e)?;
+                let looks = pc_apply::undo_preview(db, &e)?;
                 // The frame and its companions come back together or not at
                 // all (user decision (c)): one doubt refuses the entry, as
                 // the undo itself does.
@@ -899,10 +903,17 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                         rest.push(json!({"path": i.dst, "dst": i.src, "size": size}));
                     }
                 }
-                let mut item = json!({"journal_id":e.id,"path":e.dst,"dst":e.src,"size":e.size,"file_count":e.file_count});
+                // Found by its evidence away from its recorded place: the
+                // preview shows where, and the undo is bound to that place
+                // (the token covers it), as on the command line.
+                let found = found_at(&looks);
+                let mut item = json!({"journal_id":e.id,"path":found.as_deref().or(e.dst.as_deref()),"dst":e.src,"size":e.size,"file_count":e.file_count});
                 item["companions"] = json!(rest);
+                if let Some(at) = &found {
+                    item["found"] = json!(at);
+                }
                 items.push(item);
-                actions.push(Action::Undo(e));
+                actions.push(Action::Undo(e, found));
             }
         }
         // An operation a killed process left half-done. The journal says what
@@ -919,11 +930,16 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             // unaccounted for: a half-reconciled entry is the state this is
             // meant to get the archive out of.
             let clear = read.iter().all(|i| i.why().is_none());
+            let found = found_at(&read);
             for item in read {
                 match item.standing {
-                    pc_apply::Standing::Moved => items.push(
-                        json!({"journal_id":id,"path":item.dst,"dst":item.src,"size":0,"file_count":1}),
-                    ),
+                    pc_apply::Standing::Moved => {
+                        let mut row = json!({"journal_id":id,"path":item.dst,"dst":item.src,"size":0,"file_count":1});
+                        if let Some(at) = item.sought.as_ref().and_then(|s| s.movable()) {
+                            row["found"] = json!(at);
+                        }
+                        items.push(row);
+                    }
                     pc_apply::Standing::Home => {}
                     pc_apply::Standing::Both => add_refusal(
                         item.src.clone(),
@@ -935,17 +951,16 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     ),
                     pc_apply::Standing::Gone => add_refusal(
                         item.src.clone(),
-                        pc_core::tr!(
-                            "Файла нет ни там, ни там",
-                            "The file is at neither path"
-                        )
-                        .into(),
+                        pc_core::tr!("Файла нет ни там, ни там", "The file is at neither path")
+                            .into(),
                     ),
-                    pc_apply::Standing::Doubt(ref why) => add_refusal(item.src.clone(), why.clone()),
+                    pc_apply::Standing::Doubt(ref why) => {
+                        add_refusal(item.src.clone(), why.clone())
+                    }
                 }
             }
             if clear {
-                actions.push(Action::Reconcile(entry));
+                actions.push(Action::Reconcile(entry, found));
             }
         }
         _ => bail!(
@@ -1053,6 +1068,15 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
         .to_string());
     Ok((out, actions))
 }
+/// The place a search by evidence found an entry's one frame at, when the
+/// tool may bring it back from there (`pc_apply`'s decision, not this one).
+fn found_at(items: &[pc_apply::Item]) -> Option<String> {
+    items
+        .iter()
+        .find_map(|i| i.sought.as_ref().and_then(|s| s.movable()))
+        .map(str::to_string)
+}
+
 /// How the moves of a job stopped at `a` are walked back.
 pub fn route_of(a: &Action, run_id: i64) -> pc_apply::Route {
     match a {
@@ -1182,8 +1206,14 @@ pub fn apply_action(
                 warnings,
             }
         }
-        Action::Undo(e) => per_entry(pc_apply::undo(db, e.id))?,
-        Action::Reconcile(e) => per_entry(pc_apply::reconcile_undo(db, e.id).map(|r| r.done))?,
+        Action::Undo(e, None) => per_entry(pc_apply::undo(db, e.id))?,
+        Action::Undo(e, Some(found)) => per_entry(pc_apply::undo_found(db, e.id, found))?,
+        Action::Reconcile(e, None) => {
+            per_entry(pc_apply::reconcile_undo(db, e.id).map(|r| r.done))?
+        }
+        Action::Reconcile(e, Some(found)) => {
+            per_entry(pc_apply::reconcile_found(db, e.id, found).map(|r| r.done))?
+        }
         // What may be deleted is pc-apply's to prove, for the command line
         // and the web alike (el-3s9kp). An entry it refuses, or stops part
         // way, is this item's refusal with what actually went; the run goes

@@ -62,11 +62,12 @@ pub struct Companion {
 
 /// Where each sidecar of `src` goes when the photograph goes to `dst`.
 ///
-/// The one policy for both interfaces (el-5vue3 D9): a sidecar whose place
-/// is taken does not stop its photograph. The photograph moves; the sidecar
-/// stays where it is, is never moved over what is there, and the refusal is
-/// recorded in the journal and reported — by the command line after the
-/// run, by the web in the preview's warnings and in the job. A renamed
+/// The one policy for both interfaces: a photograph and its companions are
+/// one unit (user decision (c), module `unit`). A sidecar whose place is
+/// taken (`taken`) refuses its photograph too, before anything moves —
+/// nothing is moved over what is there, and nothing is ever deleted; the
+/// refusal is recorded in the journal and reported, by the command line
+/// after the run and by the web in the preview and the job. A renamed
 /// photograph (`DSC01234_2.ARW`) takes its sidecars' names with it.
 pub fn companion_plan(src: &Path, dst: &Path) -> Vec<Companion> {
     let stem = |p: &Path| {

@@ -29,20 +29,15 @@
 //!    actually went: our object losing a link, or — if something replaced it
 //!    in the instant between — that what was removed was not proven ours.
 //!
-//! A bundle of derived previews is one folder the tool moved whole. Its own
-//! identity is proven like a file's (device, inode, birth time). Its
-//! contents are proven against the list of every entry the journal wrote
-//! when it moved ([`crate::contents`], el-8s63g B1): the tree is read first,
-//! through held folders, and must hold exactly those entries, each the same
-//! object, nothing that is not a regular file or a folder, nothing on
-//! another device — and every file must be something the bundle's owner
-//! rebuilds, by name and leading bytes. A photograph inside, however it got
-//! there, keeps the bundle; so does a bundle moved before the list was kept.
-//! Only then is it taken apart: each file compared with its evidence
-//! immediately before its unlink, each folder removed only empty
-//! (`AT_REMOVEDIR`, which the system refuses for a folder with anything in
-//! it) and only when its name still leads to the folder that was read.
-//! Nothing is removed recursively by path.
+//! Only single proven files are ever deleted. A bundle — a folder of
+//! derived previews, or a file, that `derived clean` moved whole — is never
+//! deleted, whatever its evidence ([`KeptWhy::Bundle`]); neither is anything
+//! of Lightroom's, by any part of its path, even a single file whose
+//! evidence matches ([`KeptWhy::Lightroom`], [`purge_keeps`]). Such an entry
+//! is kept in quarantine, undoable, named with its place and size for a
+//! person to delete by hand, and its history records that each time. No
+//! folder tree is taken apart and nothing is removed recursively by path;
+//! an entry with any `located` record is refused too (decision D6b).
 //!
 //! What went is never lost on the way out: an error after the first unlink —
 //! a stop, the journal refusing the end, the index not following — is a

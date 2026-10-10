@@ -480,3 +480,104 @@ async fn cli_and_api_render_the_same_retained_outcome() {
         assert!(said.contains(&line), "web lacks «{line}»: {said}");
     }
 }
+
+/// A frame quarantined beside itself, with its evidence, in `folder`; the
+/// folder then renamed to `renamed` by the user (el-6byp2). Returns the
+/// recorded home, where the frame is now, and the entry.
+#[cfg(unix)]
+fn held_in_a_renamed_folder(f: &Fixture, folder: &str, renamed: &str) -> (PathBuf, PathBuf, i64) {
+    let home = f.archive.join(folder).join("frame.bmp");
+    let q = f.archive.join(folder).join(pc_core::QUARANTINE_DIR);
+    std::fs::create_dir_all(&q).unwrap();
+    let held = q.join("frame.bmp");
+    std::fs::write(&held, b"BM a synthetic frame").unwrap();
+    let proof = pc_core::proof::Proof::of(&std::fs::symlink_metadata(&held).unwrap());
+    let (s, d) = (home.display().to_string(), held.display().to_string());
+    let db = f.state.db.lock().unwrap();
+    let run = db
+        .start_run(&[f.archive.display().to_string()], "test")
+        .unwrap();
+    let id = db
+        .journal_begin(&pc_db::NewJournalEntry {
+            run_id: run,
+            op: "quarantine-file",
+            target_id: None,
+            src: &s,
+            dst: Some(&d),
+            size: 20,
+            file_count: 1,
+            manifest: &[pc_db::Moved {
+                src: s.clone(),
+                dst: d.clone(),
+                proof,
+            }],
+        })
+        .unwrap();
+    db.journal_finish(id, pc_db::JournalStatus::Done, None)
+        .unwrap();
+    let to = f.archive.join(renamed);
+    std::fs::rename(f.archive.join(folder), &to).unwrap();
+    let now = to.join(pc_core::QUARANTINE_DIR).join("frame.bmp");
+    (home, now.canonicalize().unwrap(), id)
+}
+
+/// el-6byp2: the web shows where the frame was found by its evidence, and
+/// the job is bound to that place, as `derived undo --found` is.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_frame_found_by_evidence_comes_back_from_the_place_its_preview_showed() {
+    let f = Fixture::new();
+    let (home, now, id) = held_in_a_renamed_folder(&f, "2015", "2015 renamed");
+
+    let preview = f.preview("journal-undo", json!({"journal_id":id})).await;
+    let items = preview["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{preview}");
+    assert_eq!(
+        items[0]["found"],
+        json!(now.display().to_string()),
+        "{preview}"
+    );
+    assert_eq!(
+        items[0]["path"],
+        json!(now.display().to_string()),
+        "{preview}"
+    );
+
+    let done = f.apply(&preview).await;
+    assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(std::fs::read(&home).unwrap(), b"BM a synthetic frame");
+    assert!(!now.exists());
+}
+
+/// Moved again after the preview: the preview no longer holds, and nothing
+/// moves.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_frame_moved_again_after_its_preview_stays_where_it_is() {
+    let f = Fixture::new();
+    let (home, now, id) = held_in_a_renamed_folder(&f, "2016", "2016 renamed");
+    let preview = f.preview("journal-undo", json!({"journal_id":id})).await;
+    assert_eq!(
+        preview["items"][0]["found"],
+        json!(now.display().to_string())
+    );
+    let again = f.archive.join("again");
+    std::fs::rename(f.archive.join("2016 renamed"), &again).unwrap();
+
+    let (s, v) = f
+        .req(
+            "POST",
+            "/api/jobs",
+            json!({"kind":"journal-undo","params":preview["params"],"plan_token":preview["token"],"confirmation":"DELETE"}),
+        )
+        .await;
+    if s == 202 {
+        let j = f.wait(v["job_id"].as_i64().unwrap()).await;
+        assert_ne!(j["state"], "done", "{j}");
+    }
+    assert!(!home.exists());
+    assert_eq!(
+        std::fs::read(again.join(pc_core::QUARANTINE_DIR).join("frame.bmp")).unwrap(),
+        b"BM a synthetic frame"
+    );
+}

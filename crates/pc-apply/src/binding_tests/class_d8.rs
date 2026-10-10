@@ -154,8 +154,8 @@ fn moved_aside(a: &Archive) -> PathBuf {
     a._tmp.path().join("archive-moved")
 }
 
-fn standing_of(entry: &pc_db::JournalEntry, src: &Path) -> crate::Standing {
-    crate::undo_preview(entry)
+fn standing_of(db: &pc_db::Db, entry: &pc_db::JournalEntry, src: &Path) -> crate::Standing {
+    crate::undo_preview(db, entry)
         .unwrap()
         .into_iter()
         .find(|i| i.src == src.display().to_string())
@@ -757,7 +757,7 @@ fn undo_whose_home_is_relocated_after_rename_records_where_the_photo_is_and_retr
     assert!(p.held, "back in the operation's keeping: {p:?}");
     let entry = a.db.journal_entry(id).unwrap().unwrap();
     assert_eq!(entry.status, JournalStatus::Done);
-    assert_eq!(standing_of(&entry, &photo), crate::Standing::Moved);
+    assert_eq!(standing_of(&a.db, &entry, &photo), crate::Standing::Moved);
     crate::undo(&a.db, id).unwrap();
     assert_eq!(signature(&photo), sig);
 }
@@ -820,7 +820,7 @@ fn post_completion_folder_move_is_a_documented_residual_or_found_by_proof() {
     relocate(&a.dir, &moved_aside(&a));
 
     let entry = a.db.journal_entry(id).unwrap().unwrap();
-    assert_eq!(standing_of(&entry, &photo), crate::Standing::Gone);
+    assert_eq!(standing_of(&a.db, &entry, &photo), crate::Standing::Gone);
     let e = crate::undo(&a.db, id).unwrap_err();
     assert!(format!("{e:#}").contains(&photo.display().to_string()));
     assert!(tree(&a.dir).is_empty());
