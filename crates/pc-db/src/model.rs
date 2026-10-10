@@ -268,6 +268,71 @@ impl Located {
     }
 }
 
+/// What a search by evidence found for one item whose recorded place no
+/// longer leads to anything (el-6byp2, diagnosis el-lvtmk D1/D3/R8).
+///
+/// The search only reads, and only inside the tool's own quarantine
+/// folders; a match is the recorded device and inode first, then the whole
+/// recorded evidence. This record is appended to the entry's history under
+/// `sought`, never under `located`: a place found here is not an overlay
+/// later recovery may act on by itself. Only an undo or a reconciliation
+/// bound to the preview that showed this place moves anything.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sought {
+    /// The manifest item this concerns, as recorded.
+    pub src: String,
+    pub dst: String,
+    /// The quarantine folders that were read, as their paths were then.
+    pub scope: Vec<String>,
+    pub finding: SoughtFinding,
+    /// `None`: the tool may bring this back itself, once a preview showed
+    /// the place. Otherwise why it is only shown, for a person to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_only: Option<ReportOnly>,
+}
+
+impl Sought {
+    /// The one place the tool may bring this item back from, if it may.
+    pub fn movable(&self) -> Option<&str> {
+        match (&self.finding, &self.report_only) {
+            (SoughtFinding::Found { at }, None) => Some(at),
+            _ => None,
+        }
+    }
+}
+
+/// What the search found.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SoughtFinding {
+    /// One regular file, proven by the whole recorded evidence.
+    Found { at: String },
+    /// Nothing with the recorded device and inode in the folders read.
+    NotFound,
+    /// More than one name leads to the recorded object.
+    Ambiguous { at: Vec<String> },
+    /// The recorded device and inode, but the rest of the evidence does
+    /// not hold (or cannot be read): not proven to be the same file.
+    Changed { at: String, why: String },
+    /// The row records no evidence: nothing is searched, a name proves
+    /// nothing.
+    NoEvidence,
+}
+
+/// Why a found place is only shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReportOnly {
+    /// Nothing proven was found, or more than one name, or a changed file.
+    NotProven,
+    /// The row records no evidence.
+    NoEvidence,
+    /// The frame has a companion — recorded, beside the found file, or at
+    /// home. Only a frame alone is brought back by the tool.
+    Companion,
+}
+
 /// One event in the history of a journal entry. Appended, never replaced:
 /// a retry adds to what the entry says, it does not erase it (el-5vue3 R3/D6).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,6 +348,21 @@ pub struct JournalEvent {
     pub text: String,
     /// Structured detail (paths, causes, what moved), as JSON.
     pub data: Option<String>,
+}
+
+impl JournalEvent {
+    /// Every [`Sought`] this event records; an event that records none
+    /// gives an empty list, a record this version cannot read an error.
+    pub fn sought(&self) -> Result<Vec<Sought>> {
+        let Some(data) = &self.data else {
+            return Ok(Vec::new());
+        };
+        let v: serde_json::Value = serde_json::from_str(data)?;
+        match v.get("sought") {
+            None => Ok(Vec::new()),
+            Some(s) => Ok(serde_json::from_value(s.clone())?),
+        }
+    }
 }
 
 /// One typed outcome to append to an entry's history (el-1y8uo B6): what
@@ -693,6 +773,21 @@ impl Db {
         let data =
             (!located.is_empty()).then(|| serde_json::json!({ "located": located }).to_string());
         self.journal_event(id, phase, kind, text, data.as_deref())
+    }
+
+    /// An event with what a search by evidence found ([`Sought`]) and, when
+    /// the operation was bound to a preview, the place that preview showed.
+    pub fn journal_event_sought(
+        &self,
+        id: i64,
+        phase: &str,
+        kind: &str,
+        text: &str,
+        sought: &[Sought],
+        previewed: Option<&str>,
+    ) -> Result<()> {
+        let data = serde_json::json!({ "sought": sought, "previewed": previewed }).to_string();
+        self.journal_event(id, phase, kind, text, Some(&data))
     }
 
     /// An entry's events, oldest first.

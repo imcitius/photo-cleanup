@@ -594,6 +594,9 @@ mod purge_tests;
 #[cfg(all(test, unix))]
 mod abandon_tests;
 
+#[cfg(all(test, unix))]
+mod sought_tests;
+
 /// What `derived clean` leaves, with the reason — the one answer the
 /// command line and the web preview both print.
 ///
