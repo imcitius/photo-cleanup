@@ -1554,7 +1554,8 @@ export function SettingsPage({
   );
 }
 
-/** Start over: forget the index, keep the archive and the journal. */
+/** Start over: forget the index, keep the archive, the journal and the old
+ * thumbnail cache (named, never deleted). */
 function ResetIndex({
   disabled,
   onReset,
@@ -1565,6 +1566,7 @@ function ResetIndex({
   const [word, setWord] = useState(""),
     [busy, setBusy] = useState(false),
     [done, setDone] = useState(false),
+    [kept, setKept] = useState(""),
     [error, setError] = useState("");
   return (
     <section className="panel danger-panel">
@@ -1579,6 +1581,7 @@ function ResetIndex({
             onChange={(e) => {
               setWord(e.target.value);
               setDone(false);
+              setKept("");
             }}
           />
         </label>
@@ -1590,7 +1593,10 @@ function ResetIndex({
             setBusy(true);
             setError("");
             try {
-              await post("/reset", { confirmation: word });
+              const r = await post<ResetReply>("/reset", {
+                confirmation: word,
+              });
+              setKept(keptText(r));
               setWord("");
               setDone(true);
               onReset();
@@ -1609,7 +1615,32 @@ function ResetIndex({
           </span>
         )}
       </div>
+      {kept && (
+        <p className="muted" role="status">
+          {kept}
+        </p>
+      )}
       {error && <ErrorBox message={error} />}
     </section>
   );
+}
+
+/** What `/api/reset` answers about the thumbnail cache. */
+type ResetReply = {
+  thumbs_generation: string;
+  thumbs_kept: number;
+  thumbs_kept_bytes: number;
+  thumbs_kept_bytes_partial: boolean;
+};
+
+/** The old cache a reset kept, said plainly; nothing when there is none. */
+function keptText(r: ResetReply) {
+  if (!r.thumbs_kept) return "";
+  const folder = r.thumbs_generation.replace(/[\\/][^\\/]*$/, "");
+  return ui.resetKept
+    .replace("{0}", number(r.thumbs_kept))
+    .replace("{1}", bytes(r.thumbs_kept_bytes))
+    .replace("{2}", r.thumbs_kept_bytes_partial ? ui.resetKeptMore : "")
+    .replace("{3}", folder)
+    .replace("{4}", r.thumbs_generation);
 }
