@@ -792,3 +792,94 @@ async fn a_foreign_file_in_the_cache_is_not_written_by_indexing_or_reset() {
         "the reset changed the foreign file"
     );
 }
+
+/// R1 of review el-66kis (el-u3x31): a fan-out folder the store made is
+/// moved aside and a folder of somebody's — 0750, with a note in it — is
+/// put at its name before the next index run. The run does not write the
+/// thumbnail into it: that thumbnail is refused, the refusal is in the
+/// job's status, and the folder and its contents are exactly as they were.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reviewer_index_does_not_write_into_a_substituted_foreign_fanout() {
+    let b = Bound::new();
+    let p = b.prepared();
+    let server = start(&p).await.unwrap();
+    let (state, error, _) = index_once(&b, &p, &server).await;
+    assert_eq!(state, "done", "{error}");
+    let conn = Connection::open(&p.layout.db).unwrap();
+    let key: String = conn
+        .query_row(
+            "SELECT thumb_key FROM files WHERE path LIKE '%synthetic-8923.png'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let store = own_store(&p);
+    assert!(store.get(&key).is_some());
+    let leaf = store.path_for(&key);
+    let fan = leaf.parent().unwrap().to_path_buf();
+    let saved = b.env.root.join("saved-fan-9923");
+    fs::rename(&fan, &saved).unwrap();
+    fs::create_dir(&fan).unwrap();
+    fs::set_permissions(&fan, fs::Permissions::from_mode(0o750)).unwrap();
+    fs::write(fan.join("foreign-notes"), b"foreign folder 9923").unwrap();
+    mark(&fan);
+    mark(&fan.join("foreign-notes"));
+    let before = untouched(&fan);
+    let saved_before = untouched(&saved);
+
+    let archive = b.env.root.join("new-index-9923");
+    fs::create_dir(&archive).unwrap();
+    fs::write(archive.join("fresh-9923.png"), synthetic_png()).unwrap();
+    let body = serde_json::json!({"kind": "index", "params": {
+        "roots": [archive], "min_size": 0, "workers": 1, "readers_per_disk": 1}})
+    .to_string();
+    let (status, response) = post(&server, "/api/jobs", &body).await;
+    assert_eq!(status, 202, "{response}");
+    let id = serde_json::from_str::<serde_json::Value>(&response).unwrap()["job_id"]
+        .as_i64()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let (state, error, progress) = loop {
+        let row: (String, String, String) = conn
+            .query_row(
+                "SELECT state, coalesce(error,''), coalesce(progress,'') FROM jobs WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        if !matches!(row.0.as_str(), "queued" | "running") {
+            break row;
+        }
+        assert!(std::time::Instant::now() < deadline, "the job did not end");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    let (reset, _) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
+    server.shutdown(pc_api::Shutdown::CancelJob).await.unwrap();
+
+    assert_eq!(untouched(&fan), before, "the foreign folder was written");
+    assert_eq!(names(&fan), ["foreign-notes"]);
+    assert_eq!(untouched(&saved), saved_before);
+    assert_eq!(state, "done", "{error}");
+    let progress: serde_json::Value = serde_json::from_str(&progress).unwrap();
+    let refusals = progress["refusals"].as_array().unwrap();
+    assert!(
+        refusals.iter().any(|r| {
+            r[0].as_str().unwrap().ends_with("fresh-9923.png")
+                && r[1]
+                    .as_str()
+                    .unwrap()
+                    .contains("not one the thumbnail cache made")
+        }),
+        "the refusal is not in the job's status: {progress}"
+    );
+    let fresh: Option<String> = conn
+        .query_row(
+            "SELECT thumb_key FROM files WHERE path LIKE '%fresh-9923.png'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(fresh, None, "a thumbnail key was recorded for nothing");
+    assert_eq!(reset, 200);
+    assert_eq!(untouched(&fan), before, "the reset changed the folder");
+}
