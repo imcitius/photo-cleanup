@@ -29,20 +29,13 @@
 //!    actually went: our object losing a link, or — if something replaced it
 //!    in the instant between — that what was removed was not proven ours.
 //!
-//! A bundle of derived previews is one folder the tool moved whole. Its own
-//! identity is proven like a file's (device, inode, birth time). Its
-//! contents are proven against the list of every entry the journal wrote
-//! when it moved ([`crate::contents`], el-8s63g B1): the tree is read first,
-//! through held folders, and must hold exactly those entries, each the same
-//! object, nothing that is not a regular file or a folder, nothing on
-//! another device — and every file must be something the bundle's owner
-//! rebuilds, by name and leading bytes. A photograph inside, however it got
-//! there, keeps the bundle; so does a bundle moved before the list was kept.
-//! Only then is it taken apart: each file compared with its evidence
-//! immediately before its unlink, each folder removed only empty
-//! (`AT_REMOVEDIR`, which the system refuses for a folder with anything in
-//! it) and only when its name still leads to the folder that was read.
-//! Nothing is removed recursively by path.
+//! A bundle of derived previews — a folder, or a file, that `derived clean`
+//! moved whole — is never deleted: purge deletes no bundle tree and no
+//! folder, whatever its content looks like now (user decision, 2026-10-06).
+//! Nor does it delete anything of Lightroom's: a recorded path with a
+//! Lightroom component is kept. Such entries are reported as kept, with
+//! path and size, and stay in quarantine; only a proven single regular file
+//! is ever unlinked. Everything else deletes nothing.
 //!
 //! What went is never lost on the way out: an error after the first unlink —
 //! a stop, the journal refusing the end, the index not following — is a
