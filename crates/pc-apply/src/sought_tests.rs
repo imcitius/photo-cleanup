@@ -430,3 +430,212 @@ fn nothing_outside_the_run_and_its_quarantine_folders_is_read() {
     assert!(undo(&f.db, e.id).is_err());
     unmoved(&[(&q(&away).join("IMG_0008.bmp"), FRAME)]);
 }
+
+#[test]
+fn review_unrelated_run_must_not_expand_search() {
+    let f = fx();
+    let e = f.quarantined("2015", "frame.bmp", false);
+    f.db.start_run(&[f.top.display().to_string()], "unrelated historical scan").unwrap();
+    let away = f.top.join("outside-the-entry-run");
+    fs::rename(f.archive.join("2015"), &away).unwrap();
+    let items = undo_preview(&f.db, &e).unwrap();
+    eprintln!("REVIEW historical roots: {items:?}");
+    assert!(items[0].sought.as_ref().unwrap().movable().is_none(), "outside originating run offered for recovery");
+}
+
+#[test]
+fn review_partial_proof_must_remain_report_only() {
+    let f = fx();
+    let mut e = f.quarantined("2015", "frame.bmp", false);
+    let p = e.manifest[0].proof.as_mut().unwrap();
+    p.size = None;
+    p.mtime_ns = None;
+    p.birth_ns = None;
+    p.blake3 = None;
+    f.db.journal_record_manifest(e.id, &e.manifest).unwrap();
+    let moved = f.renamed("2015", "renamed");
+    let now = q(&moved).join("frame.bmp");
+    let items = undo_preview(&f.db, &f.entry(e.id)).unwrap();
+    let result = undo_found(&f.db, e.id, now.to_str().unwrap());
+    eprintln!("REVIEW partial proof: {items:?}; action={result:?}; home={}", Path::new(&e.src).exists());
+    assert!(result.is_err(), "dev:ino-only proof moved a file");
+}
+
+#[test]
+fn review_companion_at_last_check_must_refuse() {
+    let f = fx();
+    let e = f.quarantined("2015", "frame.bmp", false);
+    let moved = f.renamed("2015", "renamed");
+    let now = q(&moved).join("frame.bmp");
+    assert!(undo_preview(&f.db, &e).unwrap()[0].sought.as_ref().unwrap().movable().is_some());
+    let side = now.with_extension("xmp");
+    let side2 = side.clone();
+    let _guard = crate::race::before_move(move |_, _| {
+        fs::write(&side2, b"foreign edit payload")?;
+        Ok(())
+    });
+    let result = undo_found(&f.db, e.id, now.to_str().unwrap());
+    eprintln!("REVIEW companion race: {result:?}; frame_home={}; companion_stays={}", Path::new(&e.src).exists(), side.exists());
+    assert_eq!(fs::read(&side).unwrap(), b"foreign edit payload");
+    assert!(result.is_err(), "frame moved away from companion that appeared before final checks");
+}
+
+#[test]
+fn review_unreadable_candidate_tree_must_not_establish_uniqueness() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fx();
+    let e = f.quarantined("2015", "frame.bmp", false);
+    let moved = f.renamed("2015", "renamed");
+    let now = q(&moved).join("frame.bmp");
+    let hidden = q(&f.archive.join("second-candidate"));
+    fs::create_dir_all(&hidden).unwrap();
+    let twin = hidden.join("frame.bmp");
+    fs::hard_link(&now, &twin).unwrap();
+    fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
+    let items = undo_preview(&f.db, &e).unwrap();
+    let result = undo_found(&f.db, e.id, now.to_str().unwrap());
+    fs::set_permissions(&hidden, fs::Permissions::from_mode(0o700)).unwrap();
+    eprintln!("REVIEW unreadable search: {items:?}; action={result:?}");
+    assert_eq!(fs::read(&twin).unwrap(), FRAME);
+    assert!(result.is_err(), "incomplete search treated as unique candidate");
+}
+
+#[test]
+fn review_replaced_anchor_ancestor_must_not_escape() {
+    use std::os::unix::fs::symlink;
+    let f = fx();
+    let e = f.quarantined("2015", "frame.bmp", false);
+    let old = f.archive.join("2015");
+    let saved = f.archive.join("saved");
+    fs::rename(&old, &saved).unwrap();
+    let outside = f.top.join("foreign-namespace");
+    fs::create_dir_all(q(&outside)).unwrap();
+    let found = q(&outside).join("different.bmp");
+    fs::rename(q(&saved).join("frame.bmp"), &found).unwrap();
+    symlink(&outside, &old).unwrap();
+    let items = undo_preview(&f.db, &e).unwrap();
+    eprintln!("REVIEW replaced anchor: {items:?}");
+    assert!(items[0].sought.as_ref().unwrap().movable().is_none(), "unverified symlink ancestor escaped the run");
+}
+
+#[test]
+fn review_photoslibrary_inside_quarantine_must_not_be_entered() {
+    let f = fx();
+    let e = f.quarantined("2015", "frame.bmp", false);
+    let moved = f.renamed("2015", "renamed");
+    let lib = q(&moved).join("Foreign.photoslibrary");
+    fs::create_dir(&lib).unwrap();
+    let now = lib.join("frame.bmp");
+    fs::rename(q(&moved).join("frame.bmp"), &now).unwrap();
+    let items = undo_preview(&f.db, &e).unwrap();
+    eprintln!("REVIEW photoslibrary: {items:?}");
+    assert!(items[0].sought.as_ref().unwrap().movable().is_none(), "Photos library content offered for automatic move");
+}
+
+#[test]
+fn review_foreign_replacement_after_preview_preserves_metadata_and_refuses() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let f = fx();
+    let e = f.quarantined("2015", "frame.bmp", false);
+    let moved = f.renamed("2015", "renamed");
+    let now = q(&moved).join("frame.bmp");
+    let _ = undo_preview(&f.db, &e).unwrap();
+    let saved = f.top.join("saved-frame.bmp");
+    fs::rename(&now, &saved).unwrap();
+    fs::write(&now, vec![b'X'; FRAME.len()]).unwrap();
+    fs::set_permissions(&now, fs::Permissions::from_mode(0o640)).unwrap();
+    let original_times = fs::FileTimes::new().set_modified(fs::metadata(&saved).unwrap().modified().unwrap());
+    fs::File::options().write(true).open(&now).unwrap().set_times(original_times).unwrap();
+    #[cfg(target_os = "macos")]
+    let acl_before = {
+        assert!(std::process::Command::new("/usr/bin/xattr").args(["-w", "review.fixture", "foreign metadata"]).arg(&now).status().unwrap().success());
+        assert!(std::process::Command::new("/bin/chmod").args(["+a", "everyone deny delete"]).arg(&now).status().unwrap().success());
+        std::process::Command::new("/bin/ls").arg("-lde").arg(&now).output().unwrap().stdout
+    };
+    let before = fs::symlink_metadata(&now).unwrap();
+    let result = undo_found(&f.db, e.id, now.to_str().unwrap()).unwrap_err();
+    let after = fs::symlink_metadata(&now).unwrap();
+    assert!(unrecovered(&result).is_some());
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(std::process::Command::new("/usr/bin/xattr").args(["-p", "review.fixture"]).arg(&now).output().unwrap().stdout, b"foreign metadata\n");
+        assert_eq!(std::process::Command::new("/bin/ls").arg("-lde").arg(&now).output().unwrap().stdout, acl_before);
+        assert!(std::process::Command::new("/bin/chmod").arg("-N").arg(&now).status().unwrap().success());
+    }
+    assert_eq!(fs::read(&now).unwrap(), vec![b'X'; FRAME.len()]);
+    assert_eq!((before.ino(), before.mode(), before.uid(), before.gid(), before.mtime_nsec()), (after.ino(), after.mode(), after.uid(), after.gid(), after.mtime_nsec()));
+    assert_eq!(fs::read(&saved).unwrap(), FRAME);
+    assert!(!Path::new(&e.src).exists());
+    assert!(f.db.journal_events(e.id).unwrap().iter().any(|e| e.kind == "refused"));
+}
+
+#[test]
+fn review_recorded_companion_vanishing_never_enables_frame_only() {
+    let f = fx();
+    let e = f.quarantined("2015", "frame.bmp", true);
+    let moved = f.renamed("2015", "renamed");
+    let now = q(&moved).join("frame.bmp");
+    let saved_side = f.top.join("saved.xmp");
+    fs::rename(now.with_extension("xmp"), &saved_side).unwrap();
+    let result = undo_found(&f.db, e.id, now.to_str().unwrap()).unwrap_err();
+    assert!(unrecovered(&result).is_some());
+    assert_eq!(fs::read(&now).unwrap(), FRAME);
+    assert_eq!(fs::read(saved_side).unwrap(), b"<x:xmpmeta/>");
+    assert!(!Path::new(&e.src).exists());
+}
+
+#[test]
+fn review_leaf_quarantine_symlink_does_not_expand_scope() {
+    use std::os::unix::fs::symlink;
+    let f = fx();
+    let e = f.quarantined("2015", "frame.bmp", false);
+    let away = f.top.join("outside");
+    fs::rename(f.archive.join("2015"), &away).unwrap();
+    let fake = f.archive.join("fake");
+    fs::create_dir(&fake).unwrap();
+    symlink(q(&away), q(&fake)).unwrap();
+    let result = undo(&f.db, e.id).unwrap_err();
+    assert!(unrecovered(&result).is_some());
+    assert_eq!(fs::read(q(&away).join("frame.bmp")).unwrap(), FRAME);
+}
+
+#[test]
+fn review_change_at_move_boundary_must_have_typed_search_refusal() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let f = fx();
+    let e = f.quarantined("2015", "frame.bmp", false);
+    let moved = f.renamed("2015", "renamed");
+    let now = q(&moved).join("frame.bmp");
+    let saved = f.top.join("retained-frame.bmp");
+    let saved2 = saved.clone();
+    let _ = undo_preview(&f.db, &e).unwrap();
+    let _guard = crate::race::before_move(move |src, _| {
+        fs::rename(src, &saved2)?;
+        fs::write(src, b"foreign payload")?;
+        fs::set_permissions(src, fs::Permissions::from_mode(0o640))?;
+        Ok(())
+    });
+    let err = undo_found(&f.db, e.id, now.to_str().unwrap()).unwrap_err();
+    assert_eq!(fs::read(&now).unwrap(), b"foreign payload");
+    assert_eq!(fs::metadata(&now).unwrap().mode() & 0o777, 0o640);
+    assert_eq!(fs::read(saved).unwrap(), FRAME);
+    assert!(!Path::new(&e.src).exists());
+    let events = f.db.journal_events(e.id).unwrap();
+    eprintln!("REVIEW late refusal: {err:#}; Unrecovered={}; events={events:?}", unrecovered(&err).is_some());
+    assert!(unrecovered(&err).is_some(), "post-search refusal loses the typed sought/preview binding");
+}
+
+#[test]
+fn review_dangling_companion_must_fail_closed() {
+    use std::os::unix::fs::symlink;
+    let f = fx();
+    let e = f.quarantined("2015", "frame.bmp", false);
+    let moved = f.renamed("2015", "renamed");
+    let now = q(&moved).join("frame.bmp");
+    let side = now.with_extension("xmp");
+    symlink("unavailable-edits.xmp", &side).unwrap();
+    let result = undo_found(&f.db, e.id, now.to_str().unwrap());
+    assert_eq!(fs::read_link(side).unwrap(), PathBuf::from("unavailable-edits.xmp"));
+    eprintln!("REVIEW dangling companion: {result:?}");
+    assert!(result.is_err(), "unknown companion treated as absence");
+}

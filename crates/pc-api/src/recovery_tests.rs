@@ -581,3 +581,20 @@ async fn a_frame_moved_again_after_its_preview_stays_where_it_is() {
         b"BM a synthetic frame"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn review_report_only_reconcile_must_show_found_place() {
+    let f = Fixture::new();
+    let (home, now, id) = held_in_a_renamed_folder(&f, "2015", "2015 renamed");
+    std::fs::write(now.with_extension("xmp"), b"foreign edits").unwrap();
+    {
+        let db = f.state.db.lock().unwrap();
+        db.journal_finish(id, pc_db::JournalStatus::Pending, None).unwrap();
+    }
+    let (status, preview) = f.req("POST", "/api/preview", json!({"kind":"journal-reconcile","params":{"journal_id":id}})).await;
+    eprintln!("REVIEW web report-only: status={status}; {preview}");
+    assert!(!home.exists());
+    assert_eq!(std::fs::read(&now).unwrap(), b"BM a synthetic frame");
+    assert!(preview.to_string().contains(now.to_str().unwrap()), "web hides the found place and says file is at neither path");
+}

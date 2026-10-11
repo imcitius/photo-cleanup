@@ -894,3 +894,35 @@ fn a_copy_whose_folder_was_renamed_comes_back_only_from_the_place_the_undo_showe
     assert_eq!(std::fs::read(&copy).unwrap(), bytes);
     assert!(!held.exists());
 }
+
+#[test]
+fn review_cli_report_only_names_found_file_and_preserves_sidecar() {
+    let cli = Cli::new();
+    let old = cli.archive.join("old");
+    let q = old.join(pc_core::QUARANTINE_DIR);
+    std::fs::create_dir_all(&q).unwrap();
+    let src = old.join("frame.bmp");
+    let dst = q.join("frame.bmp");
+    std::fs::write(&dst, b"BM synthetic review frame").unwrap();
+    let db = pc_db::Db::open(&cli.db).unwrap();
+    let run = db.start_run(&[cli.archive.display().to_string()], "review").unwrap();
+    let moved = pc_db::Moved {src:src.display().to_string(), dst:dst.display().to_string(), proof:pc_core::proof::Proof::of(&std::fs::metadata(&dst).unwrap())};
+    let id = db.journal_begin(&pc_db::NewJournalEntry { run_id:run, op:"quarantine-file", target_id:None, src:&moved.src, dst:Some(&moved.dst), size:25, file_count:1, manifest:&[moved.clone()] }).unwrap();
+    db.journal_finish(id, pc_db::JournalStatus::Done, None).unwrap();
+    drop(db);
+    let renamed = cli.archive.join("renamed");
+    std::fs::rename(old, &renamed).unwrap();
+    let found = renamed.join(pc_core::QUARANTINE_DIR).join("frame.bmp");
+    let side = found.with_extension("xmp");
+    std::fs::write(&side, b"foreign companion").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup")).arg("--db").arg(&cli.db).args(["derived","undo","--journal",&id.to_string()]).output().unwrap();
+    let text = format!("{}\n{}", String::from_utf8_lossy(&out.stdout),String::from_utf8_lossy(&out.stderr));
+    eprintln!("REVIEW CLI report only: {text}");
+    assert!(!out.status.success());
+    assert!(text.contains(found.to_str().unwrap()));
+    assert!(text.contains("companion"));
+    assert!(!text.contains("To bring it back from there:"));
+    assert_eq!(std::fs::read(found).unwrap(), b"BM synthetic review frame");
+    assert_eq!(std::fs::read(side).unwrap(), b"foreign companion");
+    assert!(!src.exists());
+}
