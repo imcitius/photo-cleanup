@@ -334,6 +334,8 @@ async fn ten_thousand_groups_return_only_the_requested_window() {
     assert_eq!(queue["groups"][0]["members"][0]["name"], "9997-0.jpg");
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn my_decisions_include_existing_keepers_rejections_and_originals_rules() {
     let f = Fixture::new();

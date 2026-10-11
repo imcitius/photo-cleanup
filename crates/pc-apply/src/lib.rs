@@ -423,6 +423,8 @@ pub(crate) fn rename_error(e: std::io::Error, src: &Path, dst: &Path) -> anyhow:
 /// build: the feature without debug assertions is a compile error.
 #[cfg(any(test, feature = "test-seams"))]
 #[doc(hidden)]
+// The move seams serve tests of moves, which Windows refuses (el-usdqi D4).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub mod race {
     use std::cell::RefCell;
     use std::io;
@@ -585,9 +587,15 @@ pub mod race {
 }
 
 #[cfg(test)]
+// Most of these tests need a move, which Windows refuses (el-usdqi D4);
+// their helpers are unused there.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod legacy;
 
 #[cfg(test)]
+// Most of these tests need a move, which Windows refuses (el-usdqi D4);
+// their helpers are unused there.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod race_tests;
 
 #[cfg(all(test, unix))]
@@ -919,6 +927,8 @@ mod lightroom_tests {
         assert!(db.journal_quarantined(None).unwrap().is_empty());
     }
 
+    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+    #[cfg(unix)]
     #[test]
     fn a_lightroom_bundle_moved_by_an_earlier_version_still_comes_home() {
         // Returning is putting back: the rule that keeps Lightroom where it
@@ -944,6 +954,9 @@ mod lightroom_tests {
 }
 
 #[cfg(test)]
+// Most of these tests need a move, which Windows refuses (el-usdqi D4);
+// their helpers are unused there.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod undo_tests {
     use super::*;
     use pc_db::{Db, JournalStatus, Moved, NewJournalEntry};
@@ -983,6 +996,8 @@ mod undo_tests {
         (id, src, dst)
     }
 
+    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+    #[cfg(unix)]
     #[test]
     fn an_undo_that_cannot_finish_moves_nothing_and_can_be_asked_again() {
         // Half an undo is not an undo. The photograph used to come home while

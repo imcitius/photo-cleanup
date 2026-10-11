@@ -4,6 +4,10 @@
 //! curated frame stays, a family is never emptied, and a file whose pixels
 //! no longer match what we are keeping is refused at the last moment.
 
+// The tests that move need Windows to move, and it refuses (el-usdqi D4);
+// what only they read is unused there.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -236,6 +240,8 @@ fn a_photograph_with_no_duplicate_is_never_proposed() {
     assert!(!p.candidates.iter().any(|c| c.path.contains("DSC07777")));
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn applying_moves_the_copies_and_leaves_everything_else_alone() {
     let w = build_world();
@@ -269,6 +275,8 @@ fn applying_moves_the_copies_and_leaves_everything_else_alone() {
     assert_eq!(moved_sidecars, 1, "сайдкар остался сиротой");
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn undo_puts_every_moved_photograph_back() {
     let w = build_world();
@@ -284,6 +292,8 @@ fn undo_puts_every_moved_photograph_back() {
     }
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_file_edited_since_the_scan_is_refused_at_the_last_moment() {
     let w = build_world();
@@ -314,6 +324,8 @@ fn a_file_edited_since_the_scan_is_refused_at_the_last_moment() {
     assert!(Path::new(&victim.path).exists());
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn the_keeper_disappearing_stops_the_move() {
     let w = build_world();
@@ -342,6 +354,8 @@ fn the_keeper_disappearing_stops_the_move() {
     );
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn the_plan_empties_out_once_it_has_been_applied() {
     // Without this the totals never go down: the rows still claim the files
@@ -361,6 +375,8 @@ fn the_plan_empties_out_once_it_has_been_applied() {
     );
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn an_undone_move_puts_the_file_back_into_the_plan() {
     let w = build_world();

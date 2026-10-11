@@ -166,6 +166,8 @@ fn file_state(db: &Db, path: &Path) -> String {
         .unwrap()
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn apply_never_replaces_what_appears_in_quarantine() {
     for what in strangers() {
@@ -190,6 +192,8 @@ fn apply_never_replaces_what_appears_in_quarantine() {
     }
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_sidecar_never_replaces_what_appears_beside_its_photograph() {
     let a = archive();
@@ -266,6 +270,8 @@ fn a_companion_is_left_and_named_with_or_without_its_file() {
     assert!(a.db.journal_quarantined(None).unwrap().is_empty());
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn an_undo_never_replaces_what_appears_at_home() {
     for what in strangers() {
@@ -292,6 +298,8 @@ fn an_undo_never_replaces_what_appears_at_home() {
     }
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn an_undo_never_replaces_a_sidecar_that_appears_at_home_and_can_be_retried() {
     let a = archive();
@@ -360,6 +368,8 @@ fn organized(a: &Archive, src: &Path, dst: &Path) -> pc_organize::Move {
     }
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn organize_never_replaces_what_appears_at_the_destination() {
     for what in strangers() {
@@ -384,6 +394,8 @@ fn organize_never_replaces_what_appears_at_the_destination() {
     }
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn an_organize_undo_never_replaces_what_appears_at_the_old_place() {
     let a = archive();
@@ -419,6 +431,8 @@ fn journal_rows(db: &Db) -> i64 {
         .unwrap()
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_volume_that_cannot_refuse_to_replace_stops_apply_before_anything_moves() {
     let a = archive();
@@ -448,6 +462,8 @@ fn a_volume_that_cannot_refuse_to_replace_stops_apply_before_anything_moves() {
     );
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_volume_that_cannot_refuse_to_replace_stops_organize_and_undo() {
     let a = archive();

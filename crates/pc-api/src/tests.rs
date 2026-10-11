@@ -772,6 +772,8 @@ async fn rejected_frames_reach_the_plan_and_can_be_taken_back() {
     assert!(plan["items"].as_array().unwrap().is_empty(), "{plan}");
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_rejected_frame_moves_beside_itself_and_comes_back() {
     let f = Fixture::new();
@@ -842,6 +844,8 @@ async fn a_rejected_frame_moves_beside_itself_and_comes_back() {
     assert!(photo.exists(), "файл не вернулся");
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn one_group_can_be_acted_on_without_touching_the_rest() {
     // Ten thousand groups is a frightening button. Acting on the group in
@@ -913,6 +917,8 @@ async fn a_parent_component_is_refused_whatever_the_path_looks_like() {
     }
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_group_keeps_the_last_decision_and_never_empties_itself() {
     // Deciding twice used to leave both marks standing: the group ended up
@@ -1016,6 +1022,8 @@ async fn a_group_keeps_the_last_decision_and_never_empties_itself() {
     );
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn an_orphan_comes_out_of_quarantine_the_way_it_went_in() {
     // Quarantine keeps the shape of what went into it, so a file deep inside
@@ -1073,6 +1081,8 @@ async fn an_orphan_comes_out_of_quarantine_the_way_it_went_in() {
     assert_eq!(rows[0]["dst"], home.display().to_string());
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_purge_takes_the_sidecar_with_the_frame_and_leaves_nothing_behind() {
     let f = Fixture::new();
@@ -1123,6 +1133,8 @@ async fn a_purge_takes_the_sidecar_with_the_frame_and_leaves_nothing_behind() {
     assert!(f.archive.join("a.xmp").exists());
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_web_purge_leaves_a_stranger_at_the_recorded_path_and_says_why() {
     // The same proof as the command line (el-3s9kp): the web job asks
@@ -1201,6 +1213,8 @@ async fn a_finished_job_has_already_let_go_of_the_writer() {
     jobs::FINISH_PAUSE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_folder_decision_reaches_the_plan_that_folder_asks_for() {
     // "Keep this folder's versions in every group" marks the other encodings
@@ -1386,6 +1400,8 @@ async fn a_job_will_not_start_while_something_else_is_writing() {
     assert_eq!(f.wait(id).await["state"], "done");
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn one_mark_settles_the_same_folder_on_every_disk_of_an_array() {
     // The shape this page exists for. On an array the photographs live on
@@ -1548,6 +1564,8 @@ async fn one_mark_settles_the_same_folder_on_every_disk_of_an_array() {
     assert_eq!(v["marks"], json!([]), "{v}");
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_single_disk_can_still_be_named_on_its_own() {
     // The other half: one copy of a structure is the good one and the others
@@ -1627,6 +1645,8 @@ async fn a_single_disk_can_still_be_named_on_its_own() {
         .starts_with(&roots[1]));
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_plan_of_the_originals_is_empty_when_no_folder_is_marked() {
     // The accident this must never have: a mark taken back, and a plan that
@@ -1790,6 +1810,8 @@ async fn a_tree_with_no_roots_configured_hands_back_paths_that_can_be_marked() {
     );
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn an_interrupted_move_can_be_read_against_the_disk_and_undone() {
     // A killed process leaves a `pending` row: the list of what it meant to
@@ -1892,6 +1914,8 @@ async fn an_interrupted_move_whose_file_is_in_two_places_is_left_to_a_person() {
     );
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_gathered_quarantine_says_where_its_files_came_from() {
     // Quarantine gathered in one folder holds `<disk label>/<path from that
@@ -2073,6 +2097,8 @@ async fn exfat_is_refused_in_the_preview_and_the_job_like_the_command_line() {
 /// used to work out each destination by writing the quarantine's layout
 /// note — before anyone had confirmed anything. Now the folder stays as it
 /// was until the job moves the first photograph, and then the note is there.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn the_preview_writes_nothing_into_a_configured_quarantine() {
     let f = Fixture::new();
@@ -2120,9 +2146,58 @@ async fn the_preview_writes_nothing_into_a_configured_quarantine() {
         .is_file());
 }
 
+/// el-usdqi D4 through the web: on Windows the preview of a move is refused
+/// with the reason, and neither the photograph nor the quarantine changes.
+/// The Unix tests above that need a move are compiled out there.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_refuses_the_preview_of_a_move_and_says_why() {
+    let f = Fixture::new();
+    let img = image::RgbImage::from_fn(200, 150, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 40])
+    });
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+        .encode_image(&img)
+        .unwrap();
+    let photo = f.archive.join("DSC9002.JPG");
+    std::fs::write(&photo, &encoded).unwrap();
+    let id = f
+        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+    let (_, recent) = f.req("GET", "/api/recent?limit=1", Value::Null).await;
+    let file_id = recent[0]["id"].as_i64().unwrap();
+    f.req(
+        "POST",
+        &format!("/api/files/{file_id}/reject"),
+        json!({"rejected":true}),
+    )
+    .await;
+
+    let (s, v) = f
+        .req(
+            "POST",
+            "/api/preview",
+            json!({"kind":"plan-apply","params":{"roles":["copy"]}}),
+        )
+        .await;
+    assert_eq!(s, 400, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("on Windows")),
+        "{v}"
+    );
+    assert_eq!(std::fs::read(&photo).unwrap(), encoded);
+    assert!(walk(&f.quarantine).is_empty(), "{:?}", walk(&f.quarantine));
+}
+
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[tokio::test]
 async fn reviewer_web_finalization_failure_keeps_actual_counts() {
     // Re-mapped from a preview bundle to a photograph's copy: purge deletes

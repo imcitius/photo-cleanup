@@ -59,6 +59,8 @@ fn organize_leaves_the_folder_it_emptied_and_any_stranger_at_its_name() {
 
 /// The same for an undo: the folders in quarantine it empties on the way
 /// out stay where they are.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn undo_leaves_the_quarantine_folders_it_emptied() {
     let a = archive();
@@ -176,6 +178,8 @@ fn unsupported_proof_schema_must_not_become_legacy_adoption() {
 
 // ------------------------------------------------------------------ B3 ----
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn organize_second_journal_failure_keeps_first_move_in_typed_result() {
     let a = archive();
@@ -203,6 +207,8 @@ fn organize_second_journal_failure_keeps_first_move_in_typed_result() {
     );
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn litter_journal_failure_counts_litter_already_moved() {
     let a = archive();
@@ -248,6 +254,8 @@ fn litter_journal_failure_counts_litter_already_moved() {
     );
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn undo_persistence_failure_keeps_returned_file_in_typed_result() {
     let a = archive();
@@ -305,6 +313,8 @@ fn undo_persistence_failure_keeps_returned_file_in_typed_result() {
 
 // ------------------------------------------------------------------ B4 ----
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn legacy_reconcile_partial_can_retry_without_guessing_home() {
     let a = archive();
@@ -362,6 +372,8 @@ fn legacy_reconcile_partial_can_retry_without_guessing_home() {
 /// B6 (el-1y8uo). Every forward outcome — success without any note, a
 /// refusal, a partial carry — appends a typed event with structured data,
 /// not a generic `note/note` that exists only when a human note does.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn every_forward_outcome_has_a_structured_event() {
     // Success, one frame, no companions, no note.

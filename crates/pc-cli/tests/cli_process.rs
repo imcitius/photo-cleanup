@@ -123,6 +123,8 @@ fn moved_by_an_earlier_version(cli: &Cli, rel: &str) -> PathBuf {
     dst
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_copy_goes_to_quarantine_comes_back_and_only_then_can_be_deleted() {
     let cli = Cli::new();
@@ -167,6 +169,8 @@ fn a_copy_goes_to_quarantine_comes_back_and_only_then_can_be_deleted() {
     assert!(cli.archive.join("frame.xmp").exists());
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn deleting_for_good_needs_the_flag_and_the_holding_period() {
     let cli = Cli::new();
@@ -226,6 +230,8 @@ fn previews_stay_whether_their_catalogue_is_open_or_closed() {
 /// the journal refuses the second photograph's row after the first has
 /// moved. The command fails, and prints the receipt of the move that did
 /// happen — the same summary the web's job carries.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_database_failure_after_a_move_prints_the_receipt() {
     let cli = Cli::new();
@@ -320,6 +326,8 @@ fn reviewer_missing_purge_confirmation_leaves_the_fixture_intact() {
 /// journal refuses the end of a purge after the file is gone. The command
 /// prints what was deleted, and then fails. (A photograph's copy now: purge
 /// deletes no bundle, el-3s9kp.)
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_journal_failure_after_purge_prints_what_went_and_fails() {
     let cli = Cli::new();
