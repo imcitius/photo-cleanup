@@ -83,6 +83,7 @@ export const ui = {
     "plan-apply": "Move to quarantine",
     "derived-clean": "Clear previews",
     "derived-purge": "Delete for good",
+    "quarantine-purge": "Show for manual deletion",
     "organize-apply": "Sort by date",
     "organize-undo": "Undo the sorting",
     "journal-undo": "Restore a file",
@@ -177,7 +178,8 @@ export const ui = {
   resetWord: "RESET",
   resetAction: "Reset the index",
   resetPrompt: "Type RESET to confirm",
-  resetDone: "Index cleared; the thumbnail cache was not touched. Start with the inventory.",
+  resetDone:
+    "Index cleared; the thumbnail cache was not touched. Start with the inventory.",
   skippedNote:
     "Skipped files stayed where they were and were not touched. Usually these are videos, archives and anything that is not an image: the index does not read them.",
   nowRunning: "Running now",
@@ -239,9 +241,16 @@ export const ui = {
   setAside: "set aside by you",
   keepAllVersions: "Take that back",
   orphanQuarantineHelp:
-    "These files sit in quarantine folders, but the journal knows nothing about them: another database moved them — an earlier one, or one from another machine. They can go back where they came from, one level up from where they lie. They are not deleted from here: with nothing in the journal to prove what they are, deleting keeps each one and names it, with its size and why, for you to delete by hand.",
+    "These files sit in quarantine folders, but the journal knows nothing about them: another database moved them — an earlier one, or one from another machine. They can go back where they came from, one level up from where they lie. They are not deleted from here: with nothing in the journal to prove what they are, the last button keeps each one and names it, with its size and why, for you to delete by hand.",
   orphanRestore: "Put everything back",
-  orphanDelete: "Delete for good",
+  orphanDelete: "Show for manual deletion",
+  orphanKeptHeadline: "kept, for you to delete by hand",
+  orphanKeptNote:
+    "Nothing was deleted. Each file below stays where it is, with its path, size and the reason it was not touched: it is Lightroom's, a folder, or there is no proof in the journal. Delete by hand only what you are sure of.",
+  orphanKeptConfirm:
+    "Nothing will be deleted. The tool lists each file with its path, size and why it is kept, so that you can delete it by hand yourself.",
+  orphanKeptRun: "Show the list",
+  orphanKeptPreview: "Will be kept and listed — nothing is deleted",
   notACopyOfKept:
     "Not a copy of the file being kept: the pixels differ. Keep the file it is a copy of instead.",
   preferFolder: "keep this folder everywhere",

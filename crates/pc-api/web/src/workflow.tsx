@@ -300,6 +300,37 @@ export function JobResult({
     (a, b) => b[1].length - a[1].length,
   );
   const broken = job.state === "failed" || job.state === "interrupted";
+  // Orphans kept for manual deletion: each refusal is already a whole
+  // sentence — path, size, reason — so it is shown as a list, not a count.
+  if (job.kind === "quarantine-purge" && !broken && refusals.length)
+    return (
+      <Notice tone="warning">
+        <div className="section-heading">
+          <strong>
+            {t("zadacha")}
+            {job.id} · {jobName(job.kind)}: {ui.orphanKeptHeadline}{" "}
+            {number(refusals.length)}
+          </strong>
+          <Button
+            icon="close"
+            aria-label={t("skryt_rezultat_zadachi")}
+            onClick={onDismiss}
+          />
+        </div>
+        <p className="muted">{ui.orphanKeptNote}</p>
+        <div className="result-refusals" data-testid="orphans-kept">
+          {refusals.slice(0, 200).map(([, why], i) => (
+            <p key={i}>{why}</p>
+          ))}
+          {refusals.length > 200 && (
+            <p className="muted">
+              {t("i_eschyo", number(refusals.length - 200))}
+            </p>
+          )}
+        </div>
+        <a href="#journal">{t("proverit_zhurnal")}</a>
+      </Notice>
+    );
   return (
     <Notice tone={broken ? "warning" : "info"}>
       <div className="section-heading">
@@ -511,7 +542,10 @@ export function Review({
       });
     return () => controller.abort();
   }, [kind, debounced, nonce, refresh]);
-  const purge = kind === "derived-purge" || kind === "quarantine-purge";
+  // Orphans have no journal proof, so "purge" over them deletes nothing: it
+  // keeps every file and lists it (el-63ph1). It must not read as deletion.
+  const abandon = kind === "quarantine-purge";
+  const purge = kind === "derived-purge";
   // Adopting orphaned quarantine carries files *out* of it, the same
   // direction as an undo — and the button has to say so.
   const restoring =
@@ -522,7 +556,9 @@ export function Review({
     if (!plan) return;
     setSending(true);
     try {
-      await start(kind, params, plan, word);
+      // The server asks for its word on every "purge" kind. Nothing is
+      // deleted by this one, so there is no word to make a person type.
+      await start(kind, params, plan, abandon ? ui.purgeWord : word);
       setConfirm(false);
       setNonce((n) => n + 1);
     } catch (e) {
@@ -553,11 +589,13 @@ export function Review({
                 <div className="eyebrow">{ui.preview}</div>
                 <Totals files={plan.total_files} size={plan.total_bytes} />
                 <p className="muted">
-                  {purge
-                    ? t("budet_udaleno_okonchatelno")
-                    : restoring
-                      ? t("vernutsya_po_ishodnym_putyam")
-                      : t("budet_pereneseno_posle_podtverzhdeniya")}{" "}
+                  {abandon
+                    ? ui.orphanKeptPreview
+                    : purge
+                      ? t("budet_udaleno_okonchatelno")
+                      : restoring
+                        ? t("vernutsya_po_ishodnym_putyam")
+                        : t("budet_pereneseno_posle_podtverzhdeniya")}{" "}
                   {t("otkazov")}
                   {number(plan.refusals.length)}
                 </p>
@@ -582,13 +620,15 @@ export function Review({
                 }}
                 icon={purge ? "trash" : "arrow"}
               >
-                {purge
-                  ? ui.purge
-                  : restoring
-                    ? ui.undo
-                    : organize
-                      ? t("razlozhit_po_datam")
-                      : ui.move}
+                {abandon
+                  ? ui.orphanKeptRun
+                  : purge
+                    ? ui.purge
+                    : restoring
+                      ? ui.undo
+                      : organize
+                        ? t("razlozhit_po_datam")
+                        : ui.move}
               </Button>
             </section>
             {kind !== "plan-apply" && plan.items.length > 0 && (
@@ -648,11 +688,13 @@ export function Review({
       {confirm && plan && (
         <Modal
           title={
-            purge
-              ? ui.purge
-              : kind.includes("undo")
-                ? t("vosstanovit_fayly")
-                : t("vypolnit_pokazannyy_plan")
+            abandon
+              ? ui.orphanKeptRun
+              : purge
+                ? ui.purge
+                : kind.includes("undo")
+                  ? t("vosstanovit_fayly")
+                  : t("vypolnit_pokazannyy_plan")
           }
           onClose={() => !sending && setConfirm(false)}
         >
@@ -667,7 +709,9 @@ export function Review({
               "puti_naznacheniya_ukazany_v_predprosmotre_esli_sostav_plana_izmen",
             )}
           </p>
-          {purge ? (
+          {abandon ? (
+            <Notice>{ui.orphanKeptConfirm}</Notice>
+          ) : purge ? (
             <>
               <Notice tone="error">{ui.purgeWarning}</Notice>
               <label className="check">
@@ -710,7 +754,13 @@ export function Review({
               }
               onClick={apply}
             >
-              {sending ? t("zapuskaem") : purge ? ui.purge : ui.apply}
+              {sending
+                ? t("zapuskaem")
+                : abandon
+                  ? ui.orphanKeptRun
+                  : purge
+                    ? ui.purge
+                    : ui.apply}
             </Button>
           </div>
         </Modal>

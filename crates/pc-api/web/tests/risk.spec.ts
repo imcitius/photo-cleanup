@@ -216,3 +216,72 @@ test("deleting for good takes the bytes, and only after the word", async ({
     ),
   ).toBe(true);
 });
+
+test("orphans are shown for manual deletion, never deleted, in both languages", async ({
+  page,
+  request,
+}) => {
+  const archive = await archiveOf(request, "orphan-kept");
+  const q = join(archive, QUARANTINE);
+  mkdirSync(join(q, "2015"), { recursive: true });
+  const photo = join(q, "2015", "IMG_0001.jpg");
+  writeFileSync(photo, "synthetic stranger");
+  const catalogue = join(q, "Old.lrcat");
+  writeFileSync(catalogue, "SQLite format 3\0");
+  await job(request, "scan", { roots: [archive] });
+
+  await page.goto("/#quarantine");
+  await page.reload();
+  const orphans = main(page)
+    .locator("section")
+    .filter({
+      has: page.getByRole("heading", { name: "Quarantine with no journal" }),
+    });
+  await expect(orphans).toBeVisible();
+  // The old wording promised a deletion that no longer happens.
+  await expect(orphans).not.toContainText("Delete for good");
+  await orphans
+    .getByRole("button", { name: "Show for manual deletion", exact: true })
+    .click();
+  await expect(orphans).not.toContainText("Delete for good");
+  await expect(orphans).toContainText("nothing is deleted");
+  await orphans
+    .getByRole("button", { name: "Show the list", exact: true })
+    .click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("Nothing will be deleted");
+  // No typed word and no backup checkbox: there is nothing to confirm away.
+  await expect(dialog.getByRole("textbox")).toHaveCount(0);
+  await expect(dialog.getByRole("checkbox")).toHaveCount(0);
+  await expect(dialog).not.toContainText("Delete for good");
+  await dialog
+    .getByRole("button", { name: "Show the list", exact: true })
+    .click();
+
+  const kept = page.getByTestId("orphans-kept");
+  await expect(kept).toBeVisible();
+  await expect(kept.locator("p")).toHaveCount(2);
+  await expect(kept).toContainText("IMG_0001.jpg");
+  await expect(kept).toContainText("Old.lrcat");
+  await expect(kept).toContainText("Nothing was deleted");
+  // Each line has a size and a reason (no proof / Lightroom).
+  await expect(kept).toContainText(/\d+(\.\d+)? ?(B|KB|bytes)/i);
+  await expect(kept).toContainText("Lightroom");
+  await expect(kept).toContainText("nothing proves");
+  expect(existsSync(photo)).toBe(true);
+  expect(existsSync(catalogue)).toBe(true);
+
+  // The other language says the same thing.
+  await page.evaluate(() => localStorage.setItem("pc-lang", "ru"));
+  await page.reload();
+  const ru = main(page).locator("section").first();
+  await expect(
+    ru.getByRole("button", {
+      name: "Показать для ручного удаления",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(ru).not.toContainText("Удалить навсегда");
+  await expect(ru).not.toContainText("Удалить насовсем");
+});
