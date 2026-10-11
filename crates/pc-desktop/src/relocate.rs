@@ -2729,27 +2729,52 @@ fn open_created_dir(path: &Path) -> io::Result<fs::File> {
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
     const GENERIC_READ: u32 = 0x8000_0000;
-    // Read access only for the check: asking for `DELETE` on an entry not
-    // yet proven ours conflicts with any other process that holds it open
-    // without `FILE_SHARE_DELETE` (a sharing violation, os error 32, seen on
-    // the CI runner for `C:\Windows`, el-2yxx0), and the refusal would then
-    // name the wrong reason.
-    let file = fs::OpenOptions::new()
-        .access_mode(GENERIC_READ)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?;
-    let meta = file.metadata()?;
-    let checked = if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        Err("it is not a plain directory".to_string())
-    } else {
-        volume::check_open(&file).and_then(|()| windows_acl::check(&file))
+    const DELETE: u32 = 0x0001_0000;
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    let open = |access: u32| {
+        fs::OpenOptions::new()
+            .access_mode(access)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
     };
-    checked.map_err(|why| io::Error::new(io::ErrorKind::AlreadyExists, why))?;
+    let check = |file: &fs::File| -> Result<(), String> {
+        let meta = file.metadata().map_err(|e| e.to_string())?;
+        if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err("it is not a plain directory".to_string());
+        }
+        volume::check_open(file).and_then(|()| windows_acl::check(file))
+    };
+    let refused = |why: String| io::Error::new(io::ErrorKind::AlreadyExists, why);
     // `DELETE`: release deletes this very object through the handle
-    // (`windows_acl::delete_tree`), never whatever is at the name then. The
-    // checked handle is reopened through itself, not through the name, so
-    // the object that gains `DELETE` is the one just checked.
-    windows_acl::reopen_for_delete(&file)
+    // (`windows_acl::delete_tree`), never whatever is at the name then.
+    match open(GENERIC_READ | DELETE) {
+        Ok(file) => {
+            check(&file).map_err(refused)?;
+            Ok(file)
+        }
+        // Another process holds the entry open without `FILE_SHARE_DELETE`
+        // (os error 32), or this user may not delete it (os error 5): the
+        // folder this run has just made, private and unpublished, is in
+        // neither state, so this is refused in any case. Opened again for
+        // reading only, to say why it is not ours — "in use" alone hides
+        // the reason (seen on the CI runner for `C:\Windows`, el-2yxx0).
+        Err(e)
+            if matches!(
+                e.raw_os_error(),
+                Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+            ) =>
+        {
+            let Ok(file) = open(GENERIC_READ) else {
+                return Err(e);
+            };
+            Err(refused(match check(&file) {
+                Err(why) => why,
+                Ok(()) => format!("it cannot be opened for deleting: {e}"),
+            }))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -3224,50 +3249,6 @@ mod windows_acl {
             return Err(io::Error::last_os_error());
         }
         Ok(())
-    }
-
-    /// Volume serial number and file index of the object behind `handle`.
-    fn identity(handle: HANDLE) -> io::Result<(u32, u64)> {
-        // SAFETY: a plain C struct, for which all zeroes is a valid value.
-        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
-        // SAFETY: `handle` is open; `info` is writable for the call.
-        if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok((
-            info.dwVolumeSerialNumber,
-            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-        ))
-    }
-
-    /// The object open as `file`, opened once more through that handle —
-    /// never through a name — with `DELETE` added (`ReOpenFile`). The new
-    /// handle must be the same object (volume serial and file index), or
-    /// it is refused.
-    pub(super) fn reopen_for_delete(file: &fs::File) -> io::Result<fs::File> {
-        use std::os::windows::io::FromRawHandle;
-        let handle = file.as_raw_handle() as HANDLE;
-        // SAFETY: `handle` is open for the call; a returned handle is new
-        // and owned by the `File` below.
-        let again = unsafe {
-            ReOpenFile(
-                handle,
-                FILE_GENERIC_READ | DELETE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            )
-        };
-        if again == INVALID_HANDLE_VALUE || again.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: a fresh handle nobody else owns.
-        let again = unsafe { fs::File::from_raw_handle(again.cast()) };
-        if identity(handle)? != identity(again.as_raw_handle() as HANDLE)? {
-            return Err(io::Error::other(
-                "the handle opened for deleting is not the checked folder",
-            ));
-        }
-        Ok(again)
     }
 
     /// Where the object open as `file` is now.
