@@ -31,7 +31,10 @@
 //!   not ours to delete. Removal is never "check the name, then delete the
 //!   name": the entry is first moved into a fresh private folder, and only
 //!   what is proven there to be this run's own object is deleted (see
-//!   [`remove_owned`] for the conditions and limits of that guarantee). What
+//!   [`remove_owned`] for the conditions and limits of that guarantee).
+//!   Inside it, only entries this run recorded making are deleted
+//!   ([`Made`]); anything else — moved in by the user, a sync tool or a file
+//!   manager — is kept with its folders. What
 //!   cannot be removed is returned as an error naming it; after a published
 //!   copy that makes [`Copied::commit`] (and [`move_data`]) refuse to
 //!   switch, so the shell does not restart as if cleanup had finished.
@@ -952,7 +955,8 @@ fn stage(
     let snap = snapshot(&from.db, &partial, staging, race)?;
 
     let staging_dir = staging.handle.as_file();
-    let (files, bytes, thumbs) = stage_thumbs(&from.thumbs, staging_dir).map_err(copy_err)?;
+    let (files, bytes, thumbs) =
+        stage_thumbs(&from.thumbs, staging_dir, &staging.made).map_err(copy_err)?;
     if (files, bytes) != (size.thumbs_files, size.thumbs_bytes) {
         return Err(RelocateError::Verify {
             reason: format!(
@@ -983,9 +987,11 @@ fn stage(
     // it again, by identity.
     let kept = same_file::Handle::from_file(thumbs.as_file().try_clone().map_err(copy_err)?)
         .map_err(copy_err)?;
+    let made = cleanup.db.as_ref().expect("registered").made.clone();
     cleanup.thumbs = Some(OwnedDirectory {
         path: to.thumbs.clone(),
         handle: thumbs,
+        made,
         keep: false,
     });
     anchored::move_child(staging_dir, DB_FILE, &snap.db, target_dir.file())
@@ -1415,6 +1421,7 @@ fn snapshot(
     let copy = partial.join(DB_FILE);
     let staging_dir = staging.handle.as_file();
     let own = anchored::create_file(staging_dir, DB_FILE)
+        .and_then(|file| staging.made.record(&file).map(|()| file))
         .and_then(same_file::Handle::from_file)
         .map_err(|e| {
             copy_err(pc_core::tf!(
@@ -1690,18 +1697,18 @@ fn same_entry(path: &Path, handle: &same_file::Handle, directory: bool) -> bool 
 }
 
 /// What kind of entry a cleanup owns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Owned {
-    /// A staging directory with everything in it.
-    Directory,
+#[derive(Debug, Clone, Copy)]
+enum Owned<'a> {
+    /// A staging directory, with what this run made in it ([`Made`]).
+    Directory(&'a Made),
     /// A reservation that must still be empty.
     EmptyFile,
 }
 
-impl Owned {
+impl Owned<'_> {
     fn is_ours(self, path: &Path, handle: &same_file::Handle) -> bool {
         match self {
-            Self::Directory => same_entry(path, handle, true),
+            Self::Directory(_) => same_entry(path, handle, true),
             Self::EmptyFile => {
                 same_entry(path, handle, false)
                     && handle.as_file().metadata().is_ok_and(|m| m.len() == 0)
@@ -1714,13 +1721,13 @@ impl Owned {
     #[cfg(unix)]
     fn is_ours_at(self, dir: &fs::File, name: &std::ffi::CStr, handle: &same_file::Handle) -> bool {
         let wanted = match self {
-            Self::Directory => libc::S_IFDIR,
+            Self::Directory(_) => libc::S_IFDIR,
             Self::EmptyFile => libc::S_IFREG,
         };
         at::lstat(dir, name).is_ok_and(|st| {
             at::kind(&st) == wanted
                 && at::identity(&st) == (handle.dev(), handle.ino())
-                && (self == Self::Directory
+                && (matches!(self, Self::Directory(_))
                     || handle.as_file().metadata().is_ok_and(|m| m.len() == 0))
         })
     }
@@ -1789,52 +1796,50 @@ fn no_race(_: Step, _: &Path) {}
 ///    renamed back into the parent descriptor without replacement; if the
 ///    name was taken again meanwhile it stays in the private folder and
 ///    the error says where. Nothing is deleted.
-/// 4. Only an entry proven ours in the private folder is deleted, relative
-///    to the private folder's descriptor, a directory entry by entry
-///    through descriptors ([`at::remove_tree`]). Renaming the private
-///    folder, the parent or any ancestor meanwhile changes nothing: the
-///    descriptors still point at the folders that were checked, and no
-///    other account can change what is inside the private folder.
+/// 4. Only an entry proven ours in the private folder is touched. Inside a
+///    staging directory only what this run made ([`Made`]) is deleted,
+///    through descriptors ([`prune`]); anything else — a file the user or a
+///    sync tool moved in, a link, a hard link — is kept with the folders
+///    above it, the directory is renamed back to its name without
+///    replacement, and the error names every kept entry. The directory
+///    itself is removed with `rmdir` only: whatever was put into it after
+///    the prune keeps it, and it goes back to its name too.
 /// 5. The private folder is removed by name only if that name still holds
 ///    the folder behind its descriptor; otherwise the name is left alone
 ///    and the error says where the private folder is now (if the system
 ///    can say: `F_GETPATH` on macOS, `/proc/self/fd` on Linux).
 ///
-/// Windows needs none of this: an object can be deleted through a handle
-/// to it. The name is checked, and then the object behind `handle` is
-/// deleted wherever it is by then, a directory entry by entry through
-/// handles opened relative to the directory's own handle
-/// (`windows_acl::delete_tree`). No path is used for the delete.
+/// Windows needs no private folder: an object can be deleted through a
+/// handle to it. The name is checked, then the entries below the object
+/// behind `handle` are judged through handles opened relative to it
+/// (`windows_acl::prune`): only one this run made is opened again with
+/// `DELETE` and deleted through its own handle, everything else is kept and
+/// named, and the folder itself is deleted only when empty. No path is used
+/// for a delete.
 ///
 /// What this proves, and under which conditions (DESKTOP.md, "Очистка
-/// временных файлов"): if `handle` really is the object this run created,
-/// no other entry is deleted — whatever is renamed onto `path`, onto the
-/// private folder's name or onto any ancestor, before or after any check.
-/// That needs both preconditions:
-///
-/// - `handle` was captured correctly. `OwnedDirectory::create_with` opens
-///   it by name after creating it and accepts it only as an empty directory
-///   of this user that no other account can use, opened without following
-///   links ([`open_created_dir`]); a swap by another OS user fails that
-///   check and nothing is registered (el-2xri).
-/// - The private folder and our own staging directory are not manipulated
-///   with the user's own authority. Owner-only access (Unix mode 0700
-///   without extended ACL entries, a protected owner-only DACL on Windows)
-///   keeps other OS users out of them; it is **not** a boundary against a
-///   process running as the same user, root or admin, which can change the
-///   user's files directly anyway and is outside the product's threat
-///   model.
+/// временных файлов"): nothing below a staging directory is deleted unless
+/// this run recorded making it, whoever moved it there and whenever; and if
+/// `handle` really is the object this run created, no other entry is
+/// deleted at its name — whatever is renamed onto `path`, onto the private
+/// folder's name or onto any ancestor, before or after any check. The
+/// second needs `handle` to be captured correctly:
+/// `OwnedDirectory::create_with` opens it by name after creating it and
+/// accepts it only as an empty directory of this user that no other account
+/// can use, opened without following links ([`open_created_dir`]); a swap by
+/// another OS user fails that check and nothing is registered (el-2xri).
 ///
 /// Known limits, pinned by tests: (a) on Unix a replacement is briefly
-/// absent from `path` between steps 2 and 3; (b) whatever is moved into
-/// the private folder, or into our own staging directory, after the step 3
-/// check is treated as ours; (c) bytes written through a descriptor opened
-/// on our own reservation (possible through its public name before step 2)
-/// go with it; (d) step 5 is a check and then `rmdir` of the name: an
-/// *empty* folder renamed onto the private folder's name between the two
-/// is removed (`rmdir` never removes contents). Every failure returns an
-/// error naming what was left and where — the original name or the private
-/// folder.
+/// absent from `path` between steps 2 and 3; (b) on Unix an entry renamed
+/// onto the name of one of our files between its `fstatat` and its
+/// `unlinkat` by a process of this same user would be unlinked instead
+/// (POSIX cannot unlink "this inode"); (c) bytes written through a
+/// descriptor opened on our own reservation (possible through its public
+/// name before step 2) go with it; (d) step 5 is a check and then `rmdir` of
+/// the name: an *empty* folder renamed onto the private folder's name
+/// between the two is removed (`rmdir` never removes contents). Every
+/// failure returns an error naming what was left and where — the original
+/// name or the private folder.
 fn remove_owned(path: &Path, handle: &same_file::Handle, kind: Owned) -> Result<(), String> {
     remove_owned_with(path, handle, kind, &mut no_race)
 }
@@ -1888,17 +1893,60 @@ fn remove_owned_with(
         };
     }
     race(Step::BeforeDelete, &aside.path.join(name));
-    match kind {
-        Owned::Directory => at::remove_tree(&aside.dir, &entry),
-        Owned::EmptyFile => at::unlink(&aside.dir, &entry, false),
+    let directory = matches!(kind, Owned::Directory(_));
+    // Put the folder back at its name, without replacing anything there,
+    // when something in it is kept: the user finds it where it was.
+    let put_back = |aside: Aside, why: String| match at::rename_no_replace(
+        &aside.dir,
+        &entry,
+        &parent_dir,
+        &entry,
+    ) {
+        Ok(()) => aside.remove(&parent_dir, Err(why)),
+        Err(back) => Err(format!(
+            "{why}; the folder is now {} and could not be put back ({back})",
+            aside.describe(name)
+        )),
+    };
+    if let Owned::Directory(made) = kind {
+        // Only what this run made goes, through the folder's own
+        // descriptor ([`prune`]); entries are named as they are at `path`.
+        let mut left = Vec::new();
+        if let Err(e) = prune(handle.as_file(), path, made, &mut left) {
+            return Err(format!(
+                "{} (this run's own {}) could not be removed: {e}; what was not deleted is \
+                 still in it",
+                aside.describe(name),
+                path.display()
+            ));
+        }
+        if !left.is_empty() {
+            return put_back(aside, kept_error(path, &left));
+        }
     }
-    .map_err(|e| {
-        format!(
+    // `rmdir`, never a tree: whatever was put into the folder since its
+    // contents were pruned keeps it, and is not deleted.
+    if let Err(e) = at::unlink(&aside.dir, &entry, directory) {
+        let why = format!(
             "{} (this run's own {}) could not be removed: {e}",
             aside.describe(name),
             path.display()
-        )
-    })?;
+        );
+        if !directory {
+            return Err(why);
+        }
+        return match e.raw_os_error() {
+            Some(libc::ENOTEMPTY | libc::EEXIST) => put_back(
+                aside,
+                format!(
+                    "{} was left in place: something was put into it during cleanup and was \
+                 not deleted",
+                    path.display()
+                ),
+            ),
+            _ => Err(why),
+        };
+    }
     aside.remove(&parent_dir, Ok(()))
 }
 
@@ -1927,10 +1975,25 @@ fn remove_owned_with(
             path.display()
         )
     };
-    if kind == Owned::EmptyFile && !handle.as_file().metadata().is_ok_and(|m| m.len() == 0) {
-        return Err(kept(&"it was written to by someone else"));
+    match kind {
+        Owned::EmptyFile => {
+            if !handle.as_file().metadata().is_ok_and(|m| m.len() == 0) {
+                return Err(kept(&"it was written to by someone else"));
+            }
+        }
+        // Only what this run made goes; anything else keeps the folder,
+        // and the error names it. Deleting the folder itself then fails
+        // if anything was put into it meanwhile: a folder is deleted only
+        // when empty.
+        Owned::Directory(made) => {
+            let mut left = Vec::new();
+            windows_acl::prune(handle.as_file(), path, made, &mut left).map_err(|e| own(&e))?;
+            if !left.is_empty() {
+                return Err(kept_error(path, &left));
+            }
+        }
     }
-    windows_acl::delete_tree(handle.as_file(), kind == Owned::Directory).map_err(|e| own(&e))
+    windows_acl::delete(handle.as_file()).map_err(|e| own(&e))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2202,20 +2265,22 @@ mod at {
         check(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), flags) })
     }
 
-    /// Delete the directory `name` in `dir` and everything in it. Each
-    /// level is opened relative to the one above without following links;
-    /// a link inside is removed, never followed.
-    pub(super) fn remove_tree(dir: &fs::File, name: &CStr) -> io::Result<()> {
-        let sub = open_dir_at(dir, name)?;
-        for child in names(&sub)? {
-            if kind(&lstat(&sub, &child)?) == libc::S_IFDIR {
-                remove_tree(&sub, &child)?;
-            } else {
-                unlink(&sub, &child, false)?;
-            }
+    /// [`super::Seen`] of the entry `st` describes, as it is itself.
+    pub(super) fn seen(st: &libc::stat) -> super::Seen {
+        use super::Kind;
+        let kind = match kind(st) {
+            libc::S_IFDIR => Kind::Dir,
+            libc::S_IFREG => Kind::File,
+            libc::S_IFLNK => Kind::Link,
+            _ => Kind::Other,
+        };
+        let (volume, id) = identity(st);
+        #[allow(clippy::unnecessary_cast)] // `nlink_t` differs between systems
+        let links = st.st_nlink as u64;
+        super::Seen {
+            mark: super::Mark { volume, id, kind },
+            links,
         }
-        drop(sub);
-        unlink(dir, name, true)
     }
 
     /// `mkdirat`: a new directory `name` in `dir`; an existing entry fails.
@@ -2258,15 +2323,19 @@ mod at {
     /// Folders are made 0700 and files 0600 whatever the source's modes or
     /// the umask (which can only take bits away): the copied cache is this
     /// user's only, as `pc_core::ThumbStore` makes it (el-5x1uh O3).
-    pub(super) fn copy_tree(from: &Path, to: &fs::File) -> io::Result<()> {
+    ///
+    /// Every entry made is recorded in `made` ([`super::Made`]) through the
+    /// descriptor of the entry itself: a file through the descriptor its
+    /// exclusive creation returned, a folder through the one opened right
+    /// after `mkdirat` ([`made_dir`]).
+    pub(super) fn copy_tree(from: &Path, to: &fs::File, made: &super::Made) -> io::Result<()> {
         use std::os::unix::ffi::OsStrExt;
         for entry in fs::read_dir(from)? {
             let entry = entry?;
             let kind = entry.file_type()?;
             let name = CString::new(entry.file_name().as_bytes())?;
             if kind.is_dir() {
-                mkdir(to, &name, 0o700)?;
-                copy_tree(&entry.path(), &open_dir_at(to, &name)?)?;
+                copy_tree(&entry.path(), &made_dir(to, &name, made)?, made)?;
             } else if kind.is_file() {
                 let mut out = open_at(
                     to,
@@ -2274,6 +2343,7 @@ mod at {
                     libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
                     0o600,
                 )?;
+                made.record(&out)?;
                 io::copy(&mut fs::File::open(entry.path())?, &mut out)?;
                 out.sync_all()?;
             } else {
@@ -2281,6 +2351,31 @@ mod at {
             }
         }
         to.sync_all()
+    }
+
+    /// Make the folder `name` in `dir` (0700), open it and record it in
+    /// `made`. `mkdirat` returns no descriptor, so the folder is opened by
+    /// name right after, without following links, and accepted only while
+    /// still empty: whatever else could be at the name by then holds
+    /// nothing that pruning it could lose.
+    pub(super) fn made_dir(
+        dir: &fs::File,
+        name: &CStr,
+        made: &super::Made,
+    ) -> io::Result<fs::File> {
+        mkdir(dir, name, 0o700)?;
+        let sub = open_dir_at(dir, name)?;
+        if !names(&sub)?.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "the folder {} just made is not empty",
+                    name.to_string_lossy()
+                ),
+            ));
+        }
+        made.record(&sub)?;
+        Ok(sub)
     }
 
     /// Files and bytes under the directory open as `dir`, listed and
@@ -2564,9 +2659,195 @@ mod anchored {
     }
 }
 
+/// What this run itself created below its own folders, by identity: the
+/// database copy, `thumbs/` and every folder and file copied into it, each
+/// recorded through the descriptor (Windows: handle) of the entry just made
+/// ([`Made::record`]). Kept in memory only — no provenance file, no database
+/// ledger: a run that did not make an entry cannot have recorded it.
+///
+/// Cleanup deletes an entry below an owned folder only if its identity is
+/// recorded here; anything else in it — a file the user, a sync tool or
+/// Explorer/Finder moved in, a link or junction, a hard link to something
+/// else — is kept together with the folders above it, and the cleanup
+/// error names it (director decision for el-2yxx0: between "deletes extra"
+/// and "keeps extra", always the second). A file recorded here that has
+/// gained another hard link is kept as well: the other name may be
+/// somebody's.
+#[derive(Clone, Debug, Default)]
+struct Made(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<Mark>>>);
+
+/// The identity of a file system object: volume and object number (Unix
+/// `st_dev`/`st_ino`, Windows volume serial number and file index) and
+/// what kind of entry it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Mark {
+    volume: u64,
+    id: u64,
+    kind: Kind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Kind {
+    File,
+    Dir,
+    /// A symlink, junction or other reparse point. This run never makes one.
+    Link,
+    /// Anything else (a FIFO, a device). This run never makes one.
+    /// Windows reports every such object as a file or a reparse point.
+    #[cfg_attr(windows, allow(dead_code))]
+    Other,
+}
+
+/// An entry as it is now: its identity and its number of names.
+#[derive(Clone, Copy, Debug)]
+struct Seen {
+    mark: Mark,
+    links: u64,
+}
+
+/// What cleanup may do with an entry ([`Made::judge`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    /// Made by this run and has no other name: may be deleted.
+    Ours,
+    /// Not made by this run: kept.
+    Foreign,
+    /// Made by this run, but it has more names than this run gave it: kept.
+    Linked,
+}
+
+impl Made {
+    fn set(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<Mark>> {
+        // A panic elsewhere cannot leave a half-inserted set behind.
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Record the object open as `file`, which this run has just created.
+    fn record(&self, file: &fs::File) -> io::Result<()> {
+        let seen = seen(file)?;
+        self.set().insert(seen.mark);
+        Ok(())
+    }
+
+    fn judge(&self, seen: &Seen) -> Verdict {
+        if !self.set().contains(&seen.mark) {
+            Verdict::Foreign
+        } else if seen.mark.kind != Kind::Dir && seen.links != 1 {
+            Verdict::Linked
+        } else {
+            Verdict::Ours
+        }
+    }
+}
+
+/// [`Seen`] of the object open as `file`.
+#[cfg(unix)]
+fn seen(file: &fs::File) -> io::Result<Seen> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata()?;
+    let ty = meta.file_type();
+    let kind = if ty.is_dir() {
+        Kind::Dir
+    } else if ty.is_file() {
+        Kind::File
+    } else if ty.is_symlink() {
+        Kind::Link
+    } else {
+        Kind::Other
+    };
+    Ok(Seen {
+        mark: Mark {
+            volume: meta.dev(),
+            id: meta.ino(),
+            kind,
+        },
+        links: meta.nlink(),
+    })
+}
+
+#[cfg(windows)]
+fn seen(file: &fs::File) -> io::Result<Seen> {
+    windows_acl::seen(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn seen(_: &fs::File) -> io::Result<Seen> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no safe way to identify an entry on this platform",
+    ))
+}
+
+/// One kept entry, for a cleanup error.
+fn kept_entry(path: &Path, verdict: Verdict) -> String {
+    match verdict {
+        Verdict::Linked => format!(
+            "{} (made by this run, but it has another name this run did not give it)",
+            path.display()
+        ),
+        _ => format!("{} (not made by this run)", path.display()),
+    }
+}
+
+/// The cleanup error for the owned folder `path` that still holds `kept`.
+fn kept_error(path: &Path, kept: &[String]) -> String {
+    format!(
+        "{} was left in place: it holds entries this run did not create, and they were \
+         not deleted: {}",
+        path.display(),
+        kept.join(", ")
+    )
+}
+
+/// Delete, relative to the directory open as `dir` (at `at_path`, for
+/// messages), every entry this run made ([`Made`]) and keep everything else
+/// with the folders above it; each kept entry is added to `kept`.
+///
+/// Every entry is examined with `lstat` relative to the descriptor, never
+/// followed; a folder of ours is opened relative to it without following
+/// links and must be the folder examined. A folder is removed with `rmdir`,
+/// which never removes contents. Known limit, as between any check and
+/// `unlinkat` on Unix: an entry renamed onto a file's name between its
+/// `lstat` and its `unlinkat` by a process of this same user, inside this
+/// user's private folder, would be unlinked in its place.
+#[cfg(unix)]
+fn prune(dir: &fs::File, at_path: &Path, made: &Made, kept: &mut Vec<String>) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    for name in at::names(dir)? {
+        let path = at_path.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+        let failed = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+        let st = match at::lstat(dir, &name) {
+            // Gone meanwhile: nothing to keep or delete.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            other => other.map_err(failed)?,
+        };
+        let now = at::seen(&st);
+        match made.judge(&now) {
+            Verdict::Ours if now.mark.kind == Kind::Dir => {
+                let sub = at::open_dir_at(dir, &name).map_err(failed)?;
+                if seen(&sub).map_err(failed)?.mark != now.mark {
+                    kept.push(kept_entry(&path, Verdict::Foreign));
+                    continue;
+                }
+                let before = kept.len();
+                prune(&sub, &path, made, kept)?;
+                if kept.len() == before {
+                    at::unlink(dir, &name, true).map_err(failed)?;
+                }
+            }
+            Verdict::Ours => at::unlink(dir, &name, false).map_err(failed)?,
+            verdict => kept.push(kept_entry(&path, verdict)),
+        }
+    }
+    Ok(())
+}
+
 struct OwnedDirectory {
     path: PathBuf,
     handle: same_file::Handle,
+    /// What this run made inside; shared with the other owned folders of
+    /// the same run, since `thumbs/` moves from one to the other.
+    made: Made,
     keep: bool,
 }
 
@@ -2574,6 +2855,33 @@ impl OwnedDirectory {
     #[cfg(test)]
     fn create(path: &Path) -> io::Result<Self> {
         Self::create_with(path, &mut no_race)
+    }
+
+    /// Tests only: record `rel`, which the test made inside, as made by
+    /// this run — what the copier does for everything it creates.
+    #[cfg(test)]
+    fn adopt(&self, rel: impl AsRef<Path>) {
+        let path = self.path.join(rel);
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap()
+        };
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_READ_ATTRIBUTES; BACKUP_SEMANTICS | OPEN_REPARSE_POINT.
+            fs::OpenOptions::new()
+                .access_mode(0x80)
+                .custom_flags(0x0200_0000 | 0x0020_0000)
+                .open(&path)
+                .unwrap()
+        };
+        self.made.record(&file).unwrap();
     }
 
     /// Create `path` as a new directory and register it as this run's own.
@@ -2614,6 +2922,7 @@ impl OwnedDirectory {
         Ok(Self {
             path: path.to_path_buf(),
             handle: same_file::Handle::from_file(file)?,
+            made: Made::default(),
             keep: false,
         })
     }
@@ -2627,8 +2936,8 @@ impl OwnedDirectory {
     /// say), so every uncertain entry is named with its path.
     fn release_with(mut self, race: &mut dyn FnMut(Step, &Path)) -> Result<(), String> {
         self.keep = true;
-        remove_owned_with(&self.path, &self.handle, Owned::Directory, race).map_err(|why| {
-            match anchored::current_path(self.handle.as_file()) {
+        remove_owned_with(&self.path, &self.handle, Owned::Directory(&self.made), race).map_err(
+            |why| match anchored::current_path(self.handle.as_file()) {
                 Some(now)
                     if !same_place(&now, &self.path)
                         && !why.contains(&now.display().to_string()) =>
@@ -2641,15 +2950,15 @@ impl OwnedDirectory {
                     )
                 }
                 _ => why,
-            }
-        })
+            },
+        )
     }
 }
 
 impl Drop for OwnedDirectory {
     fn drop(&mut self) {
         if !self.keep {
-            let _ = remove_owned(&self.path, &self.handle, Owned::Directory);
+            let _ = remove_owned(&self.path, &self.handle, Owned::Directory(&self.made));
         }
     }
 }
@@ -2747,7 +3056,7 @@ fn open_created_dir(path: &Path) -> io::Result<fs::File> {
     };
     let refused = |why: String| io::Error::new(io::ErrorKind::AlreadyExists, why);
     // `DELETE`: release deletes this very object through the handle
-    // (`windows_acl::delete_tree`), never whatever is at the name then.
+    // (`windows_acl::delete`), never whatever is at the name then.
     match open(GENERIC_READ | DELETE) {
         Ok(file) => {
             check(&file).map_err(refused)?;
@@ -3186,7 +3495,7 @@ mod windows_acl {
     /// handle and opened relative to it as itself (no reparse point
     /// followed; see [`open_child`]).
     /// With `delete`, opened with `DELETE` and listing access, as
-    /// [`delete_tree`] and [`rename_into`] need.
+    /// [`rename_into`] needs.
     pub(super) fn child(
         dir: &fs::File,
         name: &std::ffi::OsStr,
@@ -3283,50 +3592,115 @@ mod windows_acl {
         }
     }
 
-    /// Delete the object open as `file` — a file, or (`directory`) a
-    /// directory with everything in it — through handles only, wherever it
-    /// is now: the entries inside are listed through the directory's own
-    /// handle and opened relative to that handle ([`open_child`]), never
-    /// through a path, and each is deleted through its own handle (review
-    /// el-5null). A junction or symlink
-    /// inside is opened as itself and deleted, never followed. `file` must
-    /// have been opened with `DELETE` access.
-    pub(super) fn delete_tree(file: &fs::File, directory: bool) -> io::Result<()> {
-        delete_handle(file.as_raw_handle() as HANDLE, directory)
+    /// Delete the object open as `file` (with `DELETE` access) through that
+    /// handle, wherever it is now. A folder is deleted only while empty.
+    pub(super) fn delete(file: &fs::File) -> io::Result<()> {
+        dispose(file.as_raw_handle() as HANDLE)
+            .map_err(|e| io::Error::new(e.kind(), format!("deleting through its handle: {e}")))
     }
 
-    fn delete_handle(handle: HANDLE, directory: bool) -> io::Result<()> {
-        // Each failure names its step: a bare os error from deep inside a
-        // tree says nothing about which call refused (el-2yxx0).
-        let step = |what: &'static str| {
-            move |e: io::Error| io::Error::new(e.kind(), format!("{what}: {e}"))
+    /// [`super::Seen`] of the object open as `file` (with at least
+    /// `FILE_READ_ATTRIBUTES`): volume serial number, file index, kind (a
+    /// reparse point is a link, whatever it points to) and number of names.
+    pub(super) fn seen(file: &fs::File) -> io::Result<super::Seen> {
+        use super::Kind;
+        let info = info(file)?;
+        let attributes = info.dwFileAttributes;
+        let kind = if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            Kind::Link
+        } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            Kind::Dir
+        } else {
+            Kind::File
         };
-        if directory {
-            for (name, id) in children(handle).map_err(step("listing a folder"))? {
-                let child = open_child(
-                    handle,
-                    &name,
-                    id,
-                    DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | SYNCHRONIZE,
-                )
-                .map_err(step("opening an entry in the folder"))?;
-                let attributes = {
-                    use std::os::windows::fs::MetadataExt;
-                    child
-                        .metadata()
-                        .map_err(step("reading an entry's attributes"))?
-                        .file_attributes()
-                };
-                let is_dir = attributes & FILE_ATTRIBUTE_DIRECTORY != 0
-                    && attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0;
-                delete_handle(child.as_raw_handle() as HANDLE, is_dir)?;
+        Ok(super::Seen {
+            mark: super::Mark {
+                volume: u64::from(info.dwVolumeSerialNumber),
+                id: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+                kind,
+            },
+            links: u64::from(info.nNumberOfLinks),
+        })
+    }
+
+    /// Delete, through handles only, every entry below the folder open as
+    /// `dir` (at `at_path`, for messages) that this run made
+    /// ([`super::Made`]), and keep everything else with the folders above
+    /// it; each kept entry is added to `kept`.
+    ///
+    /// Each listed entry is opened relative to the folder's handle as
+    /// itself ([`open_child`]: a junction or symlink is never followed, and
+    /// the object opened must have the listed ID) for reading attributes
+    /// only, and judged by that handle. Only an entry of ours is opened
+    /// again, with `DELETE`, and must again be the listed object; it is
+    /// deleted through that handle. A foreign entry is never opened for
+    /// deleting at all.
+    pub(super) fn prune(
+        dir: &fs::File,
+        at_path: &Path,
+        made: &super::Made,
+        kept: &mut Vec<String>,
+    ) -> io::Result<()> {
+        prune_handle(dir.as_raw_handle() as HANDLE, at_path, made, kept)
+    }
+
+    fn prune_handle(
+        handle: HANDLE,
+        at_path: &Path,
+        made: &super::Made,
+        kept: &mut Vec<String>,
+    ) -> io::Result<()> {
+        use super::{Kind, Verdict};
+        use std::os::windows::ffi::OsStringExt;
+        // Each failure names its entry and step: a bare os error from deep
+        // inside a tree says nothing about which call refused (el-2yxx0).
+        let listed = children(handle)
+            .map_err(|e| io::Error::new(e.kind(), format!("listing {}: {e}", at_path.display())))?;
+        for (name, id) in listed {
+            let path = at_path.join(std::ffi::OsString::from_wide(&name));
+            let step = |what: &'static str| {
+                let path = path.clone();
+                move |e: io::Error| {
+                    io::Error::new(e.kind(), format!("{what} {}: {e}", path.display()))
+                }
+            };
+            let look = match open_child(handle, &name, id, FILE_READ_ATTRIBUTES) {
+                // Gone meanwhile: nothing to keep or delete.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                other => other.map_err(step("opening"))?,
+            };
+            let now = seen(&look).map_err(step("reading the attributes of"))?;
+            drop(look);
+            match made.judge(&now) {
+                Verdict::Ours => {
+                    let child = open_child(
+                        handle,
+                        &name,
+                        id,
+                        DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | SYNCHRONIZE,
+                    )
+                    .map_err(step("opening for deleting"))?;
+                    if seen(&child)
+                        .map_err(step("reading the attributes of"))?
+                        .mark
+                        != now.mark
+                    {
+                        kept.push(super::kept_entry(&path, Verdict::Foreign));
+                        continue;
+                    }
+                    let child_handle = child.as_raw_handle() as HANDLE;
+                    let before = kept.len();
+                    if now.mark.kind == Kind::Dir {
+                        prune_handle(child_handle, &path, made, kept)?;
+                    }
+                    if kept.len() == before {
+                        dispose(child_handle).map_err(step("deleting"))?;
+                    }
+                }
+                verdict => kept.push(super::kept_entry(&path, verdict)),
             }
         }
-        dispose(handle).map_err(step(if directory {
-            "deleting a folder"
-        } else {
-            "deleting a file"
-        }))
+        Ok(())
     }
 
     /// Open the entry `name` — one component, as [`children`] listed it —
@@ -3390,14 +3764,43 @@ mod windows_acl {
         Ok(file)
     }
 
-    /// The file index (on NTFS the file ID) of the object open as `file`.
-    fn file_index(file: &fs::File) -> io::Result<u64> {
+    /// Review el-sr0gt, positive control (reviewer el-67ku): a name
+    /// replaced between listing and open is refused before any delete.
+    #[cfg(test)]
+    #[test]
+    fn reviewer_replacement_after_listing_is_refused_before_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private");
+        super::create_private_dir(&path).unwrap();
+        let dir = super::open_created_dir(&path).unwrap();
+        let original = path.join("LongMixedCaseName.raw");
+        fs::write(&original, b"ours").unwrap();
+        let handle = dir.as_raw_handle() as HANDLE;
+        let (name, id) = children(handle).unwrap().remove(0);
+        fs::rename(&original, path.join("saved-ours")).unwrap();
+        fs::write(&original, b"foreign replacement").unwrap();
+        let before = fs::metadata(&original).unwrap().modified().unwrap();
+        let error = open_child(handle, &name, id, DELETE | FILE_READ_ATTRIBUTES).unwrap_err();
+        assert!(error.to_string().contains("was replaced"), "{error}");
+        assert_eq!(fs::read(&original).unwrap(), b"foreign replacement");
+        assert_eq!(fs::metadata(&original).unwrap().modified().unwrap(), before);
+        assert_eq!(fs::read(path.join("saved-ours")).unwrap(), b"ours");
+    }
+
+    /// `GetFileInformationByHandle` of the object open as `file`.
+    fn info(file: &fs::File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
         // SAFETY: a plain C struct, for which all zeroes is a valid value.
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
         // SAFETY: `file` owns an open handle; `info` is writable.
         if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) } == 0 {
             return Err(io::Error::last_os_error());
         }
+        Ok(info)
+    }
+
+    /// The file index (on NTFS the file ID) of the object open as `file`.
+    fn file_index(file: &fs::File) -> io::Result<u64> {
+        let info = info(file)?;
         Ok((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
     }
 
@@ -3708,12 +4111,15 @@ fn tree_size(dir: &Path) -> io::Result<(u64, u64)> {
 /// target meanwhile receives nothing and is not counted (review el-2ztq8).
 /// The returned handle is the folder that was counted.
 #[cfg(unix)]
-fn stage_thumbs(from: &Path, staging: &fs::File) -> io::Result<(u64, u64, same_file::Handle)> {
+fn stage_thumbs(
+    from: &Path,
+    staging: &fs::File,
+    made: &Made,
+) -> io::Result<(u64, u64, same_file::Handle)> {
     let name = std::ffi::CString::new(THUMBS_DIR)?;
-    at::mkdir(staging, &name, 0o700)?;
-    let dir = at::open_dir_at(staging, &name)?;
+    let dir = at::made_dir(staging, &name, made)?;
     if from.exists() {
-        at::copy_tree(from, &dir)?;
+        at::copy_tree(from, &dir, made)?;
     }
     let (files, bytes) = at::tree_size(&dir)?;
     Ok((files, bytes, same_file::Handle::from_file(dir)?))
@@ -3724,7 +4130,7 @@ fn stage_thumbs(from: &Path, staging: &fs::File) -> io::Result<(u64, u64, same_f
 /// staging folder. The move is refused before any write by the namespace
 /// admission ([`crate::namespace`]); this is never reached, and refuses too.
 #[cfg(not(unix))]
-fn stage_thumbs(_: &Path, _: &fs::File) -> io::Result<(u64, u64, same_file::Handle)> {
+fn stage_thumbs(_: &Path, _: &fs::File, _: &Made) -> io::Result<(u64, u64, same_file::Handle)> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "the thumbnails cannot be copied safely on this platform",
@@ -3885,6 +4291,9 @@ mod ownership_tests {
         fs::create_dir(path.join("sub")).unwrap();
         fs::write(path.join(DB_FILE), b"copy").unwrap();
         fs::write(path.join("sub/thumb.jpg"), b"thumb").unwrap();
+        for made in ["sub", DB_FILE, "sub/thumb.jpg"] {
+            owned.adopt(made);
+        }
         (path, owned)
     }
 
@@ -4080,16 +4489,18 @@ mod ownership_tests {
         no_private_dirs_left(temp.path());
     }
 
-    /// The documented limit: whatever someone moves into the private folder
-    /// after the entry was proven ours there is treated as ours. This pins
-    /// the contract (see `remove_owned`), it does not endorse it.
+    /// Once a limit (el-5null): whatever someone put into the private folder
+    /// after the entry was proven ours there was deleted with it. The
+    /// folder is now removed with `rmdir` only, after its own contents were
+    /// pruned by identity: a folder with something in it is put back and
+    /// reported, its contents untouched.
     #[cfg(unix)]
     #[test]
-    fn the_private_folder_is_trusted_after_the_proof() {
+    fn something_put_into_the_private_folder_after_the_proof_is_kept() {
         let temp = tempfile::tempdir().unwrap();
-        let (_, owned) = staged(temp.path());
+        let (path, owned) = staged(temp.path());
         let ours = temp.path().join("ours-moved-away");
-        owned
+        let error = owned
             .release_with(&mut |step, at| {
                 if step == Step::BeforeDelete {
                     fs::rename(at, &ours).unwrap();
@@ -4097,8 +4508,15 @@ mod ownership_tests {
                     fs::write(at.join("x"), b"inside the private folder").unwrap();
                 }
             })
-            .unwrap();
-        assert_eq!(fs::read(ours.join(DB_FILE)).unwrap(), b"copy");
+            .expect_err("a folder with foreign contents must be reported");
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert_eq!(
+            fs::read(path.join("x")).unwrap(),
+            b"inside the private folder"
+        );
+        // This run's own contents were pruned before the move; its folder,
+        // moved away by someone else, stays where they put it.
+        assert_eq!(fs::read_dir(&ours).unwrap().count(), 0);
         no_private_dirs_left(temp.path());
     }
 
@@ -4247,7 +4665,9 @@ mod ownership_tests {
         fs::write(from.join("ab").join("abcd.jpg"), b"thumb").unwrap();
         fs::create_dir_all(to.join("ab")).unwrap();
         fs::write(to.join("ab").join("abcd.jpg"), b"foreign photo").unwrap();
-        let copy_tree = |from: &Path, to: &Path| at::copy_tree(from, &at::open_dir(to).unwrap());
+        let copy_tree = |from: &Path, to: &Path| {
+            at::copy_tree(from, &at::open_dir(to).unwrap(), &Made::default())
+        };
         let e = copy_tree(&from, &to).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{e}");
         assert_eq!(
@@ -4598,6 +5018,190 @@ mod caller_tests {
         );
         assert_eq!(env.bootstrap(), before);
         assert_eq!(marker(&target.join(DB_FILE)), "исходная");
+    }
+}
+
+/// Review el-sr0gt (B1) and the director's contract for el-2yxx0: cleanup
+/// deletes only entries this run is proven to have made ([`Made`]).
+/// Something the user, a sync tool or Explorer/Finder moved into our
+/// staging folder before cleanup is an ordinary change, not an attack: it
+/// is kept with the folders above it, and the error names it. Before the
+/// fix the Unix cleanup (`at::remove_tree`) deleted each of these exactly
+/// like the Windows one did on the CI runner (reproduced on macOS: the
+/// foreign file, the symlink object and the hard-link alias were gone and
+/// `release` returned `Ok(())`).
+#[cfg(all(test, unix))]
+mod provenance_tests {
+    use super::caller_tests::{marker, plenty, Env};
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    /// Mode, inode, size and modification time: unchanged means untouched.
+    fn stamp(path: &Path) -> (u32, u64, u64, i64, i64) {
+        let m = fs::symlink_metadata(path).unwrap();
+        (m.mode(), m.ino(), m.size(), m.mtime(), m.mtime_nsec())
+    }
+
+    #[test]
+    fn a_foreign_file_moved_into_staging_is_kept_and_named() {
+        let temp = tempfile::tempdir().unwrap();
+        let foreign = temp.path().join("foreign-photo.raw");
+        fs::write(&foreign, b"synthetic foreign original").unwrap();
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let inserted = path.join("foreign-photo.raw");
+        fs::rename(&foreign, &inserted).unwrap();
+        let before = stamp(&inserted);
+        let error = owned.release().expect_err("a kept entry must be reported");
+        assert_eq!(fs::read(&inserted).unwrap(), b"synthetic foreign original");
+        assert_eq!(stamp(&inserted), before);
+        assert!(error.contains(&inserted.display().to_string()), "{error}");
+        assert!(error.contains("not made by this run"), "{error}");
+    }
+
+    /// The Unix counterpart of the reviewer's junction: a symlink object
+    /// moved in is kept as itself, and its target is not followed.
+    #[test]
+    fn a_foreign_symlink_moved_into_staging_is_kept_as_itself() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("foreign-target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("original.raw"), b"synthetic only copy").unwrap();
+        let foreign = temp.path().join("foreign-link");
+        std::os::unix::fs::symlink(&target, &foreign).unwrap();
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let inserted = path.join("foreign-link");
+        fs::rename(&foreign, &inserted).unwrap();
+        let before = stamp(&inserted);
+        let error = owned.release().expect_err("a kept entry must be reported");
+        assert_eq!(fs::read_link(&inserted).unwrap(), target);
+        assert_eq!(stamp(&inserted), before);
+        assert_eq!(
+            fs::read(target.join("original.raw")).unwrap(),
+            b"synthetic only copy"
+        );
+        assert!(error.contains(&inserted.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn a_foreign_hard_link_moved_into_staging_is_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let foreign = temp.path().join("foreign-original.raw");
+        let alias = temp.path().join("foreign-alias.raw");
+        fs::write(&foreign, b"synthetic linked original").unwrap();
+        fs::hard_link(&foreign, &alias).unwrap();
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let inserted = path.join("foreign-alias.raw");
+        fs::rename(&alias, &inserted).unwrap();
+        let before = stamp(&foreign);
+        let error = owned.release().expect_err("a kept entry must be reported");
+        assert_eq!(fs::read(&foreign).unwrap(), b"synthetic linked original");
+        assert_eq!(fs::read(&inserted).unwrap(), b"synthetic linked original");
+        assert_eq!(stamp(&foreign), before);
+        assert_eq!(fs::metadata(&foreign).unwrap().nlink(), 2);
+        assert!(error.contains(&inserted.display().to_string()), "{error}");
+    }
+
+    /// A file this run made that gained a second name — here outside the
+    /// staging folder — is uncertain: the other name may be somebody's.
+    /// Both names keep the bytes, and the file is named as kept.
+    #[test]
+    fn a_file_of_ours_with_another_hard_link_is_kept_and_named() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let ours = path.join("thumb.jpg");
+        fs::write(&ours, b"synthetic thumb").unwrap();
+        owned.adopt("thumb.jpg");
+        let elsewhere = temp.path().join("kept-by-someone.jpg");
+        fs::hard_link(&ours, &elsewhere).unwrap();
+        let error = owned.release().expect_err("a kept entry must be reported");
+        assert_eq!(fs::read(&ours).unwrap(), b"synthetic thumb");
+        assert_eq!(fs::read(&elsewhere).unwrap(), b"synthetic thumb");
+        assert!(error.contains(&ours.display().to_string()), "{error}");
+        assert!(error.contains("another name"), "{error}");
+    }
+
+    /// A foreign file deep in a tree of ours: everything of ours around it
+    /// goes, the folders above it stay, and only it is named.
+    #[test]
+    fn only_the_ancestors_of_a_kept_entry_stay() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(PARTIAL_DB);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        fs::create_dir_all(path.join("thumbs/ab/cd")).unwrap();
+        fs::create_dir_all(path.join("thumbs/ef")).unwrap();
+        fs::write(path.join("thumbs/ab/cd/1.jpg"), b"ours").unwrap();
+        fs::write(path.join("thumbs/ef/2.jpg"), b"ours").unwrap();
+        fs::write(path.join(DB_FILE), b"copy").unwrap();
+        for made in [
+            "thumbs",
+            "thumbs/ab",
+            "thumbs/ab/cd",
+            "thumbs/ef",
+            "thumbs/ab/cd/1.jpg",
+            "thumbs/ef/2.jpg",
+            DB_FILE,
+        ] {
+            owned.adopt(made);
+        }
+        let foreign = path.join("thumbs/ab/cd/foreign.jpg");
+        fs::write(&foreign, b"synthetic foreign").unwrap();
+        let error = owned.release().expect_err("a kept entry must be reported");
+        assert_eq!(fs::read(&foreign).unwrap(), b"synthetic foreign");
+        assert!(!path.join("thumbs/ab/cd/1.jpg").exists());
+        assert!(!path.join("thumbs/ef").exists());
+        assert!(!path.join(DB_FILE).exists());
+        let mut left: Vec<_> = fs::read_dir(path.join("thumbs/ab/cd"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["foreign.jpg"]);
+        assert!(error.contains(&foreign.display().to_string()), "{error}");
+        assert!(!error.contains("1.jpg"), "{error}");
+    }
+
+    /// End to end through the shell's entry point: a file dropped into the
+    /// staging folder while the copy runs survives the cleanup after
+    /// publication; the move is not switched to, and the error names the
+    /// file. What the copier made (the database copy, `thumbs/`) is
+    /// published or removed as before.
+    #[test]
+    fn a_file_dropped_into_staging_during_a_move_stops_the_switch_and_is_named() {
+        let env = Env::new();
+        let target = env.root.join("target");
+        let before = env.bootstrap();
+        let dropped = target.join(PARTIAL_DB).join("dropped-by-sync.jpg");
+        let result = move_data_with(
+            &env.dirs,
+            &env.layout,
+            Source::System,
+            &target,
+            plenty,
+            &mut |step, _| {
+                if step == Step::Publish {
+                    fs::write(&dropped, b"synthetic foreign").unwrap();
+                }
+            },
+        );
+        let Err(RelocateError::Incomplete { copy, left }) = &result else {
+            panic!("the shell would restart on {result:?}");
+        };
+        assert_eq!(copy, &target);
+        assert!(left.contains(&dropped.display().to_string()), "{left}");
+        assert_eq!(fs::read(&dropped).unwrap(), b"synthetic foreign");
+        assert_eq!(env.bootstrap(), before);
+        assert_eq!(env.chosen(), env.layout.dir);
+        assert_eq!(marker(&target.join(DB_FILE)), "исходная");
+        let mut staging: Vec<_> = fs::read_dir(target.join(PARTIAL_DB))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        staging.sort();
+        assert_eq!(staging, ["dropped-by-sync.jpg"]);
     }
 }
 
@@ -5968,6 +6572,7 @@ mod registration_tests {
         })
         .unwrap();
         fs::write(path.join(DB_FILE), b"this run's copy").unwrap();
+        owned.adopt(DB_FILE);
         owned.release().unwrap();
         assert!(!path.exists());
         assert!(own.is_dir(), "the neighbour was touched");
@@ -6009,6 +6614,8 @@ mod registration_tests {
         assert_eq!(meta.mode() & 0o077, 0, "{:o}", meta.mode());
         fs::create_dir(path.join("sub")).unwrap();
         fs::write(path.join("sub/thumb.jpg"), b"thumb").unwrap();
+        owned.adopt("sub");
+        owned.adopt("sub/thumb.jpg");
         owned.release().unwrap();
         assert!(!path.exists());
         no_private_dirs(temp.path());
@@ -6120,6 +6727,7 @@ mod aside_namespace_tests {
             let path = temp.path().join("staging");
             let owned = OwnedDirectory::create(&path).unwrap();
             fs::write(path.join("own-copy"), b"ours").unwrap();
+            owned.adopt("own-copy");
             let saved = temp.path().join("saved-aside");
             let mut planted = None;
             let result =
@@ -6182,6 +6790,7 @@ mod aside_namespace_tests {
         let path = parent.join(PARTIAL_DB);
         let owned = OwnedDirectory::create(&path).unwrap();
         fs::write(path.join(DB_FILE), b"ours").unwrap();
+        owned.adopt(DB_FILE);
         let saved = temp.path().join("saved-target");
         let mut planted = None;
         owned
@@ -6304,6 +6913,7 @@ mod macos_acl_tests {
         let file = fs::File::open(&path).unwrap();
         assert_eq!(macos_acl::no_extended_acl(&file), Ok(()));
         fs::write(path.join(DB_FILE), b"this run's copy").unwrap();
+        owned.adopt(DB_FILE);
 
         let mut asides = Vec::new();
         owned
@@ -6353,6 +6963,7 @@ mod macos_acl_tests {
         let path = temp.path().join(PARTIAL_DB);
         let owned = OwnedDirectory::create(&path).unwrap();
         fs::write(path.join(DB_FILE), b"this run's copy").unwrap();
+        owned.adopt(DB_FILE);
         let mut aside = None;
         let e = owned
             .release_with(&mut |step, at| {
@@ -6390,6 +7001,7 @@ mod macos_acl_tests {
             let path = parent.join(staging);
             let owned = OwnedDirectory::create(&path).unwrap();
             fs::write(path.join("own-copy"), b"ours").unwrap();
+            owned.adopt("own-copy");
             let saved = parent.join(format!("saved-aside-{staging}"));
             let mut foreign = None;
             let result = owned.release_with(&mut |step, at| {
@@ -6479,6 +7091,8 @@ mod windows_registration_tests {
         open_created_dir(&path).unwrap();
         fs::create_dir(path.join("sub")).unwrap();
         fs::write(path.join("sub").join("thumb.jpg"), b"thumb").unwrap();
+        owned.adopt("sub");
+        owned.adopt(Path::new("sub").join("thumb.jpg"));
         owned.release().unwrap();
         assert!(!path.exists());
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
@@ -6597,8 +7211,10 @@ mod windows_registration_tests {
     }
 
     /// A tree with a read-only file and a junction to a foreign folder in
-    /// it: deleted through handles, the junction as itself — the folder it
-    /// points to keeps its photo.
+    /// it, all recorded as made by this run: deleted through handles, the
+    /// junction as itself — the folder it points to keeps its photo. (This
+    /// run never makes a junction; recorded here only to prove that even
+    /// one of its own is not followed.)
     #[test]
     fn a_tree_is_deleted_through_handles_without_following_junctions() {
         let temp = tempfile::tempdir().unwrap();
@@ -6620,11 +7236,174 @@ mod windows_registration_tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "{out:?}");
+        let ab = Path::new("ab");
+        for made in [
+            ab.to_path_buf(),
+            ab.join("cd"),
+            ab.join("cd").join("thumb.jpg"),
+            ab.join("link"),
+        ] {
+            owned.adopt(made);
+        }
         owned.release().unwrap();
         assert!(!path.exists());
         assert_eq!(
             fs::read(foreign.join("IMG_0001.JPG")).unwrap(),
             b"only copy"
         );
+    }
+}
+
+/// The independent reproducers of review el-sr0gt (reviewer el-67ku,
+/// evidence 6ee56d88), carried forward unchanged in what they assert: a
+/// foreign file, junction or hard-link alias moved into our staging folder
+/// before cleanup is kept, and the error names it. Natively on the CI
+/// runner, before the fix, all three were deleted with `Ok(())`. The two
+/// positive controls passed then and must keep passing.
+#[cfg(all(test, windows))]
+mod reviewer_el_67ku_windows {
+    use super::*;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::process::Command;
+
+    fn metadata(path: &Path) -> (u32, u64, u64, u64) {
+        let m = fs::symlink_metadata(path).unwrap();
+        (
+            m.file_attributes(),
+            m.creation_time(),
+            m.last_write_time(),
+            m.file_size(),
+        )
+    }
+
+    #[test]
+    fn reviewer_foreign_file_present_before_cleanup_is_retained_and_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let foreign = temp.path().join("foreign-photo.raw");
+        fs::write(&foreign, b"synthetic foreign original").unwrap();
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let inserted = path.join("foreign-photo.raw");
+        fs::rename(&foreign, &inserted).unwrap();
+        let before = metadata(&inserted);
+        let result = owned.release();
+        eprintln!(
+            "foreign regular: result={result:?}, retained={}",
+            inserted.exists()
+        );
+        assert!(
+            inserted.exists(),
+            "cleanup deleted a pre-existing foreign file; result={result:?}"
+        );
+        assert_eq!(fs::read(&inserted).unwrap(), b"synthetic foreign original");
+        assert_eq!(metadata(&inserted), before);
+        assert!(result.unwrap_err().contains("foreign-photo.raw"));
+    }
+
+    #[test]
+    fn reviewer_foreign_junction_present_before_cleanup_is_retained_and_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("foreign-target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("original.raw"), b"synthetic only copy").unwrap();
+        let foreign = temp.path().join("foreign-junction");
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&foreign)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let inserted = path.join("foreign-junction");
+        fs::rename(&foreign, &inserted).unwrap();
+        let before = metadata(&inserted);
+        let destination = fs::read_link(&inserted).unwrap();
+        let result = owned.release();
+        let retained = fs::symlink_metadata(&inserted).is_ok();
+        eprintln!(
+            "foreign junction: result={result:?}, retained={retained}, target_retained={}",
+            target.join("original.raw").exists()
+        );
+        assert_eq!(
+            fs::read(target.join("original.raw")).unwrap(),
+            b"synthetic only copy"
+        );
+        assert!(
+            retained,
+            "cleanup deleted the foreign junction object; result={result:?}"
+        );
+        assert_eq!(metadata(&inserted), before);
+        assert_eq!(fs::read_link(&inserted).unwrap(), destination);
+        assert!(result.unwrap_err().contains("foreign-junction"));
+    }
+
+    #[test]
+    fn reviewer_foreign_hard_link_present_before_cleanup_is_retained_and_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let foreign = temp.path().join("foreign-original.raw");
+        let alias = temp.path().join("foreign-alias.raw");
+        fs::write(&foreign, b"synthetic linked original").unwrap();
+        fs::hard_link(&foreign, &alias).unwrap();
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let inserted = path.join("foreign-alias.raw");
+        fs::rename(&alias, &inserted).unwrap();
+        let before = metadata(&foreign);
+        let result = owned.release();
+        eprintln!(
+            "foreign hard link: result={result:?}, alias_retained={}, original_retained={}",
+            inserted.exists(),
+            foreign.exists()
+        );
+        assert_eq!(fs::read(&foreign).unwrap(), b"synthetic linked original");
+        assert_eq!(metadata(&foreign), before);
+        assert!(
+            inserted.exists(),
+            "cleanup removed a foreign hard link; result={result:?}"
+        );
+        assert!(result.unwrap_err().contains("foreign-alias.raw"));
+    }
+
+    /// Not one of the reviewer's: a file this run made that gained another
+    /// hard link is kept and named (director's contract, el-2yxx0).
+    #[test]
+    fn a_file_of_ours_with_another_hard_link_is_kept_and_named() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let ours = path.join("thumb.jpg");
+        fs::write(&ours, b"synthetic thumb").unwrap();
+        owned.adopt("thumb.jpg");
+        let elsewhere = temp.path().join("kept-by-someone.jpg");
+        fs::hard_link(&ours, &elsewhere).unwrap();
+        let error = owned.release().expect_err("a kept entry must be reported");
+        assert_eq!(fs::read(&ours).unwrap(), b"synthetic thumb");
+        assert_eq!(fs::read(&elsewhere).unwrap(), b"synthetic thumb");
+        assert!(error.contains("thumb.jpg"), "{error}");
+        assert!(error.contains("another name"), "{error}");
+    }
+
+    #[test]
+    fn reviewer_sharing_refusal_never_registers_a_valid_private_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private");
+        create_private_dir(&path).unwrap();
+        let before = metadata(&path);
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .custom_flags(0x0200_0000 | 0x0020_0000)
+            .open(&path)
+            .unwrap();
+        let error = open_created_dir(&path).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot be opened for deleting"),
+            "{error}"
+        );
+        assert_eq!(metadata(&path), before);
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+        drop(locked);
     }
 }
