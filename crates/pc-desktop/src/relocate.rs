@@ -1803,8 +1803,8 @@ fn no_race(_: Step, _: &Path) {}
 /// Windows needs none of this: an object can be deleted through a handle
 /// to it. The name is checked, and then the object behind `handle` is
 /// deleted wherever it is by then, a directory entry by entry through
-/// handles opened by file ID (`windows_acl::delete_tree`). No path is used
-/// for the delete.
+/// handles opened relative to the directory's own handle
+/// (`windows_acl::delete_tree`). No path is used for the delete.
 ///
 /// What this proves, and under which conditions (DESKTOP.md, "Очистка
 /// временных файлов"): if `handle` really is the object this run created,
@@ -2920,10 +2920,15 @@ mod windows_acl {
     use std::os::windows::io::AsRawHandle;
     use std::path::Path;
     use std::{fs, io, iter, mem, ptr};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        NtOpenFile, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    };
     use windows_sys::Win32::Foundation::{
         CloseHandle, LocalFree, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
-        ERROR_NOT_SUPPORTED, ERROR_NO_MORE_FILES, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE,
+        ERROR_NOT_SUPPORTED, ERROR_NO_MORE_FILES, ERROR_SUCCESS, HANDLE,
     };
+    use windows_sys::Win32::Foundation::{RtlNtStatusToDosError, UNICODE_STRING};
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
         GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
@@ -2937,16 +2942,15 @@ mod windows_acl {
     use windows_sys::Win32::Storage::FileSystem::{
         CreateDirectoryW, FileDispositionInfo, FileDispositionInfoEx, FileFullDirectoryInfo,
         FileFullDirectoryRestartInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-        FileIdType, GetFileInformationByHandle, GetFileInformationByHandleEx, OpenFileById,
-        ReOpenFile, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
-        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-        FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_GENERIC_READ, FILE_ID_BOTH_DIR_INFO,
-        FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+        GetFileInformationByHandle, GetFileInformationByHandleEx, SetFileInformationByHandle,
+        BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+        FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
+        FILE_FULL_DIR_INFO, FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
     const ACCESS_DENIED_ACE_TYPE: u8 = 1;
@@ -3179,7 +3183,8 @@ mod windows_acl {
     }
 
     /// The entry `name` in the directory open as `dir`, found by listing the
-    /// handle and opened by file ID as itself (no reparse point followed).
+    /// handle and opened relative to it as itself (no reparse point
+    /// followed; see [`open_child`]).
     /// With `delete`, opened with `DELETE` and listing access, as
     /// [`delete_tree`] and [`rename_into`] need.
     pub(super) fn child(
@@ -3189,10 +3194,9 @@ mod windows_acl {
     ) -> io::Result<fs::File> {
         let handle = dir.as_raw_handle() as HANDLE;
         let wanted: Vec<u16> = name.encode_wide().collect();
-        let id = children(handle)?
+        let (entry, id) = children(handle)?
             .into_iter()
             .find(|(entry, _)| *entry == wanted)
-            .map(|(_, id)| id)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
@@ -3204,7 +3208,7 @@ mod windows_acl {
         } else {
             FILE_READ_ATTRIBUTES | SYNCHRONIZE
         };
-        open_by_id_with(handle, id, access)
+        open_child(handle, &entry, id, access)
     }
 
     /// Rename the object open as `entry` (with `DELETE` access) to `name`
@@ -3282,8 +3286,9 @@ mod windows_acl {
     /// Delete the object open as `file` — a file, or (`directory`) a
     /// directory with everything in it — through handles only, wherever it
     /// is now: the entries inside are listed through the directory's own
-    /// handle and opened by file ID, never by name, and each is deleted
-    /// through its own handle (review el-5null). A junction or symlink
+    /// handle and opened relative to that handle ([`open_child`]), never
+    /// through a path, and each is deleted through its own handle (review
+    /// el-5null). A junction or symlink
     /// inside is opened as itself and deleted, never followed. `file` must
     /// have been opened with `DELETE` access.
     pub(super) fn delete_tree(file: &fs::File, directory: bool) -> io::Result<()> {
@@ -3297,8 +3302,14 @@ mod windows_acl {
             move |e: io::Error| io::Error::new(e.kind(), format!("{what}: {e}"))
         };
         if directory {
-            for id in child_ids(handle).map_err(step("listing a folder"))? {
-                let child = open_by_id(handle, id).map_err(step("opening an entry by id"))?;
+            for (name, id) in children(handle).map_err(step("listing a folder"))? {
+                let child = open_child(
+                    handle,
+                    &name,
+                    id,
+                    DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | SYNCHRONIZE,
+                )
+                .map_err(step("opening an entry in the folder"))?;
                 let attributes = {
                     use std::os::windows::fs::MetadataExt;
                     child
@@ -3318,40 +3329,76 @@ mod windows_acl {
         }))
     }
 
-    /// Open the entry with file ID `id` on the volume of `volume`, as
-    /// itself (no reparse point is followed), for deleting.
-    fn open_by_id(volume: HANDLE, id: i64) -> io::Result<fs::File> {
-        open_by_id_with(
-            volume,
-            id,
-            DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | SYNCHRONIZE,
-        )
-    }
-
-    fn open_by_id_with(volume: HANDLE, id: i64, access: u32) -> io::Result<fs::File> {
+    /// Open the entry `name` — one component, as [`children`] listed it —
+    /// in the directory behind `dir`, relative to that handle
+    /// (`NtOpenFile` with `RootDirectory`): no path is resolved, so where
+    /// the directory is now does not matter, and a reparse point at `name`
+    /// is opened as itself (`FILE_OPEN_REPARSE_POINT`), never followed.
+    /// The opened entry must have the file ID the listing gave, or it is
+    /// refused: the name may have been taken by something else since.
+    ///
+    /// Not `OpenFileById`: NTFS refuses to delete or rename through a handle
+    /// opened by ID ("The parameter is incorrect", os error 87 — the handle
+    /// has no name to remove), seen natively on the CI runner (el-2yxx0).
+    fn open_child(dir: HANDLE, name: &[u16], id: i64, access: u32) -> io::Result<fs::File> {
         use std::os::windows::io::FromRawHandle;
-        let descriptor = FILE_ID_DESCRIPTOR {
-            dwSize: mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
-            Type: FileIdType,
-            Anonymous: FILE_ID_DESCRIPTOR_0 { FileId: id },
+        let bytes = u16::try_from(mem::size_of_val(name))
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name too long"))?;
+        let mut buffer = name.to_vec();
+        let unicode = UNICODE_STRING {
+            Length: bytes,
+            MaximumLength: bytes,
+            Buffer: buffer.as_mut_ptr(),
         };
-        // SAFETY: `volume` is an open handle, `descriptor` lives for the
-        // call; a returned handle is new and owned by the `File` below.
-        let child = unsafe {
-            OpenFileById(
-                volume,
-                &descriptor,
-                access,
+        let attributes = OBJECT_ATTRIBUTES {
+            Length: mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+            RootDirectory: dir,
+            ObjectName: &unicode,
+            Attributes: 0,
+            SecurityDescriptor: ptr::null(),
+            SecurityQualityOfService: ptr::null(),
+        };
+        let mut handle: HANDLE = ptr::null_mut();
+        // SAFETY: a plain C struct, for which all zeroes is a valid value.
+        let mut status_block: IO_STATUS_BLOCK = unsafe { mem::zeroed() };
+        // SAFETY: `dir` is an open directory handle; `unicode` (and the
+        // `buffer` it points to) and `attributes` live for the call; a
+        // returned handle is new and owned by the `File` below.
+        let status = unsafe {
+            NtOpenFile(
+                &mut handle,
+                access | SYNCHRONIZE,
+                &attributes,
+                &mut status_block,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                ptr::null(),
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
             )
         };
-        if child == INVALID_HANDLE_VALUE || child.is_null() {
-            return Err(io::Error::last_os_error());
+        if status < 0 {
+            // SAFETY: a pure conversion of a status code.
+            let code = unsafe { RtlNtStatusToDosError(status) };
+            return Err(io::Error::from_raw_os_error(code as i32));
         }
         // SAFETY: a fresh handle nobody else owns.
-        Ok(unsafe { fs::File::from_raw_handle(child.cast()) })
+        let file = unsafe { fs::File::from_raw_handle(handle.cast()) };
+        if file_index(&file)? != id as u64 {
+            return Err(io::Error::other(format!(
+                "{} was replaced while it was being opened",
+                String::from_utf16_lossy(name)
+            )));
+        }
+        Ok(file)
+    }
+
+    /// The file index (on NTFS the file ID) of the object open as `file`.
+    fn file_index(file: &fs::File) -> io::Result<u64> {
+        // SAFETY: a plain C struct, for which all zeroes is a valid value.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+        // SAFETY: `file` owns an open handle; `info` is writable.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
     }
 
     /// Delete the object behind `handle`: POSIX semantics (the name goes at
@@ -3402,12 +3449,6 @@ mod windows_acl {
             ));
         }
         Ok(())
-    }
-
-    /// File IDs of the entries in the directory behind `handle`, without
-    /// `.`/`..`. Lists the handle, not a path.
-    fn child_ids(handle: HANDLE) -> io::Result<Vec<i64>> {
-        Ok(children(handle)?.into_iter().map(|(_, id)| id).collect())
     }
 
     /// Names and file IDs of the entries in the directory behind `handle`,
