@@ -268,15 +268,18 @@ impl Located {
     }
 }
 
-/// What a search by evidence found for one item whose recorded place no
-/// longer leads to anything (el-6byp2, diagnosis el-lvtmk D1/D3/R8).
+/// What a search by evidence found for one item whose recorded place in
+/// quarantine no longer leads to anything (el-6byp2, diagnosis el-lvtmk
+/// D1/D3/R8).
 ///
-/// The search only reads, and only inside the tool's own quarantine
-/// folders; a match is the recorded device and inode first, then the whole
-/// recorded evidence. This record is appended to the entry's history under
-/// `sought`, never under `located`: a place found here is not an overlay
-/// later recovery may act on by itself. Only an undo or a reconciliation
-/// bound to the preview that showed this place moves anything.
+/// Report only (director decision after review el-1oudi): nothing found
+/// here is ever moved by the tool. Undo and reconciliation name the place
+/// and how it was proven, for a person to return the file by hand, and the
+/// entry stays open. The search only reads, only inside the quarantine
+/// folders under the roots of the entry's own run, reached without
+/// following a link; a match is the recorded device and inode first, then
+/// the whole recorded evidence. Appended to the entry's history under its
+/// own events, never under `located`: no later recovery acts on it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sought {
@@ -286,51 +289,75 @@ pub struct Sought {
     /// The quarantine folders that were read, as their paths were then.
     pub scope: Vec<String>,
     pub finding: SoughtFinding,
-    /// `None`: the tool may bring this back itself, once a preview showed
-    /// the place. Otherwise why it is only shown, for a person to return.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub report_only: Option<ReportOnly>,
+    /// Every name in those folders that bears the recorded device and
+    /// inode, proven or not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hits: Vec<SoughtHit>,
+    /// What could not be read, or was not followed: the search did not see
+    /// everything it should have, so no answer of it is a unique one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread: Vec<SoughtGap>,
+    /// Protected bundles inside the quarantine folders — a Photos library,
+    /// Lightroom's own folders — that the search never enters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 impl Sought {
-    /// The one place the tool may bring this item back from, if it may.
-    pub fn movable(&self) -> Option<&str> {
-        match (&self.finding, &self.report_only) {
-            (SoughtFinding::Found { at }, None) => Some(at),
+    /// The one place proven to hold this item, when the search says so.
+    pub fn found(&self) -> Option<&SoughtHit> {
+        match (&self.finding, self.hits.as_slice()) {
+            (SoughtFinding::Found, [one]) if one.proven => Some(one),
             _ => None,
         }
     }
 }
 
-/// What the search found.
+/// One name that bears the recorded device and inode.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "outcome", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
+pub struct SoughtHit {
+    pub at: String,
+    /// The whole recorded evidence holds, and records enough to prove it.
+    pub proven: bool,
+    /// What proved it, or why it is not proven.
+    pub how: String,
+    /// Names beside it that a companion of it would bear (`.xmp`, `.aae`,
+    /// `._*`…), whatever they are: nothing proves them to be this entry's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub beside: Vec<String>,
+}
+
+/// A place the search could not read, or would not follow.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SoughtGap {
+    pub at: String,
+    pub why: String,
+}
+
+/// The answer of a search, in the order it is decided: an incomplete
+/// search is never a unique answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SoughtFinding {
-    /// One regular file, proven by the whole recorded evidence.
-    Found { at: String },
-    /// Nothing with the recorded device and inode in the folders read.
+    /// Something could not be read or was not followed ([`Sought::unread`]);
+    /// the names it did see are in [`Sought::hits`].
+    Uncertain,
+    /// A protected bundle was not entered ([`Sought::skipped`]).
+    ProtectedSkipped,
+    /// More than one name bears the recorded object.
+    Ambiguous,
+    /// One name, proven by the whole recorded evidence.
+    Found,
+    /// One name with the recorded device and inode, not proven: the rest of
+    /// the evidence does not hold, cannot be read, or was never recorded.
+    Candidate,
+    /// No name in the folders read bears the recorded object.
     NotFound,
-    /// More than one name leads to the recorded object.
-    Ambiguous { at: Vec<String> },
-    /// The recorded device and inode, but the rest of the evidence does
-    /// not hold (or cannot be read): not proven to be the same file.
-    Changed { at: String, why: String },
     /// The row records no evidence: nothing is searched, a name proves
     /// nothing.
     NoEvidence,
-}
-
-/// Why a found place is only shown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ReportOnly {
-    /// Nothing proven was found, or more than one name, or a changed file.
-    NotProven,
-    /// The row records no evidence.
-    NoEvidence,
-    /// The frame has a companion — recorded, beside the found file, or at
-    /// home. Only a frame alone is brought back by the tool.
-    Companion,
 }
 
 /// One event in the history of a journal entry. Appended, never replaced:
@@ -775,8 +802,7 @@ impl Db {
         self.journal_event(id, phase, kind, text, data.as_deref())
     }
 
-    /// An event with what a search by evidence found ([`Sought`]) and, when
-    /// the operation was bound to a preview, the place that preview showed.
+    /// An event with what a search by evidence found ([`Sought`]).
     pub fn journal_event_sought(
         &self,
         id: i64,
@@ -784,9 +810,8 @@ impl Db {
         kind: &str,
         text: &str,
         sought: &[Sought],
-        previewed: Option<&str>,
     ) -> Result<()> {
-        let data = serde_json::json!({ "sought": sought, "previewed": previewed }).to_string();
+        let data = serde_json::json!({ "sought": sought }).to_string();
         self.journal_event(id, phase, kind, text, Some(&data))
     }
 

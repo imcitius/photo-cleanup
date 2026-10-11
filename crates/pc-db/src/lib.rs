@@ -14,8 +14,8 @@ pub use files::{
 pub use marks::{Mark, MarkScope, Marks};
 pub use model::{
     Bundle, BundleState, Catalog, Event, JournalEntry, JournalEvent, JournalStatus, KeeperSource,
-    Located, Moved, NewBundle, NewCatalog, NewJournalEntry, QuarantineFound, ReportOnly, Sought,
-    SoughtFinding,
+    Located, Moved, NewBundle, NewCatalog, NewJournalEntry, QuarantineFound, Sought, SoughtFinding,
+    SoughtGap, SoughtHit,
 };
 pub use organize::OrganizeRow;
 

@@ -5,7 +5,7 @@
 //! later stage would be reasoning about paths that no longer exist.
 
 use anyhow::Result;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::{Db, JournalEntry};
 
@@ -100,6 +100,26 @@ impl Db {
             }
         }
         Ok(out)
+    }
+
+    /// The run a journal entry belongs to, and the roots that run walked;
+    /// `None` when the entry or its run is not recorded. Roots that cannot
+    /// be read are an error, not an empty list: a caller that bounds a
+    /// search by them must not take "unreadable" for "none".
+    pub fn journal_run_roots(&self, journal_id: i64) -> Result<Option<(i64, Vec<String>)>> {
+        let row: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT r.id, r.roots FROM journal j JOIN runs r ON r.id = j.run_id
+                  WHERE j.id = ?1",
+                [journal_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            None => Ok(None),
+            Some((run, json)) => Ok(Some((run, serde_json::from_str(&json)?))),
+        }
     }
 
     /// Runs that moved files into the reorganised tree, newest first.

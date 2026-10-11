@@ -1,6 +1,7 @@
 //! A quarantined frame whose recorded place no longer leads to it is looked
-//! for by its evidence, and only a frame alone comes back (el-6byp2,
-//! diagnosis el-lvtmk D1/D3/R8).
+//! for by its evidence and only reported: where it is and how that was
+//! proven, never moved by the tool (el-6byp2, diagnosis el-lvtmk D1/D3/R8;
+//! director decision after review el-1oudi).
 //!
 //! The common case: the default quarantine sits inside the photo's own
 //! folder, so a user who renames that folder after `apply` takes the
@@ -9,7 +10,7 @@
 //! and asks the functions the command line and the web call.
 
 use crate::*;
-use pc_db::{Db, JournalStatus, ReportOnly, Sought, SoughtFinding};
+use pc_db::{Db, JournalStatus, Sought, SoughtFinding};
 use pc_family::plan::Candidate;
 
 struct Fx {
@@ -112,6 +113,20 @@ fn sought_of(items: &[Item]) -> Vec<&Sought> {
     items.iter().filter_map(|i| i.sought.as_ref()).collect()
 }
 
+fn one(items: &[Item]) -> Sought {
+    let s = sought_of(items);
+    assert_eq!(s.len(), 1, "{items:?}");
+    s[0].clone()
+}
+
+fn at(p: &Path) -> String {
+    p.display().to_string()
+}
+
+fn names(s: &Sought) -> Vec<String> {
+    s.hits.iter().map(|h| h.at.clone()).collect()
+}
+
 /// Nothing moved: every path given is where it was, with its bytes.
 fn unmoved(paths: &[(&Path, &[u8])]) {
     for (p, bytes) in paths {
@@ -119,65 +134,59 @@ fn unmoved(paths: &[(&Path, &[u8])]) {
     }
 }
 
+/// An undo of `id` refuses, moves nothing, leaves the entry `Done`, and its
+/// typed refusal carries the very searches the entry's history now ends
+/// with. Returns them and the words.
+fn undo_reports(f: &Fx, id: i64) -> (Vec<Sought>, String) {
+    let before = f.db.journal_events(id).unwrap().len();
+    let err = undo(&f.db, id).unwrap_err();
+    let u = unrecovered(&err).unwrap_or_else(|| panic!("untyped: {err:#}"));
+    assert_eq!(f.entry(id).status, JournalStatus::Done);
+    let events = f.db.journal_events(id).unwrap();
+    assert_eq!(events.len(), before + 1, "{events:?}");
+    let last = events.last().unwrap();
+    assert_eq!(
+        (last.phase.as_str(), last.kind.as_str()),
+        ("undo", "refused")
+    );
+    assert_eq!(last.sought().unwrap(), u.sought, "event and result differ");
+    (u.sought.clone(), format!("{err:#}"))
+}
+
 #[test]
-fn a_frame_whose_folder_was_renamed_is_found_by_evidence_and_comes_back_after_its_preview() {
+fn a_frame_whose_folder_was_renamed_is_found_by_evidence_and_only_reported() {
     let f = fx();
     let e = f.quarantined("2015", "IMG_0001.bmp", false);
     let home = PathBuf::from(&e.src);
     let moved = f.renamed("2015", "2015 Crimea");
     let now = q(&moved).join("IMG_0001.bmp");
 
-    // The preview reads, finds, and offers it from where it is now.
+    // The preview reads, finds, proves, and says so — and offers nothing.
     let items = undo_preview(&f.db, &f.entry(e.id)).unwrap();
-    assert_eq!(items.len(), 1);
-    let s = items[0].sought.as_ref().expect("searched");
-    assert_eq!(
-        s.finding,
-        SoughtFinding::Found {
-            at: now.display().to_string()
-        }
-    );
-    assert_eq!(s.report_only, None);
-    assert!(s.scope.contains(&q(&moved).display().to_string()), "{s:?}");
-    assert_eq!(items[0].standing, Standing::Moved);
-    assert_eq!(items[0].dst, now.display().to_string());
-    assert!(items[0].why().is_none(), "{:?}", items[0].why());
+    let s = one(&items);
+    assert_eq!(s.finding, SoughtFinding::Found, "{s:?}");
+    let hit = s.found().expect("found");
+    assert_eq!(hit.at, at(&now));
+    assert!(hit.proven && hit.how.contains("size"), "{hit:?}");
+    assert!(s.scope.contains(&at(&q(&moved))), "{s:?}");
+    assert!(s.unread.is_empty() && s.skipped.is_empty(), "{s:?}");
+    assert_eq!(items[0].standing, Standing::Gone);
+    let why = items[0].why().unwrap();
+    assert!(why.contains(&at(&now)), "{why}");
+    assert!(why.contains("return it by hand"), "{why}");
 
-    // Not bound to a preview: shown, not moved.
-    let err = undo(&f.db, e.id).unwrap_err();
-    let u = unrecovered(&err).expect("typed");
-    assert_eq!(u.sought.len(), 1);
-    assert!(
-        format!("{err:#}").contains(&now.display().to_string()),
-        "{err:#}"
-    );
-    unmoved(&[(&now, FRAME)]);
-    assert!(!home.exists());
-    assert_eq!(f.entry(e.id).status, JournalStatus::Done);
-
-    // Bound to the place the preview showed: it comes home.
-    let done = undo_found(&f.db, e.id, &now.display().to_string()).unwrap();
-    assert_eq!(done.files_back, 1);
-    assert_eq!(fs::read(&home).unwrap(), FRAME);
-    assert!(!now.exists());
-    assert_eq!(f.entry(e.id).status, JournalStatus::Undone);
-    let (kinds, sought) = f.history(e.id);
-    assert!(
-        kinds.contains(&("undo".into(), "refused".into())),
-        "{kinds:?}"
-    );
-    assert!(
-        kinds.contains(&("undo".into(), "found".into())),
-        "{kinds:?}"
-    );
-    assert!(kinds.contains(&("undo".into(), "done".into())), "{kinds:?}");
-    assert!(sought
-        .iter()
-        .all(|s| s.movable() == Some(&now.display().to_string())));
+    // The undo says the same, records it, and moves nothing — every time.
+    for _ in 0..2 {
+        let (sought, said) = undo_reports(&f, e.id);
+        assert_eq!(sought, vec![s.clone()]);
+        assert!(said.contains(&at(&now)), "{said}");
+        unmoved(&[(&now, FRAME)]);
+        assert!(!home.exists());
+    }
 }
 
 #[test]
-fn two_names_for_the_frame_are_both_shown_and_neither_is_moved() {
+fn two_names_for_the_frame_are_both_shown_and_neither_is_claimed() {
     let f = fx();
     let e = f.quarantined("2015", "IMG_0002.bmp", false);
     let moved = f.renamed("2015", "2015-renamed");
@@ -187,36 +196,24 @@ fn two_names_for_the_frame_are_both_shown_and_neither_is_moved() {
     let twin = q(&other).join("IMG_0002.bmp");
     fs::hard_link(&now, &twin).unwrap();
 
-    let items = undo_preview(&f.db, &f.entry(e.id)).unwrap();
-    let s = sought_of(&items);
-    assert_eq!(s.len(), 1);
-    match &s[0].finding {
-        SoughtFinding::Ambiguous { at } => {
-            assert!(at.contains(&now.display().to_string()), "{at:?}");
-            assert!(at.contains(&twin.display().to_string()), "{at:?}");
-        }
-        other => panic!("{other:?}"),
-    }
-    assert_eq!(s[0].report_only, Some(ReportOnly::NotProven));
-    assert!(items[0].why().is_some());
+    let s = one(&undo_preview(&f.db, &f.entry(e.id)).unwrap());
+    assert_eq!(s.finding, SoughtFinding::Ambiguous);
+    assert!(s.found().is_none());
+    let n = names(&s);
+    assert!(n.contains(&at(&now)) && n.contains(&at(&twin)), "{n:?}");
 
-    for at in [&now, &twin] {
-        let err = undo_found(&f.db, e.id, &at.display().to_string()).unwrap_err();
-        assert!(unrecovered(&err).is_some(), "{err:#}");
-    }
+    let (sought, said) = undo_reports(&f, e.id);
+    assert_eq!(sought[0].finding, SoughtFinding::Ambiguous);
+    assert!(
+        said.contains(&at(&now)) && said.contains(&at(&twin)),
+        "{said}"
+    );
     unmoved(&[(&now, FRAME), (&twin, FRAME)]);
     assert!(!PathBuf::from(&e.src).exists());
-    assert_eq!(f.entry(e.id).status, JournalStatus::Done);
-    let (kinds, sought) = f.history(e.id);
-    assert!(
-        kinds.contains(&("undo".into(), "refused".into())),
-        "{kinds:?}"
-    );
-    assert!(sought.iter().all(|s| s.movable().is_none()));
 }
 
 #[test]
-fn a_frame_with_a_companion_is_found_and_only_shown() {
+fn a_frame_and_its_recorded_companion_are_each_found_and_only_shown() {
     let f = fx();
     let e = f.quarantined("2016", "IMG_0003.bmp", true);
     let moved = f.renamed("2016", "2016 old");
@@ -226,31 +223,20 @@ fn a_frame_with_a_companion_is_found_and_only_shown() {
     let items = undo_preview(&f.db, &f.entry(e.id)).unwrap();
     let s = sought_of(&items);
     assert_eq!(s.len(), 2, "{items:?}");
-    assert!(s.iter().any(|s| s.finding
-        == SoughtFinding::Found {
-            at: frame.display().to_string()
-        }));
-    assert!(s.iter().any(|s| s.finding
-        == SoughtFinding::Found {
-            at: side.display().to_string()
-        }));
-    assert!(s
-        .iter()
-        .all(|s| s.report_only == Some(ReportOnly::Companion)));
-    let why = items
-        .iter()
-        .filter_map(Item::why)
-        .collect::<Vec<_>>()
-        .join("; ");
-    assert!(why.contains(&frame.display().to_string()), "{why}");
-
-    let err = undo_found(&f.db, e.id, &frame.display().to_string()).unwrap_err();
-    assert!(unrecovered(&err).is_some(), "{err:#}");
-    assert!(undo(&f.db, e.id).is_err());
+    for want in [&frame, &side] {
+        assert!(
+            s.iter()
+                .any(|s| s.found().is_some_and(|h| h.at == at(want))),
+            "{s:?}"
+        );
+    }
+    let (_, said) = undo_reports(&f, e.id);
+    assert!(
+        said.contains(&at(&frame)) && said.contains(&at(&side)),
+        "{said}"
+    );
     unmoved(&[(&frame, FRAME), (&side, b"<x:xmpmeta/>")]);
     assert!(!PathBuf::from(&e.src).exists());
-    let (_, sought) = f.history(e.id);
-    assert!(!sought.is_empty() && sought.iter().all(|s| s.movable().is_none()));
 }
 
 #[test]
@@ -261,10 +247,7 @@ fn a_row_without_evidence_is_not_searched_and_moves_nothing() {
     let held = q(&folder).join("IMG_0004.bmp");
     fs::create_dir_all(held.parent().unwrap()).unwrap();
     fs::write(&held, FRAME).unwrap();
-    let (s, d) = (
-        folder.join("IMG_0004.bmp").display().to_string(),
-        held.display().to_string(),
-    );
+    let (s, d) = (at(&folder.join("IMG_0004.bmp")), at(&held));
     let id =
         f.db.journal_begin(&pc_db::NewJournalEntry {
             run_id: f.run,
@@ -281,26 +264,12 @@ fn a_row_without_evidence_is_not_searched_and_moves_nothing() {
     let moved = f.renamed("2010", "2010 renamed");
     let now = q(&moved).join("IMG_0004.bmp");
 
-    let items = undo_preview(&f.db, &f.entry(id)).unwrap();
-    let s = sought_of(&items);
-    assert_eq!(s.len(), 1);
-    assert_eq!(s[0].finding, SoughtFinding::NoEvidence);
-    assert_eq!(s[0].report_only, Some(ReportOnly::NoEvidence));
-    assert!(
-        s[0].scope.is_empty(),
-        "nothing is read for a row without evidence"
-    );
-
-    assert!(undo(&f.db, id).is_err());
-    let err = undo_found(&f.db, id, &now.display().to_string()).unwrap_err();
-    assert!(unrecovered(&err).is_some(), "{err:#}");
+    let s = one(&undo_preview(&f.db, &f.entry(id)).unwrap());
+    assert_eq!(s.finding, SoughtFinding::NoEvidence);
+    assert!(s.scope.is_empty() && s.hits.is_empty(), "nothing is read");
+    let (sought, _) = undo_reports(&f, id);
+    assert_eq!(sought[0].finding, SoughtFinding::NoEvidence);
     unmoved(&[(&now, FRAME)]);
-    assert_eq!(f.entry(id).status, JournalStatus::Done);
-    let (kinds, _) = f.history(id);
-    assert!(
-        kinds.contains(&("undo".into(), "refused".into())),
-        "{kinds:?}"
-    );
 }
 
 #[test]
@@ -317,71 +286,16 @@ fn a_stranger_with_the_same_name_and_size_is_not_taken_for_the_frame() {
     assert_eq!(stranger.len(), FRAME.len());
     fs::write(&now, stranger).unwrap();
 
-    let items = undo_preview(&f.db, &f.entry(e.id)).unwrap();
-    let s = sought_of(&items);
-    assert_eq!(s.len(), 1);
-    assert_eq!(s[0].finding, SoughtFinding::NotFound);
-    assert_eq!(s[0].report_only, Some(ReportOnly::NotProven));
-
-    let err = undo_found(&f.db, e.id, &now.display().to_string()).unwrap_err();
-    assert!(unrecovered(&err).is_some(), "{err:#}");
+    let s = one(&undo_preview(&f.db, &f.entry(e.id)).unwrap());
+    assert_eq!(s.finding, SoughtFinding::NotFound, "{s:?}");
+    assert!(s.hits.is_empty());
+    undo_reports(&f, e.id);
     unmoved(&[(&now, stranger), (&outside, FRAME)]);
     assert!(!PathBuf::from(&e.src).exists());
-    assert_eq!(f.entry(e.id).status, JournalStatus::Done);
 }
 
 #[test]
-fn a_frame_that_changed_after_its_preview_is_not_moved() {
-    // Moved again, rewritten, or joined by a companion — each between the
-    // preview and the action.
-    type Change = fn(&Path) -> PathBuf;
-    let changes: [(&str, Change); 3] = [
-        ("moved again", |at| {
-            let folder = at.parent().unwrap().parent().unwrap();
-            let again = folder.with_file_name("again");
-            fs::rename(folder, &again).unwrap();
-            q(&again).join(at.file_name().unwrap())
-        }),
-        ("rewritten", |at| {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            fs::write(at, b"BM rewritten frame of the very same size!!!").unwrap();
-            at.to_path_buf()
-        }),
-        ("joined by a companion", |at| {
-            fs::write(at.with_extension("xmp"), b"<x:xmpmeta/>").unwrap();
-            at.to_path_buf()
-        }),
-    ];
-    for (what, change) in changes {
-        let f = fx();
-        let e = f.quarantined("2018", "IMG_0006.bmp", false);
-        let moved = f.renamed("2018", "2018 y");
-        let previewed = q(&moved).join("IMG_0006.bmp");
-        let items = undo_preview(&f.db, &f.entry(e.id)).unwrap();
-        assert_eq!(items[0].dst, previewed.display().to_string(), "{what}");
-        let before = fs::read(&previewed).unwrap();
-
-        let now = change(&previewed);
-        let err = undo_found(&f.db, e.id, &previewed.display().to_string()).unwrap_err();
-
-        let u = unrecovered(&err).unwrap_or_else(|| panic!("{what}: {err:#}"));
-        assert_eq!(u.previewed.as_deref(), Some(previewed.to_str().unwrap()));
-        assert!(!PathBuf::from(&e.src).exists(), "{what}: moved home");
-        assert!(now.exists(), "{what}");
-        if what != "rewritten" {
-            assert_eq!(fs::read(&now).unwrap(), before, "{what}");
-        }
-        assert_eq!(f.entry(e.id).status, JournalStatus::Done, "{what}");
-        let (kinds, _) = f.history(e.id);
-        assert!(
-            kinds.contains(&("undo".into(), "refused".into())),
-            "{what}: {kinds:?}"
-        );
-    }
-}
-
-#[test]
-fn an_interrupted_entry_whose_quarantine_moved_is_reconciled_only_from_its_preview() {
+fn an_interrupted_entry_whose_quarantine_moved_is_reported_and_stays_pending() {
     // el-lvtmk #15: killed after the rename, and the folder renamed since.
     let f = fx();
     let e = f.quarantined("2019", "IMG_0007.bmp", false);
@@ -392,20 +306,40 @@ fn an_interrupted_entry_whose_quarantine_moved_is_reconciled_only_from_its_previ
     let now = q(&moved).join("IMG_0007.bmp");
 
     let items = reconcile(&f.db, e.id).unwrap();
-    assert_eq!(items[0].standing, Standing::Moved);
-    assert_eq!(items[0].dst, now.display().to_string());
-    assert!(reconcile_undo(&f.db, e.id).is_err());
+    assert_eq!(items[0].standing, Standing::Gone);
+    assert_eq!(one(&items).found().map(|h| h.at.clone()), Some(at(&now)));
+    let err = reconcile_undo(&f.db, e.id).unwrap_err();
+    let u = unrecovered(&err).expect("typed");
+    assert_eq!(u.sought[0].finding, SoughtFinding::Found);
     unmoved(&[(&now, FRAME)]);
-
-    let r = reconcile_found(&f.db, e.id, &now.display().to_string()).unwrap();
-    assert_eq!(r.done.files_back, 1);
-    assert_eq!(fs::read(&e.src).unwrap(), FRAME);
-    assert_eq!(f.entry(e.id).status, JournalStatus::Undone);
-    let (kinds, _) = f.history(e.id);
-    assert!(
-        kinds.contains(&("reconcile".into(), "found".into())),
-        "{kinds:?}"
+    assert!(!PathBuf::from(&e.src).exists());
+    assert_eq!(f.entry(e.id).status, JournalStatus::Pending);
+    let last = f.db.journal_events(e.id).unwrap().pop().unwrap();
+    assert_eq!(
+        (last.phase.as_str(), last.kind.as_str()),
+        ("reconcile", "refused")
     );
+    assert_eq!(last.sought().unwrap(), u.sought);
+}
+
+#[test]
+fn a_preview_records_its_search_once_and_moves_nothing() {
+    let f = fx();
+    let e = f.quarantined("2021", "IMG_0009.bmp", false);
+    let moved = f.renamed("2021", "2021 a");
+    let now = q(&moved).join("IMG_0009.bmp");
+    let items = undo_preview(&f.db, &f.entry(e.id)).unwrap();
+    let before = f.db.journal_events(e.id).unwrap().len();
+    record_sought(&f.db, e.id, "undo", &items).unwrap();
+    record_sought(&f.db, e.id, "undo", &items).unwrap();
+    let (kinds, sought) = f.history(e.id);
+    assert_eq!(kinds.len(), before + 1, "{kinds:?}");
+    assert_eq!(
+        kinds.last().unwrap(),
+        &("undo".to_string(), "sought".to_string())
+    );
+    assert_eq!(sought, vec![one(&items)]);
+    unmoved(&[(&now, FRAME)]);
 }
 
 #[test]
@@ -417,32 +351,40 @@ fn nothing_outside_the_run_and_its_quarantine_folders_is_read() {
     let away = f.top.join("elsewhere");
     fs::rename(f.archive.join("2020"), &away).unwrap();
 
-    let items = undo_preview(&f.db, &f.entry(e.id)).unwrap();
-    let s = sought_of(&items);
-    assert_eq!(s[0].finding, SoughtFinding::NotFound);
+    let s = one(&undo_preview(&f.db, &f.entry(e.id)).unwrap());
+    assert_eq!(s.finding, SoughtFinding::NotFound);
     assert!(
-        s[0].scope
-            .iter()
-            .all(|p| Path::new(p).starts_with(&f.archive)),
+        s.scope.iter().all(|p| Path::new(p).starts_with(&f.archive)),
         "{:?}",
-        s[0].scope
+        s.scope
     );
-    assert!(undo(&f.db, e.id).is_err());
+    undo_reports(&f, e.id);
     unmoved(&[(&q(&away).join("IMG_0008.bmp"), FRAME)]);
 }
 
+// Review el-1oudi (el-67ku), restated for the report-only contract: each
+// was a place the search claimed, or would have moved, what it had not
+// proven.
+
+/// B1: another run's roots never widen the search.
 #[test]
 fn review_unrelated_run_must_not_expand_search() {
     let f = fx();
     let e = f.quarantined("2015", "frame.bmp", false);
-    f.db.start_run(&[f.top.display().to_string()], "unrelated historical scan").unwrap();
+    f.db.start_run(&[at(&f.top)], "unrelated historical scan")
+        .unwrap();
     let away = f.top.join("outside-the-entry-run");
     fs::rename(f.archive.join("2015"), &away).unwrap();
-    let items = undo_preview(&f.db, &e).unwrap();
-    eprintln!("REVIEW historical roots: {items:?}");
-    assert!(items[0].sought.as_ref().unwrap().movable().is_none(), "outside originating run offered for recovery");
+    let s = one(&undo_preview(&f.db, &e).unwrap());
+    assert_eq!(s.finding, SoughtFinding::NotFound, "{s:?}");
+    assert!(s.hits.is_empty(), "{s:?}");
+    assert!(s.scope.iter().all(|p| Path::new(p).starts_with(&f.archive)));
+    undo_reports(&f, e.id);
+    unmoved(&[(&q(&away).join("frame.bmp"), FRAME)]);
 }
 
+/// B5: device and inode alone prove nothing; neither does evidence without
+/// the birth time the system reports.
 #[test]
 fn review_partial_proof_must_remain_report_only() {
     let f = fx();
@@ -455,31 +397,67 @@ fn review_partial_proof_must_remain_report_only() {
     f.db.journal_record_manifest(e.id, &e.manifest).unwrap();
     let moved = f.renamed("2015", "renamed");
     let now = q(&moved).join("frame.bmp");
-    let items = undo_preview(&f.db, &f.entry(e.id)).unwrap();
-    let result = undo_found(&f.db, e.id, now.to_str().unwrap());
-    eprintln!("REVIEW partial proof: {items:?}; action={result:?}; home={}", Path::new(&e.src).exists());
-    assert!(result.is_err(), "dev:ino-only proof moved a file");
+    let s = one(&undo_preview(&f.db, &f.entry(e.id)).unwrap());
+    assert_eq!(s.finding, SoughtFinding::Candidate, "{s:?}");
+    assert!(s.found().is_none());
+    assert_eq!(names(&s), vec![at(&now)]);
+    assert!(!s.hits[0].proven && s.hits[0].how.contains("device and inode"));
+    let (_, said) = undo_reports(&f, e.id);
+    assert!(said.contains("not proven"), "{said}");
+    unmoved(&[(&now, FRAME)]);
+    assert!(!Path::new(&e.src).exists());
 }
 
 #[test]
-fn review_companion_at_last_check_must_refuse() {
+fn evidence_without_the_birth_time_the_system_reports_is_only_a_candidate() {
+    let f = fx();
+    let mut e = f.quarantined("2015", "frame.bmp", false);
+    let moved_probe = Path::new(&e.manifest[0].dst);
+    if fs::metadata(moved_probe).unwrap().created().is_err() {
+        eprintln!("this file system reports no birth time: nothing to withhold");
+        return;
+    }
+    e.manifest[0].proof.as_mut().unwrap().birth_ns = None;
+    f.db.journal_record_manifest(e.id, &e.manifest).unwrap();
+    f.renamed("2015", "renamed");
+    let s = one(&undo_preview(&f.db, &f.entry(e.id)).unwrap());
+    assert_eq!(s.finding, SoughtFinding::Candidate, "{s:?}");
+    assert!(s.hits[0].how.contains("birth time"), "{s:?}");
+}
+
+/// B4 restated: a companion beside the place found — even one that appeared
+/// after the frame left, even a dangling link — is named, never judged, and
+/// never moved.
+#[test]
+fn review_companions_beside_the_place_found_are_named_and_kept() {
+    use std::os::unix::fs::symlink;
     let f = fx();
     let e = f.quarantined("2015", "frame.bmp", false);
     let moved = f.renamed("2015", "renamed");
     let now = q(&moved).join("frame.bmp");
-    assert!(undo_preview(&f.db, &e).unwrap()[0].sought.as_ref().unwrap().movable().is_some());
     let side = now.with_extension("xmp");
-    let side2 = side.clone();
-    let _guard = crate::race::before_move(move |_, _| {
-        fs::write(&side2, b"foreign edit payload")?;
-        Ok(())
-    });
-    let result = undo_found(&f.db, e.id, now.to_str().unwrap());
-    eprintln!("REVIEW companion race: {result:?}; frame_home={}; companion_stays={}", Path::new(&e.src).exists(), side.exists());
-    assert_eq!(fs::read(&side).unwrap(), b"foreign edit payload");
-    assert!(result.is_err(), "frame moved away from companion that appeared before final checks");
+    fs::write(&side, b"foreign edit payload").unwrap();
+    let apple = q(&moved).join("._frame.bmp");
+    symlink("unavailable-edits", &apple).unwrap();
+
+    let s = one(&undo_preview(&f.db, &e).unwrap());
+    let hit = s.found().expect("found");
+    assert!(hit.beside.contains(&at(&side)), "{hit:?}");
+    assert!(hit.beside.contains(&at(&apple)), "{hit:?}");
+    let (_, said) = undo_reports(&f, e.id);
+    assert!(
+        said.contains("companion") && said.contains(&at(&side)),
+        "{said}"
+    );
+    unmoved(&[(&now, FRAME), (&side, b"foreign edit payload")]);
+    assert_eq!(
+        fs::read_link(&apple).unwrap(),
+        PathBuf::from("unavailable-edits")
+    );
+    assert!(!Path::new(&e.src).exists());
 }
 
+/// B3: what cannot be read makes the search uncertain, never unique.
 #[test]
 fn review_unreadable_candidate_tree_must_not_establish_uniqueness() {
     use std::os::unix::fs::PermissionsExt;
@@ -492,14 +470,25 @@ fn review_unreadable_candidate_tree_must_not_establish_uniqueness() {
     let twin = hidden.join("frame.bmp");
     fs::hard_link(&now, &twin).unwrap();
     fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
-    let items = undo_preview(&f.db, &e).unwrap();
-    let result = undo_found(&f.db, e.id, now.to_str().unwrap());
+    if fs::read_dir(&hidden).is_ok() {
+        // Running with privileges that read anything: nothing to stage.
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o700)).unwrap();
+        eprintln!("permissions do not bind this user; skipped");
+        return;
+    }
+    let s = one(&undo_preview(&f.db, &e).unwrap());
+    let err = undo(&f.db, e.id).unwrap_err();
     fs::set_permissions(&hidden, fs::Permissions::from_mode(0o700)).unwrap();
-    eprintln!("REVIEW unreadable search: {items:?}; action={result:?}");
-    assert_eq!(fs::read(&twin).unwrap(), FRAME);
-    assert!(result.is_err(), "incomplete search treated as unique candidate");
+    assert_eq!(s.finding, SoughtFinding::Uncertain, "{s:?}");
+    assert!(s.found().is_none());
+    assert!(s.unread.iter().any(|g| g.at == at(&hidden)), "{s:?}");
+    assert_eq!(names(&s), vec![at(&now)], "the name it saw is still named");
+    assert!(unrecovered(&err).is_some_and(|u| u.sought[0].finding == SoughtFinding::Uncertain));
+    unmoved(&[(&now, FRAME), (&twin, FRAME)]);
+    assert!(!Path::new(&e.src).exists());
 }
 
+/// B2: a recorded folder replaced by a link is not followed, and says so.
 #[test]
 fn review_replaced_anchor_ancestor_must_not_escape() {
     use std::os::unix::fs::symlink;
@@ -513,77 +502,16 @@ fn review_replaced_anchor_ancestor_must_not_escape() {
     let found = q(&outside).join("different.bmp");
     fs::rename(q(&saved).join("frame.bmp"), &found).unwrap();
     symlink(&outside, &old).unwrap();
-    let items = undo_preview(&f.db, &e).unwrap();
-    eprintln!("REVIEW replaced anchor: {items:?}");
-    assert!(items[0].sought.as_ref().unwrap().movable().is_none(), "unverified symlink ancestor escaped the run");
+    let s = one(&undo_preview(&f.db, &e).unwrap());
+    assert_eq!(s.finding, SoughtFinding::Uncertain, "{s:?}");
+    assert!(s.unread.iter().any(|g| g.at == at(&old)), "{s:?}");
+    assert!(s.hits.is_empty(), "{s:?}");
+    assert!(s.scope.iter().all(|p| !p.contains("foreign-namespace")));
+    undo_reports(&f, e.id);
+    unmoved(&[(&found, FRAME)]);
 }
 
-#[test]
-fn review_photoslibrary_inside_quarantine_must_not_be_entered() {
-    let f = fx();
-    let e = f.quarantined("2015", "frame.bmp", false);
-    let moved = f.renamed("2015", "renamed");
-    let lib = q(&moved).join("Foreign.photoslibrary");
-    fs::create_dir(&lib).unwrap();
-    let now = lib.join("frame.bmp");
-    fs::rename(q(&moved).join("frame.bmp"), &now).unwrap();
-    let items = undo_preview(&f.db, &e).unwrap();
-    eprintln!("REVIEW photoslibrary: {items:?}");
-    assert!(items[0].sought.as_ref().unwrap().movable().is_none(), "Photos library content offered for automatic move");
-}
-
-#[test]
-fn review_foreign_replacement_after_preview_preserves_metadata_and_refuses() {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let f = fx();
-    let e = f.quarantined("2015", "frame.bmp", false);
-    let moved = f.renamed("2015", "renamed");
-    let now = q(&moved).join("frame.bmp");
-    let _ = undo_preview(&f.db, &e).unwrap();
-    let saved = f.top.join("saved-frame.bmp");
-    fs::rename(&now, &saved).unwrap();
-    fs::write(&now, vec![b'X'; FRAME.len()]).unwrap();
-    fs::set_permissions(&now, fs::Permissions::from_mode(0o640)).unwrap();
-    let original_times = fs::FileTimes::new().set_modified(fs::metadata(&saved).unwrap().modified().unwrap());
-    fs::File::options().write(true).open(&now).unwrap().set_times(original_times).unwrap();
-    #[cfg(target_os = "macos")]
-    let acl_before = {
-        assert!(std::process::Command::new("/usr/bin/xattr").args(["-w", "review.fixture", "foreign metadata"]).arg(&now).status().unwrap().success());
-        assert!(std::process::Command::new("/bin/chmod").args(["+a", "everyone deny delete"]).arg(&now).status().unwrap().success());
-        std::process::Command::new("/bin/ls").arg("-lde").arg(&now).output().unwrap().stdout
-    };
-    let before = fs::symlink_metadata(&now).unwrap();
-    let result = undo_found(&f.db, e.id, now.to_str().unwrap()).unwrap_err();
-    let after = fs::symlink_metadata(&now).unwrap();
-    assert!(unrecovered(&result).is_some());
-    #[cfg(target_os = "macos")]
-    {
-        assert_eq!(std::process::Command::new("/usr/bin/xattr").args(["-p", "review.fixture"]).arg(&now).output().unwrap().stdout, b"foreign metadata\n");
-        assert_eq!(std::process::Command::new("/bin/ls").arg("-lde").arg(&now).output().unwrap().stdout, acl_before);
-        assert!(std::process::Command::new("/bin/chmod").arg("-N").arg(&now).status().unwrap().success());
-    }
-    assert_eq!(fs::read(&now).unwrap(), vec![b'X'; FRAME.len()]);
-    assert_eq!((before.ino(), before.mode(), before.uid(), before.gid(), before.mtime_nsec()), (after.ino(), after.mode(), after.uid(), after.gid(), after.mtime_nsec()));
-    assert_eq!(fs::read(&saved).unwrap(), FRAME);
-    assert!(!Path::new(&e.src).exists());
-    assert!(f.db.journal_events(e.id).unwrap().iter().any(|e| e.kind == "refused"));
-}
-
-#[test]
-fn review_recorded_companion_vanishing_never_enables_frame_only() {
-    let f = fx();
-    let e = f.quarantined("2015", "frame.bmp", true);
-    let moved = f.renamed("2015", "renamed");
-    let now = q(&moved).join("frame.bmp");
-    let saved_side = f.top.join("saved.xmp");
-    fs::rename(now.with_extension("xmp"), &saved_side).unwrap();
-    let result = undo_found(&f.db, e.id, now.to_str().unwrap()).unwrap_err();
-    assert!(unrecovered(&result).is_some());
-    assert_eq!(fs::read(&now).unwrap(), FRAME);
-    assert_eq!(fs::read(saved_side).unwrap(), b"<x:xmpmeta/>");
-    assert!(!Path::new(&e.src).exists());
-}
-
+/// A quarantine folder of the run replaced by a link leads nowhere.
 #[test]
 fn review_leaf_quarantine_symlink_does_not_expand_scope() {
     use std::os::unix::fs::symlink;
@@ -594,48 +522,131 @@ fn review_leaf_quarantine_symlink_does_not_expand_scope() {
     let fake = f.archive.join("fake");
     fs::create_dir(&fake).unwrap();
     symlink(q(&away), q(&fake)).unwrap();
-    let result = undo(&f.db, e.id).unwrap_err();
-    assert!(unrecovered(&result).is_some());
-    assert_eq!(fs::read(q(&away).join("frame.bmp")).unwrap(), FRAME);
+    let s = one(&undo_preview(&f.db, &e).unwrap());
+    assert_eq!(s.finding, SoughtFinding::NotFound, "{s:?}");
+    undo_reports(&f, e.id);
+    unmoved(&[(&q(&away).join("frame.bmp"), FRAME)]);
 }
 
+/// B6: a Photos library, or anything of Lightroom's, inside a quarantine
+/// folder is never entered — and the search says it did not look there.
 #[test]
-fn review_change_at_move_boundary_must_have_typed_search_refusal() {
+fn review_photoslibrary_inside_quarantine_must_not_be_entered() {
+    for bundle in [
+        "Foreign.photoslibrary",
+        "Cat Previews.lrdata",
+        "Cat.lrcat-data",
+    ] {
+        let f = fx();
+        let e = f.quarantined("2015", "frame.bmp", false);
+        let moved = f.renamed("2015", "renamed");
+        let lib = q(&moved).join(bundle);
+        fs::create_dir(&lib).unwrap();
+        let now = lib.join("frame.bmp");
+        fs::rename(q(&moved).join("frame.bmp"), &now).unwrap();
+        let s = one(&undo_preview(&f.db, &e).unwrap());
+        assert_eq!(
+            s.finding,
+            SoughtFinding::ProtectedSkipped,
+            "{bundle}: {s:?}"
+        );
+        assert_eq!(s.skipped, vec![at(&lib)], "{bundle}");
+        assert!(s.hits.is_empty(), "{bundle}: entered");
+        let (_, said) = undo_reports(&f, e.id);
+        assert!(said.contains(&at(&lib)), "{said}");
+        unmoved(&[(&now, FRAME)]);
+    }
+}
+
+/// B8: a foreign file where the frame was shown changes the answer of the
+/// next search, typed and recorded; nothing of it is touched.
+#[test]
+fn review_foreign_replacement_after_preview_preserves_metadata_and_refuses() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let f = fx();
     let e = f.quarantined("2015", "frame.bmp", false);
     let moved = f.renamed("2015", "renamed");
     let now = q(&moved).join("frame.bmp");
-    let saved = f.top.join("retained-frame.bmp");
-    let saved2 = saved.clone();
-    let _ = undo_preview(&f.db, &e).unwrap();
-    let _guard = crate::race::before_move(move |src, _| {
-        fs::rename(src, &saved2)?;
-        fs::write(src, b"foreign payload")?;
-        fs::set_permissions(src, fs::Permissions::from_mode(0o640))?;
-        Ok(())
-    });
-    let err = undo_found(&f.db, e.id, now.to_str().unwrap()).unwrap_err();
-    assert_eq!(fs::read(&now).unwrap(), b"foreign payload");
-    assert_eq!(fs::metadata(&now).unwrap().mode() & 0o777, 0o640);
-    assert_eq!(fs::read(saved).unwrap(), FRAME);
+    assert_eq!(
+        one(&undo_preview(&f.db, &e).unwrap()).finding,
+        SoughtFinding::Found
+    );
+    let saved = f.top.join("saved-frame.bmp");
+    fs::rename(&now, &saved).unwrap();
+    fs::write(&now, vec![b'X'; FRAME.len()]).unwrap();
+    fs::set_permissions(&now, fs::Permissions::from_mode(0o640)).unwrap();
+    let before = fs::symlink_metadata(&now).unwrap();
+    let (sought, _) = undo_reports(&f, e.id);
+    assert_eq!(sought[0].finding, SoughtFinding::NotFound);
+    let after = fs::symlink_metadata(&now).unwrap();
+    assert_eq!(fs::read(&now).unwrap(), vec![b'X'; FRAME.len()]);
+    assert_eq!(
+        (
+            before.ino(),
+            before.mode(),
+            before.uid(),
+            before.gid(),
+            before.mtime_nsec()
+        ),
+        (
+            after.ino(),
+            after.mode(),
+            after.uid(),
+            after.gid(),
+            after.mtime_nsec()
+        )
+    );
+    assert_eq!(fs::read(&saved).unwrap(), FRAME);
     assert!(!Path::new(&e.src).exists());
-    let events = f.db.journal_events(e.id).unwrap();
-    eprintln!("REVIEW late refusal: {err:#}; Unrecovered={}; events={events:?}", unrecovered(&err).is_some());
-    assert!(unrecovered(&err).is_some(), "post-search refusal loses the typed sought/preview binding");
 }
 
+/// B8: every answer is typed and recorded the moment the undo gives it.
 #[test]
-fn review_dangling_companion_must_fail_closed() {
-    use std::os::unix::fs::symlink;
-    let f = fx();
-    let e = f.quarantined("2015", "frame.bmp", false);
-    let moved = f.renamed("2015", "renamed");
-    let now = q(&moved).join("frame.bmp");
-    let side = now.with_extension("xmp");
-    symlink("unavailable-edits.xmp", &side).unwrap();
-    let result = undo_found(&f.db, e.id, now.to_str().unwrap());
-    assert_eq!(fs::read_link(side).unwrap(), PathBuf::from("unavailable-edits.xmp"));
-    eprintln!("REVIEW dangling companion: {result:?}");
-    assert!(result.is_err(), "unknown companion treated as absence");
+fn every_answer_of_the_search_is_typed_and_recorded() {
+    use std::os::unix::fs::PermissionsExt;
+    type Stage = fn(&Fx, &Path);
+    let cases: [(SoughtFinding, Stage); 6] = [
+        (SoughtFinding::Found, |_, _| {}),
+        (SoughtFinding::NotFound, |_, now| {
+            fs::remove_file(now).unwrap()
+        }),
+        (SoughtFinding::Ambiguous, |_, now| {
+            fs::hard_link(now, now.with_file_name("twin.bmp")).unwrap()
+        }),
+        (SoughtFinding::Candidate, |_, now| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            fs::OpenOptions::new()
+                .append(true)
+                .open(now)
+                .unwrap()
+                .write_all(b"!")
+                .unwrap();
+        }),
+        (SoughtFinding::ProtectedSkipped, |_, now| {
+            fs::create_dir(now.with_file_name("X.photoslibrary")).unwrap()
+        }),
+        (SoughtFinding::Uncertain, |f, _| {
+            let d = q(&f.archive.join("closed"));
+            fs::create_dir_all(&d).unwrap();
+            fs::set_permissions(&d, fs::Permissions::from_mode(0o000)).unwrap();
+        }),
+    ];
+    use std::io::Write;
+    for (want, stage) in cases {
+        let f = fx();
+        let e = f.quarantined("2015", "frame.bmp", false);
+        let moved = f.renamed("2015", "renamed");
+        let now = q(&moved).join("frame.bmp");
+        stage(&f, &now);
+        let closed = q(&f.archive.join("closed"));
+        if want == SoughtFinding::Uncertain && fs::read_dir(&closed).is_ok() {
+            continue; // privileges that read anything
+        }
+        let (sought, _) = undo_reports(&f, e.id);
+        if closed.exists() {
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert_eq!(sought[0].finding, want, "{sought:?}");
+        assert!(!Path::new(&e.src).exists(), "{want:?}: moved home");
+    }
 }

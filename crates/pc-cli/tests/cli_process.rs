@@ -825,9 +825,10 @@ fn reviewer_el_2rpxq_no_system_file_or_companion_ever_moves() {
 }
 
 #[test]
-fn a_copy_whose_folder_was_renamed_comes_back_only_from_the_place_the_undo_showed() {
+fn a_copy_whose_folder_was_renamed_is_found_by_the_undo_and_only_named() {
     // el-6byp2: the default quarantine sits in the photo's folder, and the
-    // user renamed that folder after `apply`.
+    // user renamed that folder after `apply`. The undo finds the copy by
+    // its evidence, says where and how, and moves nothing — every time.
     let cli = Cli::new();
     std::fs::create_dir_all(cli.archive.join("2015")).unwrap();
     cli.photo("2015/frame.jpg", 70);
@@ -855,44 +856,25 @@ fn a_copy_whose_folder_was_renamed_comes_back_only_from_the_place_the_undo_showe
             .id
             .to_string()
     };
-    let attempt = |extra: &[&str]| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup"))
+    for _ in 0..2 {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup"))
             .arg("--db")
             .arg(&cli.db)
             .args(["derived", "undo", "--journal", &entry])
-            .args(extra)
             .output()
-            .unwrap()
-    };
-
-    // Asked plainly: refused, and told where it is and how to bring it.
-    let out = attempt(&[]);
-    assert!(!out.status.success());
-    let said = String::from_utf8_lossy(&out.stdout);
-    let hint = format!("--found '{}'", held.display());
-    assert!(said.contains(&hint), "{said}");
-    assert_eq!(
-        std::fs::read(&held).unwrap(),
-        bytes,
-        "moved without a preview"
-    );
-
-    // Bound to another place: refused, nothing moved.
-    let elsewhere = cli.archive.join("frame copy.jpg");
-    let out = attempt(&["--found", elsewhere.to_str().unwrap()]);
-    assert!(!out.status.success());
-    assert_eq!(std::fs::read(&held).unwrap(), bytes);
-    assert!(!copy.exists() && !elsewhere.exists());
-
-    // Bound to the place shown: it comes home.
-    let out = attempt(&["--found", held.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(std::fs::read(&copy).unwrap(), bytes);
-    assert!(!held.exists());
+            .unwrap();
+        assert!(!out.status.success());
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(said.contains(&held.display().to_string()), "{said}");
+        assert!(said.contains("found by its evidence"), "{said}");
+        assert!(said.contains("return it by hand"), "{said}");
+        assert_eq!(std::fs::read(&held).unwrap(), bytes, "moved");
+        assert!(!copy.exists());
+    }
 }
 
 #[test]
@@ -905,18 +887,45 @@ fn review_cli_report_only_names_found_file_and_preserves_sidecar() {
     let dst = q.join("frame.bmp");
     std::fs::write(&dst, b"BM synthetic review frame").unwrap();
     let db = pc_db::Db::open(&cli.db).unwrap();
-    let run = db.start_run(&[cli.archive.display().to_string()], "review").unwrap();
-    let moved = pc_db::Moved {src:src.display().to_string(), dst:dst.display().to_string(), proof:pc_core::proof::Proof::of(&std::fs::metadata(&dst).unwrap())};
-    let id = db.journal_begin(&pc_db::NewJournalEntry { run_id:run, op:"quarantine-file", target_id:None, src:&moved.src, dst:Some(&moved.dst), size:25, file_count:1, manifest:&[moved.clone()] }).unwrap();
-    db.journal_finish(id, pc_db::JournalStatus::Done, None).unwrap();
+    let run = db
+        .start_run(&[cli.archive.display().to_string()], "review")
+        .unwrap();
+    let moved = pc_db::Moved {
+        src: src.display().to_string(),
+        dst: dst.display().to_string(),
+        proof: pc_core::proof::Proof::of(&std::fs::metadata(&dst).unwrap()),
+    };
+    let id = db
+        .journal_begin(&pc_db::NewJournalEntry {
+            run_id: run,
+            op: "quarantine-file",
+            target_id: None,
+            src: &moved.src,
+            dst: Some(&moved.dst),
+            size: 25,
+            file_count: 1,
+            manifest: std::slice::from_ref(&moved),
+        })
+        .unwrap();
+    db.journal_finish(id, pc_db::JournalStatus::Done, None)
+        .unwrap();
     drop(db);
     let renamed = cli.archive.join("renamed");
     std::fs::rename(old, &renamed).unwrap();
     let found = renamed.join(pc_core::QUARANTINE_DIR).join("frame.bmp");
     let side = found.with_extension("xmp");
     std::fs::write(&side, b"foreign companion").unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup")).arg("--db").arg(&cli.db).args(["derived","undo","--journal",&id.to_string()]).output().unwrap();
-    let text = format!("{}\n{}", String::from_utf8_lossy(&out.stdout),String::from_utf8_lossy(&out.stderr));
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup"))
+        .arg("--db")
+        .arg(&cli.db)
+        .args(["derived", "undo", "--journal", &id.to_string()])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     eprintln!("REVIEW CLI report only: {text}");
     assert!(!out.status.success());
     assert!(text.contains(found.to_str().unwrap()));

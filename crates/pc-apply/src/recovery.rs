@@ -60,9 +60,9 @@ pub struct Item {
     /// recorded anything beyond the manifest.
     pub located: Option<String>,
     /// What a search by evidence found, when its recorded place in
-    /// quarantine led nowhere (module `sought`). When the tool may bring
-    /// it back itself, `dst` is the place found and `standing` is
-    /// [`Standing::Moved`]; otherwise the item says why it is only shown.
+    /// quarantine led nowhere (module `sought`). Only reported: the item
+    /// stays [`Standing::Gone`], keeps the entry open, and says where the
+    /// file is and how that was proven, for a person to return it.
     pub sought: Option<pc_db::Sought>,
 }
 
@@ -77,7 +77,7 @@ impl Item {
     }
 
     fn why_here(&self) -> Option<String> {
-        if let Some(s) = self.sought.as_ref().filter(|s| s.movable().is_none()) {
+        if let Some(s) = &self.sought {
             return Some(crate::sought::shown(s));
         }
         Some(match &self.standing {
@@ -129,7 +129,7 @@ fn spot(path: &str, proof: Option<&Proof>) -> Spot {
 /// The evidence against what is at `path`, by [`Proof::verify`]: through
 /// an open descriptor when the evidence records a hash, so the content is
 /// compared too; a hash that cannot be read again is not a match.
-pub(crate) fn verdict_at(path: &str, p: &Proof, md: &fs::Metadata) -> Verdict {
+fn verdict_at(path: &str, p: &Proof, md: &fs::Metadata) -> Verdict {
     if p.blake3.is_none() || !md.is_file() {
         return p.check(md);
     }
@@ -325,20 +325,15 @@ fn item_of(p: &Pair) -> Item {
         src: p.look.src.clone(),
         dst: p.look.dst.clone(),
         standing,
-        located: match &p.sought {
-            Some(s) if s.movable().is_some() => Some(crate::sought::shown(s)),
-            _ => p.note.clone(),
-        },
+        located: p.note.clone(),
         sought: p.sought.clone(),
     }
 }
 
 /// Every item whose recorded place in quarantine leads nowhere is looked
-/// for by its evidence (module `sought`); this only reads. When the tool
-/// may bring it back itself, its pair looks for it at the place found —
-/// where it is proven once more when it is held for its move.
-fn seek(db: &Db, pairs: &mut [Pair]) -> Result<()> {
-    let members = pairs.len();
+/// for by its evidence (module `sought`). This only reads, and changes
+/// nothing about the item but what it reports.
+fn seek(db: &Db, entry: &JournalEntry, pairs: &mut [Pair]) -> Result<()> {
     for p in pairs.iter_mut() {
         if p.changed.is_some()
             || crate::sought::quarantine_of(Path::new(&p.rec.dst)).is_none()
@@ -346,37 +341,34 @@ fn seek(db: &Db, pairs: &mut [Pair]) -> Result<()> {
         {
             continue;
         }
-        let s = crate::sought::seek(db, &p.rec, &p.look, members)?;
-        if let Some(at) = s.movable() {
-            p.look.dst = at.to_string();
-        }
-        p.sought = Some(s);
+        p.sought = Some(crate::sought::seek(db, entry, &p.rec, &p.look)?);
     }
     Ok(())
 }
 
-/// Before anything moves: what was searched, against the preview the
-/// operation is bound to (`previewed`: the place that preview showed). The
-/// search goes into the history either way. Only a frame alone, found where
-/// the preview showed it, goes on to its move; anything else refuses the
-/// entry with a typed [`crate::Unrecovered`], nothing moved.
-fn settle(db: &Db, id: i64, phase: &str, pairs: &[Pair], previewed: Option<&str>) -> Result<()> {
+/// Before anything moves: an entry with any item searched by evidence is
+/// refused whole, nothing moved — the tool never brings back what a search
+/// found (director decision after review el-1oudi). Every search goes into
+/// the entry's history as it is, structured, and into the typed
+/// [`crate::Unrecovered`] the caller gets.
+fn report(db: &Db, id: i64, phase: &str, pairs: &[Pair]) -> Result<()> {
     let sought: Vec<pc_db::Sought> = pairs.iter().filter_map(|p| p.sought.clone()).collect();
-    if sought.is_empty() && previewed.is_none() {
+    if sought.is_empty() {
         return Ok(());
     }
-    let movable = match sought.as_slice() {
-        [one] => one.movable(),
-        _ => None,
-    };
-    let refuse = |text: String| -> anyhow::Error {
-        let e: anyhow::Error = crate::Unrecovered {
-            sought: sought.clone(),
-            previewed: previewed.map(str::to_string),
-            text: text.clone(),
-        }
-        .into();
-        match db.journal_event_sought(id, phase, "refused", &text, &sought, previewed) {
+    let text = pc_core::tf!(
+        "{0}: ничего не перенесено — {1}",
+        "{0}: nothing was moved — {1}",
+        phase,
+        listing(&pairs.iter().map(item_of).collect::<Vec<_>>())
+    );
+    let e: anyhow::Error = crate::Unrecovered {
+        sought: sought.clone(),
+        text: text.clone(),
+    }
+    .into();
+    Err(
+        match db.journal_event_sought(id, phase, "refused", &text, &sought) {
             Ok(()) => e,
             Err(pe) => e.context(pc_core::tf!(
                 "журнал не принял запись об этом ({0}); запись {1} не дополнена",
@@ -384,45 +376,38 @@ fn settle(db: &Db, id: i64, phase: &str, pairs: &[Pair], previewed: Option<&str>
                 format!("{pe:#}"),
                 id
             )),
-        }
-    };
-    let now = || listing(&pairs.iter().map(item_of).collect::<Vec<_>>());
-    match (movable, previewed) {
-        (Some(at), Some(was)) if crate::sought::same_place(at, was) => {
-            let text = pc_core::tf!(
-                "{0}: найден по доказательству там, где его показал предпросмотр: {1}",
-                "{0}: found by its evidence where the preview showed it: {1}",
-                phase,
-                at
-            );
-            // In the history before the object leaves the place it was
-            // found at: no record, no move.
-            db.journal_event_sought(id, phase, "found", &text, &sought, previewed)
-        }
-        (Some(at), None) => Err(refuse(pc_core::tf!(
-            "{0}: ничего не перенесено — найден по доказательству вне записанного места: {1}; \
-             такой файл возвращается только по предпросмотру, который показал это место",
-            "{0}: nothing was moved — found by its evidence away from its recorded place: {1}; \
-             such a file comes back only from a preview that showed this place",
-            phase,
-            at
-        ))),
-        (_, Some(was)) => Err(refuse(pc_core::tf!(
-            "{0}: ничего не перенесено — изменилось после предпросмотра: он показал {1}, а \
-             сейчас: {2}; посмотрите предпросмотр заново",
-            "{0}: nothing was moved — changed since the preview: it showed {1}, and now: {2}; \
-             preview it again",
-            phase,
-            was,
-            now()
-        ))),
-        (None, None) => Err(refuse(pc_core::tf!(
-            "{0}: ничего не перенесено — {1}",
-            "{0}: nothing was moved — {1}",
-            phase,
-            now()
-        ))),
+        },
+    )
+}
+
+/// What a preview of an undo or a reconciliation searched by evidence,
+/// appended to the entry's history (`phase`, kind `sought`) the way the
+/// operation itself records it — so the web, which shows it in a preview
+/// and never runs a refused entry, leaves the same structured record as the
+/// command line. Unchanged since the entry's last such record: nothing is
+/// appended again. Writes nothing to the disk.
+pub fn record_sought(db: &Db, journal_id: i64, phase: &str, items: &[Item]) -> Result<()> {
+    let sought: Vec<pc_db::Sought> = items.iter().filter_map(|i| i.sought.clone()).collect();
+    if sought.is_empty() {
+        return Ok(());
     }
+    let last = db
+        .journal_events(journal_id)?
+        .into_iter()
+        .rev()
+        .find(|e| e.phase == phase && e.data.is_some());
+    if let Some(last) = last {
+        if last.sought().is_ok_and(|was| was == sought) {
+            return Ok(());
+        }
+    }
+    let text = pc_core::tf!(
+        "{0}, предпросмотр: {1}",
+        "{0}, preview: {1}",
+        phase,
+        listing(items)
+    );
+    db.journal_event_sought(journal_id, phase, "sought", &text, &sought)
 }
 
 /// What an undo of `entry` would find, file by file. Reads only: the web's
@@ -434,7 +419,7 @@ pub fn undo_preview(db: &Db, entry: &JournalEntry) -> Result<Vec<Item>> {
         .into_iter()
         .map(|m| pair_of(entry, m))
         .collect();
-    seek(db, &mut pairs)?;
+    seek(db, entry, &mut pairs)?;
     Ok(pairs.iter().map(item_of).collect())
 }
 
@@ -586,20 +571,10 @@ fn walk_back(
 }
 
 /// Walk a finished entry back: every file it moved, by its evidence, as one
-/// unit. A file found by its evidence away from its recorded place is not
-/// moved by this, only named: see [`undo_found`].
+/// unit. A file whose recorded place in quarantine leads nowhere is looked
+/// for by its evidence and only named, with the place and how it was
+/// proven; nothing of the entry moves.
 pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
-    undo_bound(db, journal_id, None)
-}
-
-/// [`undo`] as a preview showed it ([`undo_preview`]): the entry's one
-/// frame, found by its evidence at `previewed`. Searched again, and refused
-/// unless the answer is that same place.
-pub fn undo_found(db: &Db, journal_id: i64, previewed: &str) -> Result<Tally> {
-    undo_bound(db, journal_id, Some(previewed))
-}
-
-fn undo_bound(db: &Db, journal_id: i64, previewed: Option<&str>) -> Result<Tally> {
     let entry = db.journal_entry(journal_id)?.with_context(|| {
         pc_core::tf!("нет записи журнала {0}", "no journal entry {0}", journal_id)
     })?;
@@ -630,11 +605,11 @@ fn undo_bound(db: &Db, journal_id: i64, previewed: Option<&str>) -> Result<Tally
         adopt_held_evidence(db, journal_id, &mut list)?;
     }
     let mut pairs: Vec<Pair> = list.into_iter().map(|m| pair_of(&entry, m)).collect();
-    if let Err(e) = seek(db, &mut pairs) {
+    if let Err(e) = seek(db, &entry, &mut pairs) {
         let why = format!("{e:#}");
         return Err(told(db, journal_id, "undo", "refused", &why, e));
     }
-    settle(db, journal_id, "undo", &pairs, previewed)?;
+    report(db, journal_id, "undo", &pairs)?;
     let (arrived, came) = walk_back(db, journal_id, "undo", &pairs)?;
     let mut done = Tally {
         files_back: came.len() as u64,
@@ -733,7 +708,7 @@ fn reconcile_pairs(db: &Db, journal_id: i64) -> Result<(JournalEntry, Vec<Pair>)
         .into_iter()
         .map(|m| pair_of(&entry, m))
         .collect();
-    seek(db, &mut pairs)?;
+    seek(db, &entry, &mut pairs)?;
     Ok((entry, pairs))
 }
 
@@ -784,29 +759,18 @@ pub struct Reconciled {
 /// Only when every file of it is accounted for: at home and shown to be
 /// this one, or held and free to come back. Anything else leaves the entry
 /// `pending`, which is what it is, with the reason added to its history.
-/// A file found by its evidence away from its recorded place is not moved
-/// by this, only named: see [`reconcile_found`].
+/// A file whose recorded place in quarantine leads nowhere is looked for by
+/// its evidence and only named; nothing of the entry moves.
 pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
-    reconcile_bound(db, journal_id, None)
-}
-
-/// [`reconcile_undo`] as a preview showed it ([`reconcile`]): the entry's
-/// one frame, found by its evidence at `previewed`. Searched again, and
-/// refused unless the answer is that same place.
-pub fn reconcile_found(db: &Db, journal_id: i64, previewed: &str) -> Result<Reconciled> {
-    reconcile_bound(db, journal_id, Some(previewed))
-}
-
-fn reconcile_bound(db: &Db, journal_id: i64, previewed: Option<&str>) -> Result<Reconciled> {
     if let Some(entry) = db.journal_entry(journal_id)? {
         if let Err(e) = readable(&entry) {
             let why = format!("{e:#}");
             return Err(told(db, journal_id, "reconcile", "refused", &why, e));
         }
     }
-    let (_, found) = reconcile_pairs(db, journal_id)?;
-    settle(db, journal_id, "reconcile", &found, previewed)?;
-    let items: Vec<Item> = found.iter().map(item_of).collect();
+    let (_, read) = reconcile_pairs(db, journal_id)?;
+    report(db, journal_id, "reconcile", &read)?;
+    let items: Vec<Item> = read.iter().map(item_of).collect();
     if items.iter().any(|i| i.why().is_some()) {
         let why = pc_core::tf!(
             "сверка: ничего не перенесено — кадр со спутниками возвращается только целиком, а \
@@ -826,15 +790,7 @@ fn reconcile_bound(db: &Db, journal_id: i64, previewed: Option<&str>) -> Result<
         })?;
         let mut list = pending_list(&entry)?;
         adopt_held_evidence(db, journal_id, &mut list)?;
-        let mut pairs: Vec<Pair> = list.into_iter().map(|m| pair_of(&entry, m)).collect();
-        // The place settled above, not a second search: the object is
-        // proven there once more when it is held for its move.
-        for (p, f) in pairs.iter_mut().zip(&found) {
-            if f.sought.is_some() {
-                p.look.dst = f.look.dst.clone();
-                p.sought = f.sought.clone();
-            }
-        }
+        let pairs: Vec<Pair> = list.into_iter().map(|m| pair_of(&entry, m)).collect();
         (entry, pairs)
     };
     let (arrived, returned) = walk_back(db, journal_id, "reconcile", &pairs)?;

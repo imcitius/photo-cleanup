@@ -518,51 +518,47 @@ fn held_in_a_renamed_folder(f: &Fixture, folder: &str, renamed: &str) -> (PathBu
     let to = f.archive.join(renamed);
     std::fs::rename(f.archive.join(folder), &to).unwrap();
     let now = to.join(pc_core::QUARANTINE_DIR).join("frame.bmp");
-    (home, now.canonicalize().unwrap(), id)
+    (home, now, id)
 }
 
-/// el-6byp2: the web shows where the frame was found by its evidence, and
-/// the job is bound to that place, as `derived undo --found` is.
+/// el-6byp2: the web shows where the frame was found by its evidence and
+/// how, in pc-apply's own words — the ones the command line prints — and
+/// offers nothing to move; the search is in the entry's history once.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_frame_found_by_evidence_comes_back_from_the_place_its_preview_showed() {
+async fn a_frame_found_by_evidence_is_shown_by_the_undo_preview_and_never_moved() {
     let f = Fixture::new();
     let (home, now, id) = held_in_a_renamed_folder(&f, "2015", "2015 renamed");
 
     let preview = f.preview("journal-undo", json!({"journal_id":id})).await;
-    let items = preview["items"].as_array().unwrap();
-    assert_eq!(items.len(), 1, "{preview}");
+    assert!(preview["items"].as_array().unwrap().is_empty(), "{preview}");
+    assert_eq!(preview["sought"][0]["finding"], json!("found"), "{preview}");
     assert_eq!(
-        items[0]["found"],
+        preview["sought"][0]["hits"][0]["at"],
         json!(now.display().to_string()),
         "{preview}"
     );
-    assert_eq!(
-        items[0]["path"],
-        json!(now.display().to_string()),
-        "{preview}"
-    );
+    let why = preview["refusals"][0]["why"].as_str().unwrap().to_string();
+    let said = {
+        let db = f.state.db.lock().unwrap();
+        let e = db.journal_entry(id).unwrap().unwrap();
+        pc_apply::undo_preview(&db, &e).unwrap()[0].why().unwrap()
+    };
+    assert_eq!(why, said, "the web says other words than pc-apply");
+    assert!(why.contains(&now.display().to_string()), "{why}");
 
-    let done = f.apply(&preview).await;
-    assert_eq!(done["state"], "done", "{done}");
-    assert_eq!(std::fs::read(&home).unwrap(), b"BM a synthetic frame");
-    assert!(!now.exists());
-}
-
-/// Moved again after the preview: the preview no longer holds, and nothing
-/// moves.
-#[cfg(unix)]
-#[tokio::test]
-async fn a_frame_moved_again_after_its_preview_stays_where_it_is() {
-    let f = Fixture::new();
-    let (home, now, id) = held_in_a_renamed_folder(&f, "2016", "2016 renamed");
-    let preview = f.preview("journal-undo", json!({"journal_id":id})).await;
-    assert_eq!(
-        preview["items"][0]["found"],
-        json!(now.display().to_string())
-    );
-    let again = f.archive.join("again");
-    std::fs::rename(f.archive.join("2016 renamed"), &again).unwrap();
+    // Asked again: the same search, not recorded twice.
+    let again = f.preview("journal-undo", json!({"journal_id":id})).await;
+    assert_eq!(again["sought"], preview["sought"]);
+    let recorded = {
+        let db = f.state.db.lock().unwrap();
+        db.journal_events(id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "sought")
+            .count()
+    };
+    assert_eq!(recorded, 1);
 
     let (s, v) = f
         .req(
@@ -572,14 +568,10 @@ async fn a_frame_moved_again_after_its_preview_stays_where_it_is() {
         )
         .await;
     if s == 202 {
-        let j = f.wait(v["job_id"].as_i64().unwrap()).await;
-        assert_ne!(j["state"], "done", "{j}");
+        f.wait(v["job_id"].as_i64().unwrap()).await;
     }
     assert!(!home.exists());
-    assert_eq!(
-        std::fs::read(again.join(pc_core::QUARANTINE_DIR).join("frame.bmp")).unwrap(),
-        b"BM a synthetic frame"
-    );
+    assert_eq!(std::fs::read(&now).unwrap(), b"BM a synthetic frame");
 }
 
 #[cfg(unix)]
@@ -590,11 +582,31 @@ async fn review_report_only_reconcile_must_show_found_place() {
     std::fs::write(now.with_extension("xmp"), b"foreign edits").unwrap();
     {
         let db = f.state.db.lock().unwrap();
-        db.journal_finish(id, pc_db::JournalStatus::Pending, None).unwrap();
+        db.journal_finish(id, pc_db::JournalStatus::Pending, None)
+            .unwrap();
     }
-    let (status, preview) = f.req("POST", "/api/preview", json!({"kind":"journal-reconcile","params":{"journal_id":id}})).await;
+    let (status, preview) = f
+        .req(
+            "POST",
+            "/api/preview",
+            json!({"kind":"journal-reconcile","params":{"journal_id":id}}),
+        )
+        .await;
     eprintln!("REVIEW web report-only: status={status}; {preview}");
     assert!(!home.exists());
     assert_eq!(std::fs::read(&now).unwrap(), b"BM a synthetic frame");
-    assert!(preview.to_string().contains(now.to_str().unwrap()), "web hides the found place and says file is at neither path");
+    assert!(
+        preview.to_string().contains(now.to_str().unwrap()),
+        "web hides the found place and says file is at neither path"
+    );
+    // The words of pc-apply, the ones the command line prints: the place,
+    // and the companion beside it, named and not judged.
+    let why = preview["refusals"][0]["why"].as_str().unwrap().to_string();
+    let said = {
+        let db = f.state.db.lock().unwrap();
+        pc_apply::reconcile(&db, id).unwrap()[0].why().unwrap()
+    };
+    assert_eq!(why, said);
+    assert!(why.contains("companion"), "{why}");
+    assert_eq!(preview["sought"][0]["finding"], json!("found"), "{preview}");
 }

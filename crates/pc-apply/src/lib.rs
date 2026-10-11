@@ -45,8 +45,8 @@ pub use purge::{
     KeptWhy, OrphanKept, OrphanWhy, PurgeKept, PurgeStage, PurgeStopped,
 };
 pub use recovery::{
-    reconcile, reconcile_found, reconcile_undo, undo, undo_found, undo_offered, undo_preview, Item,
-    Reconciled, Standing,
+    reconcile, reconcile_undo, record_sought, undo, undo_offered, undo_preview, Item, Reconciled,
+    Standing,
 };
 pub use roots::RunRoots;
 pub use sought::{unrecovered, Unrecovered};
