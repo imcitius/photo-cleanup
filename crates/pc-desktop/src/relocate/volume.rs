@@ -427,6 +427,17 @@ use platform::probe_path;
 mod tests {
     use super::*;
 
+    /// A directory opened for [`check_open`]. Windows opens a directory
+    /// only with `FILE_FLAG_BACKUP_SEMANTICS`; `File::open` alone is
+    /// refused with "access denied" (el-2yxx0).
+    fn open_dir(path: &Path) -> fs::File {
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        std::os::windows::fs::OpenOptionsExt::custom_flags(&mut options, 0x0200_0000);
+        options.open(path).unwrap()
+    }
+
     fn apfs() -> Volume {
         Volume {
             filesystem: "apfs".into(),
@@ -473,17 +484,13 @@ mod tests {
 
     /// The folder the tests run in is on an ordinary local volume.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
     fn a_missing_target_is_judged_by_its_nearest_existing_folder() {
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("not/yet/there");
         assert_eq!(check_target(&target), Ok(()));
         assert_eq!(check_exclusive_rename(&target), Ok(()));
         assert!(!tmp.path().join("not").exists());
-        let dir = fs::File::open(tmp.path()).unwrap();
+        let dir = open_dir(tmp.path());
         assert_eq!(check_open(&dir), Ok(()));
     }
 

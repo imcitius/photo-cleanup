@@ -2729,11 +2729,13 @@ fn open_created_dir(path: &Path) -> io::Result<fs::File> {
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
     const GENERIC_READ: u32 = 0x8000_0000;
-    const DELETE: u32 = 0x0001_0000;
-    // `DELETE`: release deletes this very object through the handle
-    // (`windows_acl::delete_tree`), never whatever is at the name then.
+    // Read access only for the check: asking for `DELETE` on an entry not
+    // yet proven ours conflicts with any other process that holds it open
+    // without `FILE_SHARE_DELETE` (a sharing violation, os error 32, seen on
+    // the CI runner for `C:\Windows`, el-2yxx0), and the refusal would then
+    // name the wrong reason.
     let file = fs::OpenOptions::new()
-        .access_mode(GENERIC_READ | DELETE)
+        .access_mode(GENERIC_READ)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
     let meta = file.metadata()?;
@@ -2743,7 +2745,11 @@ fn open_created_dir(path: &Path) -> io::Result<fs::File> {
         volume::check_open(&file).and_then(|()| windows_acl::check(&file))
     };
     checked.map_err(|why| io::Error::new(io::ErrorKind::AlreadyExists, why))?;
-    Ok(file)
+    // `DELETE`: release deletes this very object through the handle
+    // (`windows_acl::delete_tree`), never whatever is at the name then. The
+    // checked handle is reopened through itself, not through the name, so
+    // the object that gains `DELETE` is the one just checked.
+    windows_acl::reopen_for_delete(&file)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2906,11 +2912,12 @@ mod windows_acl {
     use windows_sys::Win32::Storage::FileSystem::{
         CreateDirectoryW, FileDispositionInfo, FileDispositionInfoEx, FileFullDirectoryInfo,
         FileFullDirectoryRestartInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-        FileIdType, GetFileInformationByHandleEx, OpenFileById, SetFileInformationByHandle, DELETE,
+        FileIdType, GetFileInformationByHandle, GetFileInformationByHandleEx, OpenFileById,
+        ReOpenFile, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
         FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
         FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_ID_BOTH_DIR_INFO,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_GENERIC_READ, FILE_ID_BOTH_DIR_INFO,
         FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
     };
@@ -3079,8 +3086,14 @@ mod windows_acl {
         dacl: *mut ACL,
         sd: PSECURITY_DESCRIPTOR,
     ) -> Result<(), String> {
+        // Every reason is named, not only the first: under an elevated
+        // administrator token Windows makes the Administrators group the
+        // owner of a folder created with default permissions, so such a
+        // folder fails the owner check *and* the inheritance check, and the
+        // message has to say both (seen on the CI runner, el-2yxx0).
+        let mut reasons: Vec<String> = Vec::new();
         if owner.is_null() || EqualSid(owner, user.sid()) == 0 {
-            return Err("it belongs to another account, not to this user".into());
+            reasons.push("it belongs to another account, not to this user".into());
         }
         let (mut control, mut revision) = (0u16, 0u32);
         if GetSecurityDescriptorControl(sd, &mut control, &mut revision) == 0 {
@@ -3090,10 +3103,11 @@ mod windows_acl {
             ));
         }
         if control & SE_DACL_PROTECTED == 0 {
-            return Err("its permissions are inherited from the parent folder".into());
+            reasons.push("its permissions are inherited from the parent folder".into());
         }
         if dacl.is_null() {
-            return Err("it has no access list, so everybody has full access".into());
+            reasons.push("it has no access list, so everybody has full access".into());
+            return Err(reasons.join("; "));
         }
         let mut info: ACL_SIZE_INFORMATION = mem::zeroed();
         if GetAclInformation(
@@ -3122,13 +3136,21 @@ mod windows_acl {
                 ACCESS_ALLOWED_ACE_TYPE => {
                     let sid = (&raw mut (*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart).cast();
                     if EqualSid(sid, user.sid()) == 0 {
-                        return Err("its access list lets other accounts in".into());
+                        reasons.push("its access list lets other accounts in".into());
+                        break;
                     }
                 }
-                _ => return Err("its access list has entries this check does not know".into()),
+                _ => {
+                    reasons.push("its access list has entries this check does not know".into());
+                    break;
+                }
             }
         }
-        Ok(())
+        if reasons.is_empty() {
+            Ok(())
+        } else {
+            Err(reasons.join("; "))
+        }
     }
 
     /// The entry `name` in the directory open as `dir`, found by listing the
@@ -3204,6 +3226,50 @@ mod windows_acl {
         Ok(())
     }
 
+    /// Volume serial number and file index of the object behind `handle`.
+    fn identity(handle: HANDLE) -> io::Result<(u32, u64)> {
+        // SAFETY: a plain C struct, for which all zeroes is a valid value.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+        // SAFETY: `handle` is open; `info` is writable for the call.
+        if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((
+            info.dwVolumeSerialNumber,
+            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        ))
+    }
+
+    /// The object open as `file`, opened once more through that handle —
+    /// never through a name — with `DELETE` added (`ReOpenFile`). The new
+    /// handle must be the same object (volume serial and file index), or
+    /// it is refused.
+    pub(super) fn reopen_for_delete(file: &fs::File) -> io::Result<fs::File> {
+        use std::os::windows::io::FromRawHandle;
+        let handle = file.as_raw_handle() as HANDLE;
+        // SAFETY: `handle` is open for the call; a returned handle is new
+        // and owned by the `File` below.
+        let again = unsafe {
+            ReOpenFile(
+                handle,
+                FILE_GENERIC_READ | DELETE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+        };
+        if again == INVALID_HANDLE_VALUE || again.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: a fresh handle nobody else owns.
+        let again = unsafe { fs::File::from_raw_handle(again.cast()) };
+        if identity(handle)? != identity(again.as_raw_handle() as HANDLE)? {
+            return Err(io::Error::other(
+                "the handle opened for deleting is not the checked folder",
+            ));
+        }
+        Ok(again)
+    }
+
     /// Where the object open as `file` is now.
     pub(super) fn final_path(file: &fs::File) -> Option<std::path::PathBuf> {
         use std::os::windows::ffi::OsStringExt;
@@ -3244,19 +3310,31 @@ mod windows_acl {
     }
 
     fn delete_handle(handle: HANDLE, directory: bool) -> io::Result<()> {
+        // Each failure names its step: a bare os error from deep inside a
+        // tree says nothing about which call refused (el-2yxx0).
+        let step = |what: &'static str| {
+            move |e: io::Error| io::Error::new(e.kind(), format!("{what}: {e}"))
+        };
         if directory {
-            for id in child_ids(handle)? {
-                let child = open_by_id(handle, id)?;
+            for id in child_ids(handle).map_err(step("listing a folder"))? {
+                let child = open_by_id(handle, id).map_err(step("opening an entry by id"))?;
                 let attributes = {
                     use std::os::windows::fs::MetadataExt;
-                    child.metadata()?.file_attributes()
+                    child
+                        .metadata()
+                        .map_err(step("reading an entry's attributes"))?
+                        .file_attributes()
                 };
                 let is_dir = attributes & FILE_ATTRIBUTE_DIRECTORY != 0
                     && attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0;
                 delete_handle(child.as_raw_handle() as HANDLE, is_dir)?;
             }
         }
-        dispose(handle)
+        dispose(handle).map_err(step(if directory {
+            "deleting a folder"
+        } else {
+            "deleting a file"
+        }))
     }
 
     /// Open the entry with file ID `id` on the volume of `volume`, as
@@ -3336,7 +3414,11 @@ mod windows_acl {
             )
         };
         if ok == 0 {
-            return Err(io::Error::last_os_error());
+            let fallback = io::Error::last_os_error();
+            return Err(io::Error::new(
+                fallback.kind(),
+                format!("POSIX delete: {e}; delete on close: {fallback}"),
+            ));
         }
         Ok(())
     }
@@ -3926,10 +4008,6 @@ mod ownership_tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
     fn unchanged_entries_are_removed_without_leftovers() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("someone-elses.txt"), b"keep").unwrap();
@@ -4059,10 +4137,6 @@ mod ownership_tests {
     /// not touched, and our own staging is deleted where it was moved to.
     #[cfg(windows)]
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
     fn windows_deletes_our_object_not_what_is_at_the_name() {
         for &kind in FOREIGN {
             let temp = tempfile::tempdir().unwrap();
@@ -4164,11 +4238,11 @@ mod ownership_tests {
     }
 
     /// `copy_data`'s failure path returns what cleanup could not remove.
+    /// Unix only: a cleanup exists only for an admitted target, and Windows
+    /// refuses every target at admission (see the next test), so no copy
+    /// and no cleanup ever starts there.
+    #[cfg(unix)]
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
     fn abort_reports_a_replaced_staging_directory_and_keeps_it() {
         let temp = tempfile::tempdir().unwrap();
         let mut cleanup = Cleanup::new(namespace::admit(temp.path()).unwrap());
@@ -4192,6 +4266,21 @@ mod ownership_tests {
             "{text}"
         );
         assert!(cleanup.abort().is_empty());
+    }
+
+    /// Windows cannot yet prove that other users cannot redirect a target
+    /// path, so admission refuses it, and with it every copy, before any
+    /// staging folder is made. Nothing is created in the folder.
+    #[cfg(windows)]
+    #[test]
+    fn windows_refuses_a_target_before_anything_is_staged() {
+        let temp = tempfile::tempdir().unwrap();
+        let refusal = namespace::admit(temp.path()).unwrap_err();
+        assert!(
+            format!("{refusal:?}").contains("cannot yet prove"),
+            "{refusal:?}"
+        );
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
     }
 }
 
@@ -6361,10 +6450,6 @@ mod windows_registration_tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
     fn a_new_private_directory_passes_and_is_released() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(PARTIAL_DB);
@@ -6380,10 +6465,6 @@ mod windows_registration_tests {
     /// The el-3xm8 reproducer on Windows: a folder with default (inherited)
     /// permissions, with or without a photo, takes the name.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
     fn a_folder_with_inherited_permissions_is_refused_and_kept() {
         for with_photo in [true, false] {
             let temp = tempfile::tempdir().unwrap();
@@ -6487,10 +6568,6 @@ mod windows_registration_tests {
     /// The owner check on a real folder owned by another account: the
     /// Windows directory (TrustedInstaller). Opened read-only, not changed.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
     fn a_folder_of_another_account_is_refused() {
         let root = std::env::var_os("SystemRoot").expect("SystemRoot");
         let e = open_created_dir(Path::new(&root)).unwrap_err();
@@ -6501,10 +6578,6 @@ mod windows_registration_tests {
     /// it: deleted through handles, the junction as itself — the folder it
     /// points to keeps its photo.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
     fn a_tree_is_deleted_through_handles_without_following_junctions() {
         let temp = tempfile::tempdir().unwrap();
         let foreign = temp.path().join("photos-2015");
