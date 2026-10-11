@@ -37,7 +37,7 @@ fn staging_names(target: &Path) -> Vec<PathBuf> {
 /// exFAT. For a folder that exists (with someone's file in it) and for one
 /// still to be created: the move is refused with an error naming the
 /// target and why, nothing of the run is left in the target — no staging
-/// folder, no reservation, no private cleanup folder, no folder it made —
+/// folder, no reservation, no leftover folder, no folder it made —
 /// and a second attempt meets exactly the first one's state and answer.
 /// The source, its data and the bootstrap stay as they were.
 #[test]
@@ -86,16 +86,19 @@ fn a_volume_that_cannot_rename_without_replacing_is_refused_without_leftovers() 
 }
 
 /// `ENOTSUP` from the publication itself (the volume changed, or the call
-/// failed for once) while the cleanup's own renames still work: the run is
-/// undone completely — nothing it staged or reserved is left — the error
-/// names the target, and a retry once the call works again behaves exactly
-/// like a first attempt and completes the move.
+/// failed for once) while the cleanup's own renames still work. Round 3
+/// (el-2yxx0): nothing is deleted, so the run cannot be undone completely;
+/// instead every entry it staged or reserved is moved into a new leftover
+/// folder, the error is `Cleanup` naming the target, why, and each kept
+/// entry, and the names a retry needs are free. A retry once the call
+/// works again behaves like a first attempt, completes the move, and never
+/// touches the earlier leftover folders.
 #[test]
-fn an_unsupported_rename_at_publication_is_undone_and_a_retry_completes() {
+fn an_unsupported_rename_at_publication_is_set_aside_and_a_retry_completes() {
     let env = Env::new();
     let target = own_target(&env);
     let bootstrap = env.bootstrap();
-    for published in [THUMBS_DIR, DB_FILE] {
+    for (attempt, published) in [THUMBS_DIR, DB_FILE].into_iter().enumerate() {
         let name = std::ffi::CString::new(published).unwrap();
         let unsupported = at::fault::refuse(move |from, _| from == name.as_c_str());
         let error = move_data(&env.dirs, &env.layout, Source::System, &target, plenty)
@@ -107,25 +110,44 @@ fn an_unsupported_rename_at_publication_is_undone_and_a_retry_completes() {
             text.contains(&io::Error::from_raw_os_error(libc::ENOTSUP).to_string()),
             "{text}"
         );
-        assert!(!matches!(error, RelocateError::Cleanup { .. }), "{text}");
+        let RelocateError::Cleanup { left, .. } = &error else {
+            panic!("{error:?}");
+        };
         assert_eq!(staging_names(&target), Vec::<PathBuf>::new(), "{text}");
-        assert!(aside_dirs(&target).is_empty(), "{text}");
+        let folders = aside_dirs(&target);
+        assert_eq!(folders.len(), attempt + 1, "{text}");
+        let newest = folders
+            .iter()
+            .find(|f| left.iter().any(|l| l.contains(&f.display().to_string())))
+            .expect("the leftover folder is named");
+        assert!(newest.join(PARTIAL_DB).join(DB_FILE).is_file(), "{text}");
+        for suffix in SIDECARS {
+            assert!(sidecar(&newest.join(DB_FILE), suffix).is_file(), "{suffix}");
+        }
+        assert!(text.contains("safe to delete by hand"), "{text}");
         assert_eq!(env.bootstrap(), bootstrap);
         assert_eq!(env.chosen(), env.layout.dir);
     }
+    let kept: Vec<_> = aside_dirs(&target)
+        .into_iter()
+        .map(|f| (f.clone(), super::ownership_tests::tree(&f)))
+        .collect();
     let preview = preview_move_with(&env.dirs, &env.layout, Source::System, &target, plenty);
     assert!(preview.blockers.is_empty(), "{:?}", preview.reasons);
     move_data(&env.dirs, &env.layout, Source::System, &target, plenty).unwrap();
     assert_eq!(env.chosen(), target);
     assert_eq!(marker(&target.join(DB_FILE)), "исходная");
     assert!(!target.join(PARTIAL_DB).exists());
-    assert!(aside_dirs(&target).is_empty());
+    for (folder, tree) in kept {
+        assert_eq!(super::ownership_tests::tree(&folder), tree);
+    }
 }
 
 /// The trial rename works, every later one fails (a volume that changed
 /// under the run). The cleanup has no rename left to move its own entries
 /// aside with, and nothing replaces it: it does not fall back to deleting
-/// or renaming by name. What it made is kept — the staging folder with the
+/// or renaming by name. The leftover folder it made for them stays empty
+/// and goes with `rmdir`. What it made is kept — the staging folder with the
 /// copy inside, the empty reservations — and each is named in the error;
 /// the next attempt is refused because of them, naming each path, and
 /// changes nothing. The source and the bootstrap are untouched.
@@ -134,7 +156,8 @@ fn leftovers_that_cannot_be_moved_aside_are_kept_and_named_never_removed_by_name
     let env = Env::new();
     let target = own_target(&env);
     let bootstrap = env.bootstrap();
-    let unsupported = at::fault::refuse(|from, _| !from.to_bytes().starts_with(b"rename-probe"));
+    let unsupported =
+        at::fault::refuse(|from, _| !from.to_bytes().starts_with(PROBE_PREFIX.as_bytes()));
     let error =
         move_data(&env.dirs, &env.layout, Source::System, &target, plenty).expect_err("refused");
     drop(unsupported);

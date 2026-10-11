@@ -1739,6 +1739,8 @@ enum Step {
     /// [`Leftovers::settle`] found this run's entry at its name; it is
     /// about to be removed with `rmdir` (an empty folder) or set aside.
     BeforeMove,
+    /// The leftover folder (the path given) was made, not yet checked.
+    LeftoverCreated,
     /// Moved into the leftover folder (the path given), not yet checked
     /// there.
     Moved,
@@ -1833,11 +1835,15 @@ impl Leftovers {
     }
 
     /// The leftover folder in `parent`, made on first use.
-    fn folder(&mut self, parent: &Path) -> io::Result<&LeftoverFolder> {
+    fn folder(
+        &mut self,
+        parent: &Path,
+        race: &mut dyn FnMut(Step, &Path),
+    ) -> io::Result<&LeftoverFolder> {
         let i = match self.folders.iter().position(|f| f.parent == parent) {
             Some(i) => i,
             None => {
-                self.folders.push(LeftoverFolder::create(parent)?);
+                self.folders.push(LeftoverFolder::create(parent, race)?);
                 self.folders.len() - 1
             }
         };
@@ -1873,7 +1879,7 @@ impl Leftovers {
         if !kind.is_ours_at(&parent_dir, &entry, handle) {
             return self.lines.push(replaced(path, handle));
         }
-        let folder = match self.folder(parent) {
+        let folder = match self.folder(parent, race) {
             Ok(folder) => folder,
             Err(e) => return self.lines.push(kept(&e)),
         };
@@ -1925,7 +1931,7 @@ impl Leftovers {
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return self.lines.push(kept(&"it has no parent folder"));
         };
-        let folder = match self.folder(parent) {
+        let folder = match self.folder(parent, race) {
             Ok(folder) => folder,
             Err(e) => return self.lines.push(kept(&e)),
         };
@@ -1953,10 +1959,16 @@ impl Leftovers {
     }
 
     /// One line per entry still on disk, and per leftover folder what may
-    /// be done with it.
+    /// be done with it. A leftover folder that ended up empty (nothing
+    /// could be moved into it) goes with `rmdir`, like any empty folder.
     fn finish(self) -> Vec<String> {
         let mut lines = self.lines;
         for folder in &self.folders {
+            if entry_names(&folder.dir).is_ok_and(|names| names.is_empty())
+                && fs::remove_dir(folder.now()).is_ok()
+            {
+                continue;
+            }
             lines.push(if self.foreign {
                 format!(
                     "{} also holds an entry that is not this run's (see above): look at \
@@ -1988,8 +2000,7 @@ impl Leftovers {
 
 /// `rmdir` failed because the folder holds something.
 fn not_empty(e: &io::Error) -> bool {
-    e.kind() == io::ErrorKind::DirectoryNotEmpty
-        || (cfg!(unix) && e.raw_os_error() == Some(EEXIST))
+    e.kind() == io::ErrorKind::DirectoryNotEmpty || (cfg!(unix) && e.raw_os_error() == Some(EEXIST))
 }
 
 #[cfg(unix)]
@@ -2095,7 +2106,7 @@ struct LeftoverFolder {
 }
 
 impl LeftoverFolder {
-    fn create(parent: &Path) -> io::Result<Self> {
+    fn create(parent: &Path, race: &mut dyn FnMut(Step, &Path)) -> io::Result<Self> {
         let (y, mo, d, h, mi, s) = pc_core::time::civil_from_unix(pc_core::time::now_unix());
         let stamp = format!("{LEFTOVER_PREFIX}-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}");
         for n in 1..=100 {
@@ -2117,6 +2128,7 @@ impl LeftoverFolder {
                 }
                 Ok(()) => {}
             }
+            race(Step::LeftoverCreated, &path);
             return match open_created_dir(&path) {
                 Ok(dir) => Ok(Self {
                     parent: parent.to_path_buf(),
@@ -3797,7 +3809,8 @@ mod ownership_tests {
             assert!(!occupied(&sidecar(&db, suffix)), "{suffix}");
             let moved = sidecar(&folder.join(DB_FILE), suffix);
             assert!(
-                left.iter().any(|l| l.contains(&moved.display().to_string())),
+                left.iter()
+                    .any(|l| l.contains(&moved.display().to_string())),
                 "{suffix}: {left:?}"
             );
         }
@@ -3872,9 +3885,8 @@ mod ownership_tests {
             });
             assert_eq!(tree(outside.path()), out, "{kind:?}");
             assert!(
-                left.iter()
-                    .any(|l| l.contains(&wal.display().to_string())
-                        && l.contains("not this run's entry")),
+                left.iter().any(|l| l.contains(&wal.display().to_string())
+                    && l.contains("not this run's entry")),
                 "{kind:?}: {left:?}"
             );
         }
@@ -4268,7 +4280,8 @@ mod caller_tests {
                 let moved = sidecar(&asides[0].join(DB_FILE), suffix);
                 assert!(moved.is_file(), "{}", moved.display());
                 assert!(
-                    left.iter().any(|l| l.contains(&moved.display().to_string())),
+                    left.iter()
+                        .any(|l| l.contains(&moved.display().to_string())),
                     "{left:?}"
                 );
             }
@@ -4280,7 +4293,11 @@ mod caller_tests {
                 .filter(|n| !n.ends_with(".writer-lock"))
                 .collect();
             names.sort();
-            let leftover = asides[0].file_name().unwrap().to_string_lossy().into_owned();
+            let leftover = asides[0]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
             assert_eq!(names, [leftover, staging.to_string()], "{staging}");
             assert_eq!(env.bootstrap(), before);
             assert_eq!(env.chosen(), env.layout.dir);
@@ -4603,7 +4620,7 @@ mod publication_tests {
             assert_eq!(fs::read_dir(&saved).unwrap().count(), 0);
             assert!(left.contains(&saved.display().to_string()), "{left}");
             assert!(left.contains(&partial.display().to_string()), "{left}");
-            assert!(left.contains("replaced"), "{left}");
+            assert!(left.contains("not this run's entry"), "{left}");
             let text = result.as_ref().unwrap_err().to_string();
             assert!(text.contains(&saved.display().to_string()), "{text}");
             assert!(aside_dirs(&target).is_empty());
@@ -5870,15 +5887,13 @@ mod registration_tests {
 /// macOS extended ACLs at the registration boundary (review el-1wh7b): a
 /// parent with an inheritable `everyone` ACL opened every 0700 folder made
 /// in it to everybody, and such a folder was registered as private.
-/// Review el-5null: the private cleanup folder's *name* lives in the shared
-/// parent. Anyone who may rename entries there (another account with
-/// `delete_child`/`add_subdirectory`, or write on a non-sticky parent) can
-/// move the whole private folder away after our entry was proven ours in
-/// it and put a foreign tree under the old names — without ever looking
-/// inside the private folder. A cleanup that deletes by path then deletes
-/// the foreign tree. These hooks do exactly that between the proof and the
-/// delete (and at the other steps), then check that nothing foreign is
-/// touched and that the caller is told where things are.
+/// Review el-5null: the leftover folder's *name* lives in the shared
+/// parent. Anyone who may rename entries there can move the whole folder
+/// away after our entry was moved into it and put a foreign tree under the
+/// old names. Round 3 deletes nothing, so the foreign tree survives
+/// trivially; these hooks still do exactly that swap, and check that
+/// nothing foreign is touched, our own entries are kept and the caller is
+/// told where they are.
 #[cfg(all(test, unix))]
 mod aside_namespace_tests {
     use super::*;
@@ -5916,100 +5931,89 @@ mod aside_namespace_tests {
         photo
     }
 
-    /// The hook of the review: at `step`, rename the private folder that
-    /// holds `at` to `saved`, recreate its name and plant a foreign entry
-    /// under our entry's name.
-    fn swap_private_folder<'a>(
-        step: Step,
+    /// The hook of the review (el-sr0gt), carried to the leftover folder:
+    /// right after our entry was moved into it, rename that folder to
+    /// `saved`, recreate its name and plant a foreign entry under our
+    /// entry's name in it.
+    fn swap_leftover_folder<'a>(
         directory: bool,
         saved: &'a Path,
         planted: &'a mut Option<(PathBuf, Fingerprint)>,
     ) -> impl FnMut(Step, &Path) + 'a {
         move |now, at| {
-            if now == step && planted.is_none() {
-                let aside = at.parent().unwrap();
-                fs::rename(aside, saved).unwrap();
-                fs::create_dir(aside).unwrap();
+            if now == Step::Moved && planted.is_none() {
+                let folder = at.parent().unwrap();
+                fs::rename(folder, saved).unwrap();
+                fs::create_dir(folder).unwrap();
                 let photo = plant_foreign(at, directory);
                 *planted = Some((photo.clone(), fingerprint(&photo)));
             }
         }
     }
 
-    /// Directory staging, swap right before the delete (the review's case)
-    /// and right after the move (before the proof).
+    /// Directory staging. Round 3 contract: nothing is deleted at all, so
+    /// the review's assertion holds trivially — the foreign tree is intact.
+    /// Adjusted control assertion: our own copy is no longer "gone from the
+    /// renamed folder" but kept there, and the error says where.
     #[test]
-    fn a_renamed_private_folder_never_takes_a_foreign_tree_with_it() {
-        for step in [Step::BeforeDelete, Step::Moved] {
-            let temp = tempfile::tempdir().unwrap();
-            let path = temp.path().join("staging");
-            let owned = OwnedDirectory::create(&path).unwrap();
-            fs::write(path.join("own-copy"), b"ours").unwrap();
-            let saved = temp.path().join("saved-aside");
-            let mut planted = None;
-            let result =
-                owned.release_with(&mut swap_private_folder(step, true, &saved, &mut planted));
-            let (photo, before) = planted.expect("the hook ran");
-            assert_eq!(fingerprint(&photo), before, "{step:?}: {result:?}");
-            let aside = photo.parent().unwrap().parent().unwrap();
-            let error = result.expect_err("a moved private folder is reported");
-            assert!(error.contains(&aside.display().to_string()), "{error}");
-            assert!(error.contains("moved or replaced"), "{error}");
-            // Our own copy is gone from wherever the private folder went;
-            // the folder itself, now empty, is reported where it is.
-            assert_eq!(fs::read_dir(&saved).unwrap().count(), 0, "{step:?}");
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            assert!(
-                error.contains(&saved.canonicalize().unwrap().display().to_string()),
-                "{error}"
-            );
-            assert!(!path.exists());
-        }
+    fn a_renamed_leftover_folder_never_takes_a_foreign_tree_with_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let path = root.join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        fs::write(path.join("own-copy"), b"ours").unwrap();
+        let saved = root.join("saved-leftover");
+        let mut planted = None;
+        let result = owned.release_with(&mut swap_leftover_folder(true, &saved, &mut planted));
+        let (photo, before) = planted.expect("the hook ran");
+        assert_eq!(fingerprint(&photo), before, "{result:?}");
+        let error = result.expect_err("a run that left entries is reported");
+        assert_eq!(fs::read(saved.join("staging/own-copy")).unwrap(), b"ours");
+        assert!(error.contains(&saved.display().to_string()), "{error}");
+        assert!(!path.exists());
     }
 
-    /// The same for the empty sidecar reservations.
+    /// The same for the empty sidecar reservations: kept, not unlinked.
     #[test]
-    fn a_renamed_private_folder_never_takes_a_foreign_sidecar_with_it() {
-        for step in [Step::BeforeDelete, Step::Moved] {
-            let temp = tempfile::tempdir().unwrap();
-            let db = temp.path().join(DB_FILE);
-            let mut reservations = SidecarReservations::default();
-            reservations.claim(&db).unwrap();
-            let saved = temp.path().join("saved-aside");
-            let mut planted = None;
-            let left = reservations.release_with(&mut swap_private_folder(
-                step,
-                false,
-                &saved,
-                &mut planted,
-            ));
-            let (photo, before) = planted.expect("the hook ran");
-            assert_eq!(fingerprint(&photo), before, "{step:?}: {left:?}");
-            assert_eq!(left.len(), 1, "{left:?}");
-            let aside = photo.parent().unwrap();
-            assert!(left[0].contains(&aside.display().to_string()), "{left:?}");
-            assert_eq!(fs::read_dir(&saved).unwrap().count(), 0, "{step:?}");
-            for suffix in SIDECARS {
-                assert!(!sidecar(&db, suffix).exists(), "{suffix}");
-            }
+    fn a_renamed_leftover_folder_never_takes_a_foreign_sidecar_with_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let db = root.join(DB_FILE);
+        let mut reservations = SidecarReservations::default();
+        reservations.claim(&db).unwrap();
+        let saved = root.join("saved-leftover");
+        let mut planted = None;
+        let left =
+            reservations.release_with(&mut swap_leftover_folder(false, &saved, &mut planted));
+        let (photo, before) = planted.expect("the hook ran");
+        assert_eq!(fingerprint(&photo), before, "{left:?}");
+        for suffix in SIDECARS {
+            assert!(!occupied(&sidecar(&db, suffix)), "{suffix}");
+            let kept = sidecar(&saved.join(DB_FILE), suffix);
+            assert_eq!(fs::read(&kept).unwrap(), b"", "{suffix}");
+            assert!(
+                left.iter().any(|l| l.contains(&kept.display().to_string())),
+                "{suffix}: {left:?}"
+            );
         }
     }
 
     /// The parent itself is renamed and replaced by a folder with a foreign
-    /// entry under our name, right before our entry is moved aside: the
-    /// cleanup keeps working in the folder it checked, and the new one is
-    /// not touched.
+    /// entry under our name, right before our entry is settled: nothing is
+    /// done in the new folder (no leftover folder either), our own entry
+    /// stays in the renamed one, and both are named.
     #[test]
     fn a_replaced_parent_is_not_cleaned_in_our_place() {
         let temp = tempfile::tempdir().unwrap();
-        let parent = temp.path().join("target");
+        let root = temp.path().canonicalize().unwrap();
+        let parent = root.join("target");
         fs::create_dir(&parent).unwrap();
         let path = parent.join(PARTIAL_DB);
         let owned = OwnedDirectory::create(&path).unwrap();
         fs::write(path.join(DB_FILE), b"ours").unwrap();
-        let saved = temp.path().join("saved-target");
+        let saved = root.join("saved-target");
         let mut planted = None;
-        owned
+        let error = owned
             .release_with(&mut |step, at| {
                 if step == Step::BeforeMove {
                     fs::rename(&parent, &saved).unwrap();
@@ -6018,15 +6022,23 @@ mod aside_namespace_tests {
                     planted = Some((photo.clone(), fingerprint(&photo)));
                 }
             })
-            .unwrap();
+            .unwrap_err();
         let (photo, before) = planted.unwrap();
         assert_eq!(fingerprint(&photo), before);
-        assert_eq!(fs::read_dir(&saved).unwrap().count(), 0);
+        assert_eq!(
+            fs::read(saved.join(PARTIAL_DB).join(DB_FILE)).unwrap(),
+            b"ours"
+        );
+        assert!(ownership_tests::leftover_folders(&parent).is_empty());
+        assert!(error.contains("not this run's entry"), "{error}");
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(error.contains(&saved.display().to_string()), "{error}");
     }
 
-    /// Through the caller: the swap after the proof ends the move with
-    /// `Incomplete` naming the private folder, the bootstrap is unchanged
-    /// and the foreign tree is intact.
+    /// Through the caller: after publication the (empty) staging folder is
+    /// swapped for a foreign one with a photo right before its `rmdir`. The
+    /// move ends with `Incomplete` naming the staging name and where ours
+    /// went, the bootstrap is unchanged and the foreign tree is intact.
     #[test]
     fn the_caller_is_told_and_the_foreign_tree_survives() {
         let temp = tempfile::tempdir().unwrap();
@@ -6041,7 +6053,7 @@ mod aside_namespace_tests {
         crate::resolve::confirm_started(&dirs, &prepared).unwrap();
         let before = fs::read(dirs.bootstrap_path()).ok();
         let target = root.join("target");
-        let saved = root.join("saved-aside");
+        let saved = root.join("saved-staging");
         let mut planted = None;
         let result = move_data_with(
             &dirs,
@@ -6049,7 +6061,13 @@ mod aside_namespace_tests {
             Source::System,
             &target,
             |_| Ok(1 << 40),
-            &mut swap_private_folder(Step::BeforeDelete, true, &saved, &mut planted),
+            &mut |step, at| {
+                if step == Step::BeforeMove && planted.is_none() {
+                    fs::rename(at, &saved).unwrap();
+                    let photo = plant_foreign(at, true);
+                    planted = Some((photo.clone(), fingerprint(&photo)));
+                }
+            },
         );
         let (photo, fp) = planted.expect("the hook ran");
         assert_eq!(fingerprint(&photo), fp);
@@ -6057,10 +6075,14 @@ mod aside_namespace_tests {
             panic!("the shell would restart on {result:?}");
         };
         assert_eq!(copy, &target);
-        let aside = photo.parent().unwrap().parent().unwrap();
-        assert!(left.contains(&aside.display().to_string()), "{left}");
+        assert!(
+            left.contains(&target.join(PARTIAL_DB).display().to_string()),
+            "{left}"
+        );
+        assert!(left.contains(&saved.display().to_string()), "{left}");
         assert_eq!(fs::read(dirs.bootstrap_path()).ok(), before);
         assert!(target.join(DB_FILE).is_file());
+        assert!(saved.is_dir());
     }
 }
 
@@ -6117,8 +6139,8 @@ mod macos_acl_tests {
     }
 
     /// The reviewer's scenario, end to end: the staging directory and the
-    /// private cleanup folder are both created without the parent's ACL,
-    /// and the run's own content is removed on release.
+    /// leftover folder are both created without the parent's ACL, and the
+    /// run's own content is kept in the leftover folder, not deleted.
     #[test]
     fn folders_made_under_an_inheritable_acl_do_not_inherit_it() {
         let temp = tempfile::tempdir().unwrap();
@@ -6130,17 +6152,21 @@ mod macos_acl_tests {
         assert_eq!(macos_acl::no_extended_acl(&file), Ok(()));
         fs::write(path.join(DB_FILE), b"this run's copy").unwrap();
 
-        let mut asides = Vec::new();
+        let mut folders = Vec::new();
         owned
             .release_with(&mut |step, at| {
-                if step == Step::AsideCreated {
+                if step == Step::LeftoverCreated {
                     assert_eq!(acl_lines(at), Vec::<String>::new());
-                    asides.push(at.to_path_buf());
+                    folders.push(at.to_path_buf());
                 }
             })
-            .unwrap();
-        assert_eq!(asides.len(), 1);
-        assert!(!path.exists() && !asides[0].exists());
+            .unwrap_err();
+        assert_eq!(folders.len(), 1);
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read(folders[0].join(PARTIAL_DB).join(DB_FILE)).unwrap(),
+            b"this run's copy"
+        );
     }
 
     /// A folder of this user, mode 0700, empty — but with the parent's ACL,
@@ -6168,45 +6194,45 @@ mod macos_acl_tests {
         assert!(!acl_lines(&path).is_empty());
     }
 
-    /// An ACL on the private cleanup folder (here: added right after it was
-    /// made) stops the cleanup before anything is moved: the staging
-    /// directory and its content stay at their name, the folder stays too,
-    /// and the error names both.
+    /// An ACL on the leftover folder (here: added right after it was made)
+    /// stops the cleanup before anything is moved: the staging directory
+    /// and its content stay at their name, the leftover folder stays too
+    /// (empty), and the error names the staging directory and the folder.
     #[test]
-    fn a_private_folder_with_an_acl_stops_cleanup_and_nothing_is_deleted() {
+    fn a_leftover_folder_with_an_acl_stops_cleanup_and_nothing_is_moved() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(PARTIAL_DB);
         let owned = OwnedDirectory::create(&path).unwrap();
         fs::write(path.join(DB_FILE), b"this run's copy").unwrap();
-        let mut aside = None;
+        let mut folder = None;
         let e = owned
             .release_with(&mut |step, at| {
-                if step == Step::AsideCreated {
+                if step == Step::LeftoverCreated {
                     add_acl(at, "everyone allow add_file,add_subdirectory,delete_child");
-                    aside = Some(at.to_path_buf());
+                    folder = Some(at.to_path_buf());
                 }
             })
             .unwrap_err();
-        let aside = aside.unwrap();
+        let folder = folder.unwrap();
         assert!(e.contains(&path.display().to_string()), "{e}");
-        assert!(e.contains(&aside.display().to_string()), "{e}");
+        assert!(e.contains(&folder.display().to_string()), "{e}");
         assert!(e.contains("left in place"), "{e}");
         assert_eq!(fs::read(path.join(DB_FILE)).unwrap(), b"this run's copy");
-        assert!(aside.is_dir());
-        assert_eq!(fs::read_dir(&aside).unwrap().count(), 0);
+        assert!(folder.is_dir());
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
     }
 
-    /// Review el-5null, verbatim scenario: a parent open to everyone
-    /// (`delete_child`, `add_subdirectory`), so another account may rename
-    /// the private folder itself. After our entry is proven ours in it, the
-    /// whole private folder is renamed to a sibling and a foreign tree put
-    /// under the old names — nothing inside the private folder is touched.
-    /// Before the fix `remove_dir_all` of the old path deleted
-    /// `foreign-photo.jpg` and returned `Ok` (0/1). Now the foreign tree is
-    /// intact, our own copy is gone from the moved folder, and the error
-    /// names the old name and where the private folder went.
+    /// Review el-5null, verbatim scenario carried to the leftover folder: a
+    /// parent open to everyone (`delete_child`, `add_subdirectory`), so
+    /// another account may rename the leftover folder itself. Right after
+    /// our entry was moved into it, the whole folder is renamed to a
+    /// sibling and a foreign tree put under the old names. Before el-5null
+    /// `remove_dir_all` of the old path deleted `foreign-photo.jpg` and
+    /// returned `Ok`. Now nothing is deleted: the foreign tree is intact,
+    /// and — adjusted control assertion, round 3 — our own copy is kept in
+    /// the renamed folder and the error says where.
     #[test]
-    fn a_private_folder_renamed_in_an_open_parent_keeps_the_foreign_photo() {
+    fn a_leftover_folder_renamed_in_an_open_parent_keeps_the_foreign_photo() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
@@ -6215,13 +6241,13 @@ mod macos_acl_tests {
             let path = parent.join(staging);
             let owned = OwnedDirectory::create(&path).unwrap();
             fs::write(path.join("own-copy"), b"ours").unwrap();
-            let saved = parent.join(format!("saved-aside-{staging}"));
+            let saved = parent.join(format!("saved-leftover-{staging}"));
             let mut foreign = None;
             let result = owned.release_with(&mut |step, at| {
-                if step == Step::BeforeDelete {
-                    let aside = at.parent().unwrap();
-                    fs::rename(aside, &saved).unwrap();
-                    fs::create_dir(aside).unwrap();
+                if step == Step::Moved {
+                    let folder = at.parent().unwrap();
+                    fs::rename(folder, &saved).unwrap();
+                    fs::create_dir(folder).unwrap();
                     fs::create_dir(at).unwrap();
                     let photo = at.join("foreign-photo.jpg");
                     fs::write(&photo, b"unique foreign payload 92741").unwrap();
@@ -6235,13 +6261,12 @@ mod macos_acl_tests {
                 "{result:?}"
             );
             let error = result.unwrap_err();
-            let aside = photo.parent().unwrap().parent().unwrap();
-            assert!(error.contains(&aside.display().to_string()), "{error}");
-            assert!(
-                error.contains(&saved.canonicalize().unwrap().display().to_string()),
-                "{error}"
+            let saved = saved.canonicalize().unwrap();
+            assert!(error.contains(&saved.display().to_string()), "{error}");
+            assert_eq!(
+                fs::read(saved.join(staging).join("own-copy")).unwrap(),
+                b"ours"
             );
-            assert!(!saved.join(staging).exists());
             assert!(!path.exists());
         }
     }
@@ -6296,17 +6321,28 @@ mod windows_registration_tests {
         format!("O:{sid}D:P(A;OICI;FA;;;{sid}){extra}")
     }
 
+    /// Empty: released with `rmdir`, nothing left. With contents: moved
+    /// whole into a leftover folder and named, nothing deleted.
     #[test]
-    fn a_new_private_directory_passes_and_is_released() {
+    fn a_new_private_directory_passes_and_is_released_or_kept() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(PARTIAL_DB);
         let owned = OwnedDirectory::create(&path).unwrap();
         open_created_dir(&path).unwrap();
+        owned.release().unwrap();
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+
+        let owned = OwnedDirectory::create(&path).unwrap();
         fs::create_dir(path.join("sub")).unwrap();
         fs::write(path.join("sub").join("thumb.jpg"), b"thumb").unwrap();
-        owned.release().unwrap();
+        let error = owned.release().unwrap_err();
         assert!(!path.exists());
-        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+        let folder = ownership_tests::leftover(temp.path());
+        assert_eq!(
+            fs::read(folder.join(PARTIAL_DB).join("sub").join("thumb.jpg")).unwrap(),
+            b"thumb"
+        );
+        assert!(error.contains("safe to delete by hand"), "{error}");
     }
 
     /// The el-3xm8 reproducer on Windows: a folder with default (inherited)
@@ -6422,10 +6458,10 @@ mod windows_registration_tests {
     }
 
     /// A tree with a read-only file and a junction to a foreign folder in
-    /// it: deleted through handles, the junction as itself — the folder it
-    /// points to keeps its photo.
+    /// it: moved aside whole through our handle, nothing deleted, the
+    /// junction kept as itself — the folder it points to keeps its photo.
     #[test]
-    fn a_tree_is_deleted_through_handles_without_following_junctions() {
+    fn a_tree_with_a_junction_is_moved_aside_whole() {
         let temp = tempfile::tempdir().unwrap();
         let foreign = temp.path().join("photos-2015");
         fs::create_dir(&foreign).unwrap();
@@ -6445,8 +6481,17 @@ mod windows_registration_tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "{out:?}");
-        owned.release().unwrap();
+        owned.release().unwrap_err();
         assert!(!path.exists());
+        let moved = ownership_tests::leftover(temp.path()).join(PARTIAL_THUMBS);
+        assert_eq!(
+            fs::read(moved.join("ab").join("cd").join("thumb.jpg")).unwrap(),
+            b"thumb"
+        );
+        assert!(fs::symlink_metadata(moved.join("ab").join("link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(
             fs::read(foreign.join("IMG_0001.JPG")).unwrap(),
             b"only copy"
