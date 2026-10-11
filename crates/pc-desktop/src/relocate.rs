@@ -1837,7 +1837,11 @@ fn no_race(_: Step, _: &Path) {}
 /// descriptor opened on our own reservation (possible through its public
 /// name before step 2) go with it; (d) step 5 is a check and then `rmdir` of
 /// the name: an *empty* folder renamed onto the private folder's name
-/// between the two is removed (`rmdir` never removes contents). Every
+/// between the two is removed (`rmdir` never removes contents); (e) on Unix
+/// an inode number is reused once its file is gone: if someone else deletes
+/// a file this run made and a *newly created* file of theirs gets the same
+/// number on the same volume before cleanup, it is judged ours (an NTFS
+/// file ID carries a sequence number and is not reused this way). Every
 /// failure returns an error naming what was left and where — the original
 /// name or the private folder.
 fn remove_owned(path: &Path, handle: &same_file::Handle, kind: Owned) -> Result<(), String> {
