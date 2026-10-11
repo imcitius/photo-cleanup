@@ -49,17 +49,12 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # Private folders for relocation: created with an owner and a protected
-# DACL of this user only, checked through the handle (el-2xri). `Wdk_*`
-# and `System_IO`: `NtOpenFile` relative to a directory handle, the only way
-# to open an entry for deleting without a path (el-2yxx0).
+# DACL of this user only, checked through the handle (el-2xri).
 windows-sys = { workspace = true, features = [
-    "Wdk_Foundation",
-    "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
-    "Win32_System_IO",
     "Win32_System_Threading",
 ] }
 
