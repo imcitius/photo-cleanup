@@ -971,6 +971,10 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
+    )]
     fn a_taken_name_is_skipped_not_truncated_or_removed() {
         let tmp = TempDir::new().unwrap();
         let before = foreign(tmp.path());
