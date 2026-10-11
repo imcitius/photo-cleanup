@@ -3401,6 +3401,26 @@ mod windows_acl {
         Ok((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
     }
 
+    #[test]
+    fn reviewer_replacement_after_listing_is_refused_before_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private");
+        super::create_private_dir(&path).unwrap();
+        let dir = super::open_created_dir(&path).unwrap();
+        let original = path.join("LongMixedCaseName.raw");
+        fs::write(&original, b"ours").unwrap();
+        let handle = dir.as_raw_handle() as HANDLE;
+        let (name, id) = children(handle).unwrap().remove(0);
+        fs::rename(&original, path.join("saved-ours")).unwrap();
+        fs::write(&original, b"foreign replacement").unwrap();
+        let before = fs::metadata(&original).unwrap().modified().unwrap();
+        let error = open_child(handle, &name, id, DELETE | FILE_READ_ATTRIBUTES).unwrap_err();
+        assert!(error.to_string().contains("was replaced"), "{error}");
+        assert_eq!(fs::read(&original).unwrap(), b"foreign replacement");
+        assert_eq!(fs::metadata(&original).unwrap().modified().unwrap(), before);
+        assert_eq!(fs::read(path.join("saved-ours")).unwrap(), b"ours");
+    }
+
     /// Delete the object behind `handle`: POSIX semantics (the name goes at
     /// once) where the file system has them, otherwise delete-on-close.
     fn dispose(handle: HANDLE) -> io::Result<()> {
@@ -6626,5 +6646,134 @@ mod windows_registration_tests {
             fs::read(foreign.join("IMG_0001.JPG")).unwrap(),
             b"only copy"
         );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod reviewer_el_67ku_windows {
+    use super::*;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::process::Command;
+
+    fn metadata(path: &Path) -> (u32, u64, u64, u64) {
+        let m = fs::symlink_metadata(path).unwrap();
+        (
+            m.file_attributes(),
+            m.creation_time(),
+            m.last_write_time(),
+            m.file_size(),
+        )
+    }
+
+    #[test]
+    fn reviewer_foreign_file_present_before_cleanup_is_retained_and_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let foreign = temp.path().join("foreign-photo.raw");
+        fs::write(&foreign, b"synthetic foreign original").unwrap();
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let inserted = path.join("foreign-photo.raw");
+        fs::rename(&foreign, &inserted).unwrap();
+        let before = metadata(&inserted);
+        let result = owned.release();
+        eprintln!(
+            "foreign regular: result={result:?}, retained={}",
+            inserted.exists()
+        );
+        assert!(
+            inserted.exists(),
+            "cleanup deleted a pre-existing foreign file; result={result:?}"
+        );
+        assert_eq!(fs::read(&inserted).unwrap(), b"synthetic foreign original");
+        assert_eq!(metadata(&inserted), before);
+        assert!(result.unwrap_err().contains("foreign-photo.raw"));
+    }
+
+    #[test]
+    fn reviewer_foreign_junction_present_before_cleanup_is_retained_and_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("foreign-target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("original.raw"), b"synthetic only copy").unwrap();
+        let foreign = temp.path().join("foreign-junction");
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&foreign)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let inserted = path.join("foreign-junction");
+        fs::rename(&foreign, &inserted).unwrap();
+        let before = metadata(&inserted);
+        let destination = fs::read_link(&inserted).unwrap();
+        let result = owned.release();
+        let retained = fs::symlink_metadata(&inserted).is_ok();
+        eprintln!(
+            "foreign junction: result={result:?}, retained={retained}, target_retained={}",
+            target.join("original.raw").exists()
+        );
+        assert_eq!(
+            fs::read(target.join("original.raw")).unwrap(),
+            b"synthetic only copy"
+        );
+        assert!(
+            retained,
+            "cleanup deleted the foreign junction object; result={result:?}"
+        );
+        assert_eq!(metadata(&inserted), before);
+        assert_eq!(fs::read_link(&inserted).unwrap(), destination);
+        assert!(result.unwrap_err().contains("foreign-junction"));
+    }
+
+    #[test]
+    fn reviewer_foreign_hard_link_present_before_cleanup_is_retained_and_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let foreign = temp.path().join("foreign-original.raw");
+        let alias = temp.path().join("foreign-alias.raw");
+        fs::write(&foreign, b"synthetic linked original").unwrap();
+        fs::hard_link(&foreign, &alias).unwrap();
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let inserted = path.join("foreign-alias.raw");
+        fs::rename(&alias, &inserted).unwrap();
+        let before = metadata(&foreign);
+        let result = owned.release();
+        eprintln!(
+            "foreign hard link: result={result:?}, alias_retained={}, original_retained={}",
+            inserted.exists(),
+            foreign.exists()
+        );
+        assert_eq!(fs::read(&foreign).unwrap(), b"synthetic linked original");
+        assert_eq!(metadata(&foreign), before);
+        assert!(
+            inserted.exists(),
+            "cleanup removed a foreign hard link; result={result:?}"
+        );
+        assert!(result.unwrap_err().contains("foreign-alias.raw"));
+    }
+
+    #[test]
+    fn reviewer_sharing_refusal_never_registers_a_valid_private_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private");
+        create_private_dir(&path).unwrap();
+        let before = metadata(&path);
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .custom_flags(0x0200_0000 | 0x0020_0000)
+            .open(&path)
+            .unwrap();
+        let error = open_created_dir(&path).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot be opened for deleting"),
+            "{error}"
+        );
+        assert_eq!(metadata(&path), before);
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+        drop(locked);
     }
 }
