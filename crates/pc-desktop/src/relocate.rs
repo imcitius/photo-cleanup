@@ -2368,6 +2368,8 @@ mod at {
         made: &super::Made,
     ) -> io::Result<fs::File> {
         mkdir(dir, name, 0o700)?;
+        #[cfg(test)]
+        super::reviewer_round2::after_mkdir();
         let sub = open_dir_at(dir, name)?;
         if !names(&sub)?.is_empty() {
             return Err(io::Error::new(
@@ -7409,5 +7411,155 @@ mod reviewer_el_67ku_windows {
         assert_eq!(metadata(&path), before);
         assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
         drop(locked);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod reviewer_round2 {
+    use super::*;
+    use std::cell::RefCell;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    type AfterMkdir = Option<Box<dyn FnOnce()>>;
+
+    thread_local! {
+        static AFTER_MKDIR: RefCell<AfterMkdir> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn after_mkdir() {
+        AFTER_MKDIR.with(|slot| {
+            if let Some(action) = slot.borrow_mut().take() {
+                action();
+            }
+        });
+    }
+
+    #[test]
+    fn reviewer_round2_foreign_directory_at_capture_must_be_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let foreign = temp.path().join("foreign-folder");
+        fs::create_dir(&foreign).unwrap();
+        fs::set_permissions(&foreign, fs::Permissions::from_mode(0o755)).unwrap();
+        let before = fs::metadata(&foreign).unwrap();
+        let inserted = path.join("thumbs");
+        let saved = temp.path().join("saved-our-folder");
+        let inserted_for_hook = inserted.clone();
+        AFTER_MKDIR.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&inserted_for_hook, &saved).unwrap();
+                fs::rename(&foreign, &inserted_for_hook).unwrap();
+            }));
+        });
+        let name = std::ffi::CString::new("thumbs").unwrap();
+        let capture = at::made_dir(owned.handle.as_file(), &name, &owned.made);
+        let accepted = capture.is_ok();
+        drop(capture);
+        let result = owned.release();
+        eprintln!("REVIEW directory capture: accepted={accepted}, release={result:?}, foreign_retained={}", inserted.exists());
+        assert!(
+            !accepted,
+            "foreign mode-0755 directory was registered as created by this run"
+        );
+        assert!(result.is_err(), "foreign directory must be reported");
+        let after = fs::metadata(&inserted).unwrap();
+        assert_eq!(
+            (after.ino(), after.mode(), after.uid()),
+            (before.ino(), before.mode(), before.uid())
+        );
+    }
+
+    #[test]
+    fn reviewer_round2_foreign_entries_and_control() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("our-copy"), b"synthetic copied data").unwrap();
+        let path = temp.path().join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        at::copy_tree(&source, owned.handle.as_file(), &owned.made).unwrap();
+        let original = temp.path().join("original.raw");
+        fs::write(&original, b"synthetic foreign payload").unwrap();
+        let before = fs::metadata(&original).unwrap();
+        let regular = path.join("foreign.raw");
+        fs::write(&regular, b"synthetic moved-in payload").unwrap();
+        let link = path.join("foreign-link");
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+        let alias = path.join("foreign-alias");
+        fs::hard_link(&original, &alias).unwrap();
+        let result = owned.release();
+        eprintln!("REVIEW foreign triad: {result:?}");
+        let error = result.expect_err("foreign entries must be reported");
+        for p in [&regular, &link, &alias] {
+            assert!(error.contains(&p.display().to_string()), "{error}");
+            assert!(fs::symlink_metadata(p).is_ok());
+        }
+        assert!(!path.join("our-copy").exists());
+        assert_eq!(fs::read(&regular).unwrap(), b"synthetic moved-in payload");
+        assert_eq!(fs::read_link(&link).unwrap(), original);
+        assert_eq!(fs::read(&alias).unwrap(), b"synthetic foreign payload");
+        let after = fs::metadata(&original).unwrap();
+        assert_eq!(
+            (after.ino(), after.mode(), after.mtime(), after.mtime_nsec()),
+            (
+                before.ino(),
+                before.mode(),
+                before.mtime(),
+                before.mtime_nsec()
+            )
+        );
+        assert_eq!(after.nlink(), 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reviewer_round2_reused_inode_must_not_authorize_foreign_file_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("copy"), b"synthetic cache").unwrap();
+        let path = temp.path().join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        at::copy_tree(&source, owned.handle.as_file(), &owned.made).unwrap();
+        let copied = path.join("copy");
+        let original_ino = fs::metadata(&copied).unwrap().ino();
+        fs::remove_file(&copied).unwrap();
+        let foreign = path.join("new-foreign.raw");
+        let mut collided = false;
+        for attempt in 0..16384 {
+            fs::write(&foreign, b"synthetic foreign only copy").unwrap();
+            if fs::metadata(&foreign).unwrap().ino() == original_ino {
+                collided = true;
+                eprintln!("REVIEW inode reused at attempt {attempt}: {original_ino}");
+                break;
+            }
+            fs::remove_file(&foreign).unwrap();
+        }
+        assert!(
+            collided,
+            "fixture precondition: filesystem did not reuse the inode"
+        );
+        let before = fs::metadata(&foreign).unwrap();
+        let result = owned.release();
+        eprintln!(
+            "REVIEW reused inode: release={result:?}, foreign_retained={}",
+            foreign.exists()
+        );
+        assert!(
+            result.is_err(),
+            "must retain and report the independently created foreign file"
+        );
+        assert_eq!(fs::read(&foreign).unwrap(), b"synthetic foreign only copy");
+        let after = fs::metadata(&foreign).unwrap();
+        assert_eq!(
+            (after.ino(), after.mode(), after.mtime(), after.mtime_nsec()),
+            (
+                before.ino(),
+                before.mode(),
+                before.mtime(),
+                before.mtime_nsec()
+            )
+        );
     }
 }
