@@ -12,7 +12,7 @@ use crate::files;
 use anyhow::Result;
 use pc_db::{Bundle, BundleState, Db, JournalStatus};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Quarantine `b` as an earlier version did; the journal entry's id.
 ///
@@ -62,11 +62,13 @@ pub(crate) fn moved_by_an_earlier_version(db: &Db, run_id: i64, b: &Bundle) -> R
 }
 
 /// Files, bytes and newest mtime under `root`, as a scan records a bundle.
+// Its only caller, the purge tests, is Unix-only.
+#[cfg(unix)]
 pub(crate) fn dir_stats(root: &Path) -> (u64, u64, i64) {
     let mut count = 0u64;
     let mut size = 0u64;
     let mut newest = 0i64;
-    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(rd) = fs::read_dir(&dir) else { continue };
         for e in rd.flatten() {

@@ -378,11 +378,14 @@ async fn recovery_and_directory_boundaries() {
         f.archive.display(),
         std::path::MAIN_SEPARATOR
     ));
-    let mut escapes = vec![secret, up];
+    // A symlink on Windows needs a privilege CI runners do not have.
     #[cfg(unix)]
-    escapes.push(link);
-    #[cfg(windows)]
-    let _ = link;
+    let escapes = vec![secret, up, link];
+    #[cfg(not(unix))]
+    let escapes = {
+        let _ = link;
+        vec![secret, up]
+    };
     for path in escapes {
         let (s, v) = f
             .req(

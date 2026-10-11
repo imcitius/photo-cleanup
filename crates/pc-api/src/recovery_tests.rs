@@ -11,6 +11,8 @@ use super::*;
 
 /// A photograph and its sidecar in the configured quarantine, journaled the
 /// way an older version wrote it: no list, no evidence.
+// Its callers are Unix-only.
+#[cfg(unix)]
 fn legacy_held(f: &Fixture) -> (PathBuf, PathBuf, i64) {
     let home = f.archive.join("frame.arw");
     let q = f.archive.join(pc_core::QUARANTINE_DIR);

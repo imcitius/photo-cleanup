@@ -25,6 +25,8 @@ enum Stranger {
     /// A symlink that leads nowhere: `exists()` says there is nothing.
     Dangling,
     /// An empty directory (what a plain `rename` of a directory replaces).
+    // Planted only by Unix-only refusal tests.
+    #[cfg_attr(not(unix), allow(dead_code))]
     EmptyDir,
 }
 

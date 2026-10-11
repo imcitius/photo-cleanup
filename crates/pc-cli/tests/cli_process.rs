@@ -421,6 +421,20 @@ fn fingerprint(p: &Path) -> (u64, u64, u32, u32, u32, u64, u64, i64, i64, Vec<u8
     )
 }
 
+/// The same, as far as a platform without inodes, modes or owners can say:
+/// what it is, how big, when written, whether writable, and every byte.
+#[cfg(not(unix))]
+fn fingerprint(p: &Path) -> (bool, u64, std::time::SystemTime, bool, Vec<u8>) {
+    let m = std::fs::symlink_metadata(p).unwrap();
+    (
+        m.file_type().is_file(),
+        m.len(),
+        m.modified().unwrap(),
+        m.permissions().readonly(),
+        std::fs::read(p).unwrap(),
+    )
+}
+
 /// el-5gr1y B1-R3 and the user's decision of 2026-10-06 ("Lightroom
 /// catalogues are not to be touched at all"), through the real command
 /// line: `scan`, `derived clean`, `derived purge --yes` as a person runs

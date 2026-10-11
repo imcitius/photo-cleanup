@@ -8,7 +8,10 @@
 //! a half-finished undo or recovery can be asked again and finishes.
 
 use super::*;
+// Shared slots for hooks that plant strangers; those tests are Unix-only.
+#[cfg(unix)]
 use std::cell::RefCell;
+#[cfg(unix)]
 use std::rc::Rc;
 
 /// Everything about a directory entry that a stranger would care about.

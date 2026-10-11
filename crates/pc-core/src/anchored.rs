@@ -61,11 +61,11 @@ pub struct Entry {
 
 impl Entry {
     pub fn is_dir(&self) -> bool {
-        self.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
+        self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFDIR)
     }
 
     pub fn is_file(&self) -> bool {
-        self.mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
+        self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFREG)
     }
 }
 
