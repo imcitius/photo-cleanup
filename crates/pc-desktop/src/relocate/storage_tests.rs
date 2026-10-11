@@ -853,6 +853,14 @@ async fn reviewer_index_does_not_write_into_a_substituted_foreign_fanout() {
         assert!(std::time::Instant::now() < deadline, "the job did not end");
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
+    // Read before the reset, which empties the index.
+    let fresh: Option<String> = conn
+        .query_row(
+            "SELECT thumb_key FROM files WHERE path LIKE '%fresh-9923.png'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     let (reset, _) = post(&server, "/api/reset", r#"{"confirmation":"RESET"}"#).await;
     server.shutdown(pc_api::Shutdown::CancelJob).await.unwrap();
 
@@ -872,13 +880,6 @@ async fn reviewer_index_does_not_write_into_a_substituted_foreign_fanout() {
         }),
         "the refusal is not in the job's status: {progress}"
     );
-    let fresh: Option<String> = conn
-        .query_row(
-            "SELECT thumb_key FROM files WHERE path LIKE '%fresh-9923.png'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
     assert_eq!(fresh, None, "a thumbnail key was recorded for nothing");
     assert_eq!(reset, 200);
     assert_eq!(untouched(&fan), before, "the reset changed the folder");

@@ -21,15 +21,25 @@
 //! for a bound data folder ([`crate::storage`]); everything below it is
 //! reached through held folders without following a link. A fan-out folder
 //! the store makes is made 0700, a thumbnail 0600, whatever the umask
-//! (el-5x1uh O3); an existing fan-out folder must be a real folder of this
-//! user's and is used as it is — never changed. A thumbnail is written to a
-//! temporary file created exclusively beside its name and renamed there
-//! without replacing anything: an entry that already bears the name is
-//! never rewritten.
+//! (el-5x1uh O3). A thumbnail is written to a temporary file created
+//! exclusively beside its name and renamed there without replacing
+//! anything: an entry that already bears the name is never rewritten.
 //!
-//! Not covered here: an existing fan-out folder of this user's is not
-//! proven to be one the store made. A folder put in its place by another
-//! program of the same user is written into (follow-up el-u3x31).
+//! # Only into fan-out folders this process made (el-u3x31)
+//!
+//! A new thumbnail is written only into fan-out folders the store made in
+//! this process: right after `mkdirat` the folder is opened without
+//! following a link and its device, inode and birth time are kept in
+//! memory; an existing folder is written into only if it is that very
+//! folder. Nothing records the origin across runs (no provenance file, no
+//! database record — removed by user decision, el-5x1uh), so a folder from
+//! an earlier run cannot be told from one another program of the same user
+//! put at its name. Such a folder is never changed or written into, and
+//! nothing is made inside it: the thumbnail is refused with the folder's
+//! path and the reason (the index job lists it among its refusals). A
+//! thumbnail already stored under its key is still found and used — that
+//! writes nothing. Not covered: a folder swapped between `mkdirat` and the
+//! open right after it (a deliberate syscall-window race).
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -161,6 +171,16 @@ fn is_key(key: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
+/// Why nothing is written into an existing fan-out folder the store cannot
+/// prove it made (el-u3x31).
+fn unproven() -> String {
+    crate::tr!(
+        "папка уже была и не создана кэшем миниатюр в этом запуске — в неё ничего не записано, она оставлена как есть",
+        "the folder was already there and is not one the thumbnail cache made in this run — nothing is written into it, it is left as it is"
+    )
+    .to_string()
+}
+
 /// Folders and thumbnails are made for this user only. The umask can only
 /// take bits away from these, so a umask of 000 no longer leaves the cache
 /// writable by everybody (el-5x1uh O3). Only what the store creates gets
@@ -172,13 +192,15 @@ const FILE_MODE: u32 = 0o600;
 
 #[cfg(unix)]
 mod platform {
-    use super::{ThumbStore, DIR_MODE, FILE_MODE};
+    use super::{unproven, ThumbStore, DIR_MODE, FILE_MODE};
     use crate::anchored::Dir;
     use anyhow::{Context, Result};
+    use std::collections::HashSet;
     use std::io::{self, Read, Write};
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Mutex;
 
     fn euid() -> u32 {
         // SAFETY: no preconditions.
@@ -220,13 +242,38 @@ mod platform {
         Ok(root)
     }
 
-    /// Open the fan-out folder `name` in `parent`, making it with
-    /// [`DIR_MODE`] first if it is not there. It must be a real folder, not
-    /// a link, and this user's. An existing folder is never changed.
-    fn fan_out(parent: &Dir, name: &str, create: bool) -> std::result::Result<Dir, String> {
+    /// Identity of a folder the store made: device, inode and, where the
+    /// filesystem keeps one, birth time (so an inode number reused after the
+    /// store's folder was deleted does not pass for it).
+    type Made = (u64, u64, Option<std::time::SystemTime>);
+
+    /// Every fan-out folder this process made, by identity captured through
+    /// the descriptor right after `mkdirat` (el-u3x31). It lives only as long
+    /// as the process: there is no provenance file and no database record
+    /// (removed by user decision, el-5x1uh), so a folder made by an earlier
+    /// run cannot be told from one another program put at its name.
+    static MADE: Mutex<Option<HashSet<Made>>> = Mutex::new(None);
+
+    fn made(md: &std::fs::Metadata) -> Made {
+        (md.dev(), md.ino(), md.created().ok())
+    }
+
+    /// A fan-out folder, opened, and whether this process made it.
+    struct Fan {
+        dir: Dir,
+        made: bool,
+    }
+
+    /// Open the fan-out folder `name` in `parent`. With `create` it is made
+    /// first with [`DIR_MODE`] if it is not there, and its identity recorded
+    /// in [`MADE`]. It must be a real folder, not a link, and this user's. An
+    /// existing folder is never changed; whether it may be written into is
+    /// [`Fan::made`].
+    fn fan_out(parent: &Dir, name: &str, create: bool) -> std::result::Result<Fan, String> {
+        let mut fresh = false;
         if create {
             match parent.mkdir_mode(name, DIR_MODE) {
-                Ok(()) => {}
+                Ok(()) => fresh = true,
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e.to_string()),
             }
@@ -247,13 +294,21 @@ mod platform {
                 md.uid()
             ));
         }
-        Ok(dir)
+        let mut set = MADE.lock().unwrap_or_else(|e| e.into_inner());
+        let set = set.get_or_insert_with(HashSet::new);
+        let made = if fresh {
+            set.insert(made(&md));
+            true
+        } else {
+            set.contains(&made(&md))
+        };
+        Ok(Fan { dir, made })
     }
 
     pub(super) fn read(store: &ThumbStore, key: &str) -> Option<Vec<u8>> {
         let root = Dir::open_following(&store.root).ok()?;
-        let first = fan_out(&root, &key[0..2], false).ok()?;
-        let fan = fan_out(&first, &key[2..4], false).ok()?;
+        let first = fan_out(&root, &key[0..2], false).ok()?.dir;
+        let fan = fan_out(&first, &key[2..4], false).ok()?.dir;
         let mut file = fan.open_file(&format!("{key}.jpg"), false).ok()?;
         if !file.metadata().ok()?.is_file() {
             return None;
@@ -279,12 +334,30 @@ mod platform {
             ))
         };
         let first = fan_out(&root, a, true).map_err(|why| refused(&root.join(a), why))?;
-        let fan = fan_out(&first, b, true).map_err(|why| refused(&first.join(b), why))?;
+        // Nothing is made inside a folder the store cannot prove it made.
+        let fan = match fan_out(&first.dir, b, first.made) {
+            Ok(fan) => fan,
+            Err(_) if !first.made && first.dir.entry_at(b).is_err() => {
+                return Err(refused(&root.join(a), unproven()))
+            }
+            Err(why) => return Err(refused(&first.dir.join(b), why)),
+        };
+        // The folder a new thumbnail would go into, if the store cannot
+        // prove it made it (el-u3x31).
+        let foreign = if !first.made {
+            Some(root.join(a))
+        } else if !fan.made {
+            Some(fan.dir.path().to_path_buf())
+        } else {
+            None
+        };
+        let fan = fan.dir;
         let name = format!("{key}.jpg");
         match fan.entry_at(&name) {
             // Already stored: the key names the content (or, for a view, the
             // file it was rendered from), and an existing file is never
-            // rewritten.
+            // rewritten. Using it writes nothing, so this holds in a folder
+            // of unknown origin too.
             Ok(entry) if entry.is_file() => return Ok(()),
             Ok(_) => {
                 return Err(refused(
@@ -296,7 +369,11 @@ mod platform {
                     .into(),
                 ))
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if let Some(folder) = foreign {
+                    return Err(refused(&folder, unproven()));
+                }
+            }
             Err(e) => return Err(refused(&fan.join(&name), e.to_string())),
         }
         publish(&fan, &name, key, jpeg)
@@ -361,11 +438,58 @@ mod platform {
 /// made by path and a thumbnail is created at its name exclusively
 /// (`create_new`), so nothing that already bears a name is ever written to.
 /// A crash in the middle of a write can leave a short file there.
+///
+/// A fan-out folder is written into only if this process made it
+/// (el-u3x31): its path and creation time, read right after `create_dir`,
+/// are kept in memory and must match. A volume that reports no creation
+/// time proves nothing, so on it only — nothing is written into an existing
+/// folder at all. Everything here goes by path: a folder swapped between the
+/// check and the write is not detected (no descriptor-relative calls).
 #[cfg(not(unix))]
 mod platform {
     use super::ThumbStore;
     use anyhow::{Context, Result};
+    use std::collections::HashSet;
     use std::io::{self, Write};
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+
+    static MADE: Mutex<Option<HashSet<(PathBuf, SystemTime)>>> = Mutex::new(None);
+
+    /// The fan-out folder at `path`, made first if `create` and it is not
+    /// there: `Ok(true)` if this process made it, `Ok(false)` if it exists
+    /// but its origin is unknown.
+    fn fan_out(path: &Path, create: bool) -> io::Result<bool> {
+        if create {
+            match std::fs::create_dir(path) {
+                Ok(()) => {
+                    if let Ok(made) = std::fs::symlink_metadata(path)?.created() {
+                        let mut set = MADE.lock().unwrap_or_else(|e| e.into_inner());
+                        set.get_or_insert_with(HashSet::new)
+                            .insert((path.to_path_buf(), made));
+                    }
+                    return Ok(true);
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let md = std::fs::symlink_metadata(path)?;
+        if !md.is_dir() {
+            return Err(io::Error::other(crate::tr!(
+                "не каталог (ссылка или файл)",
+                "not a folder (a link or a file)"
+            )));
+        }
+        let Ok(created) = md.created() else {
+            return Ok(false);
+        };
+        let set = MADE.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(set
+            .as_ref()
+            .is_some_and(|set| set.contains(&(path.to_path_buf(), created))))
+    }
 
     pub(super) fn read(store: &ThumbStore, key: &str) -> Option<Vec<u8>> {
         std::fs::read(store.path_for(key)).ok()
@@ -374,12 +498,40 @@ mod platform {
     pub(super) fn write(store: &ThumbStore, key: &str, jpeg: &[u8]) -> Result<()> {
         store.check()?;
         let path = store.path_for(key);
+        let refused = |at: &Path, why: String| {
+            anyhow::anyhow!(crate::tf!(
+                "{0}: миниатюра не записана: {1}",
+                "{0}: the thumbnail was not written: {1}",
+                at.display(),
+                why
+            ))
+        };
+        std::fs::create_dir_all(store.root()).with_context(|| {
+            crate::tf!(
+                "не создать {0}",
+                "cannot create {0}",
+                store.root().display()
+            )
+        })?;
+        let fan = path.parent().context("no parent directory")?;
+        let first = fan.parent().context("no parent directory")?;
+        let first_made = fan_out(first, true).map_err(|e| refused(first, e.to_string()))?;
+        let fan_made = match fan_out(fan, first_made) {
+            Ok(made) => made,
+            Err(_) if !first_made && !first.join(fan.file_name().unwrap()).exists() => {
+                return Err(refused(first, super::unproven()))
+            }
+            Err(e) => return Err(refused(fan, e.to_string())),
+        };
         if path.exists() {
             return Ok(());
         }
-        let fan = path.parent().context("no parent directory")?;
-        std::fs::create_dir_all(fan)
-            .with_context(|| crate::tf!("не создать {0}", "cannot create {0}", fan.display()))?;
+        if !first_made {
+            return Err(refused(first, super::unproven()));
+        }
+        if !fan_made {
+            return Err(refused(fan, super::unproven()));
+        }
         let mut file = match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -711,12 +863,101 @@ mod unix_tests {
         assert_eq!(fs::read(stored).unwrap(), b"swapped 6231");
     }
 
+    /// el-u3x31: a leaf fan-out folder the store made is moved aside and a
+    /// folder of somebody's — 0750, with a note in it — is put at its name.
+    /// A new thumbnail for that folder is refused with the reason, and
+    /// neither the foreign folder nor the store's own, moved aside, is
+    /// changed. Moved back, the store's own folder is written into again.
+    #[test]
+    fn a_substituted_leaf_fan_out_folder_is_not_written_into() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("thumbs");
+        let s = ThumbStore::new(&root);
+        let seed = s.put(b"seed 3310").unwrap();
+        let (a, b) = (&seed[0..2], &seed[2..4]);
+        let fan = root.join(a).join(b);
+        let aside = tmp.path().join("aside-3310");
+        fs::rename(&fan, &aside).unwrap();
+        fs::create_dir(&fan).unwrap();
+        fs::set_permissions(&fan, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(fan.join("foreign-notes"), b"foreign 3311").unwrap();
+        let (foreign, own) = (tree(&fan), tree(&aside));
+
+        let key = format!("{a}{b}{}", "3".repeat(28));
+        let refused = s.put_at(&key, b"new 3312").unwrap_err().to_string();
+        assert!(
+            refused.contains("not one the thumbnail cache made"),
+            "{refused}"
+        );
+        assert!(refused.contains(&fan.display().to_string()), "{refused}");
+        assert_eq!(tree(&fan), foreign);
+        assert_eq!(tree(&aside), own);
+        assert!(s.get(&key).is_none());
+
+        fs::rename(&fan, tmp.path().join("foreign-3310")).unwrap();
+        fs::rename(&aside, &fan).unwrap();
+        s.put_at(&key, b"new 3312").unwrap();
+        assert_eq!(s.get(&key).unwrap(), b"new 3312");
+        assert_eq!(s.get(&seed).unwrap(), b"seed 3310");
+    }
+
+    /// The same at the first level: nothing is made inside a substituted
+    /// `ab` folder, not even the `cd` folder below it.
+    #[test]
+    fn nothing_is_made_inside_a_substituted_first_level_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("thumbs");
+        let s = ThumbStore::new(&root);
+        let seed = s.put(b"seed 4410").unwrap();
+        let first = root.join(&seed[0..2]);
+        fs::rename(&first, tmp.path().join("aside-4410")).unwrap();
+        fs::create_dir(&first).unwrap();
+        fs::write(first.join("foreign-notes"), b"foreign 4411").unwrap();
+        let before = tree(&first);
+
+        let key = format!("{}ff{}", &seed[0..2], "4".repeat(28));
+        let refused = s.put_at(&key, b"new 4412").unwrap_err().to_string();
+        assert!(
+            refused.contains("not one the thumbnail cache made"),
+            "{refused}"
+        );
+        assert!(refused.contains(&first.display().to_string()), "{refused}");
+        assert_eq!(tree(&first), before);
+    }
+
+    /// Folders made by an earlier run cannot be told from folders another
+    /// program put there (no provenance record, el-5x1uh), so a new
+    /// thumbnail is not written into them; a thumbnail already stored there
+    /// is still found and used, which writes nothing.
+    #[test]
+    fn a_folder_from_an_earlier_run_is_read_but_not_written_into() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("thumbs");
+        let jpeg = b"earlier run 5520";
+        let key = hex32(&blake3_of(jpeg)[..16]);
+        let fan = root.join(&key[0..2]).join(&key[2..4]);
+        fs::create_dir_all(&fan).unwrap();
+        for dir in [&root.join(&key[0..2]), &fan] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(fan.join(format!("{key}.jpg")), jpeg).unwrap();
+        let before = tree(&root);
+
+        let s = ThumbStore::new(&root);
+        assert_eq!(s.put(jpeg).unwrap(), key);
+        let other = format!("{}{}", &key[0..4], "5".repeat(28));
+        assert!(s.put_at(&other, b"new 5521").is_err());
+        assert_eq!(tree(&root), before);
+        assert_eq!(s.get(&key).unwrap(), jpeg);
+    }
+
     /// `umask` is process-wide, so the store runs under umask 000 in a child
     /// copy of the test binary. The cache folder and the fan-out folders it
     /// makes come out 0700 and thumbnails 0600, not 0777/0666. A fan-out
     /// folder that already exists — here one somebody left 0777 — is not
-    /// the store's to change: it keeps its mode, and only what the store
-    /// creates in it is 0700/0600.
+    /// the store's to change or to write into (el-u3x31): it keeps its mode
+    /// and stays empty, and the thumbnail that would have gone there is
+    /// refused.
     #[test]
     fn under_umask_000_the_cache_is_not_left_writable_by_others() {
         const CHILD: &str = "PC_CORE_THUMBS_UMASK_DIR";
@@ -731,8 +972,12 @@ mod unix_tests {
             fs::create_dir(&legacy).unwrap();
             fs::set_permissions(&legacy, fs::Permissions::from_mode(0o777)).unwrap();
             let key2 = format!("9e{}", "4".repeat(30));
-            s.put_at(&key2, b"legacy 2208").unwrap();
-            fs::write(Path::new(&dir).join("keys"), format!("{key}\n{key2}")).unwrap();
+            let refused = s.put_at(&key2, b"legacy 2208").unwrap_err().to_string();
+            assert!(
+                refused.contains("not one the thumbnail cache made"),
+                "{refused}"
+            );
+            fs::write(Path::new(&dir).join("keys"), &key).unwrap();
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -750,10 +995,11 @@ mod unix_tests {
         let root = tmp.path().join("thumbs");
         let mode = |p: PathBuf| fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(root.clone()), 0o700);
+        assert_eq!(mode(root.join("9e")), 0o777);
+        assert_eq!(fs::read_dir(root.join("9e")).unwrap().count(), 0);
         for key in text.lines() {
             let (a, b) = (&key[0..2], &key[2..4]);
-            let made = if a == "9e" { 0o777 } else { 0o700 };
-            assert_eq!(mode(root.join(a)), made, "{a}");
+            assert_eq!(mode(root.join(a)), 0o700, "{a}");
             assert_eq!(mode(root.join(a).join(b)), 0o700, "{a}/{b}");
             assert_eq!(
                 mode(root.join(a).join(b).join(format!("{key}.jpg"))),
