@@ -55,6 +55,7 @@ pub(crate) fn quarantine_of(path: &Path) -> Option<PathBuf> {
 
 /// A folder the search never enters: a library that owns its contents, or
 /// anything of Lightroom's (`.lrdata`, `.lrcat-data`, `.lrlibrary`…).
+#[cfg_attr(not(unix), allow(dead_code))]
 fn protected(name: &str) -> bool {
     pc_core::is_protected_bundle(name) || pc_core::derived::has_lightroom_extension(name)
 }
@@ -62,6 +63,7 @@ fn protected(name: &str) -> bool {
 /// Evidence that can prove a file: size and modification time, and birth
 /// time wherever the file found reports one. `None` when it can; otherwise
 /// what is missing.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn short_of(p: &Proof, birth_now: bool) -> Option<String> {
     if p.size.is_none() || p.mtime_ns.is_none() {
         return Some(
@@ -82,6 +84,7 @@ fn short_of(p: &Proof, birth_now: bool) -> Option<String> {
 }
 
 /// What proved it, in words.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn proven_by(p: &Proof) -> String {
     let mut parts = vec![pc_core::tr!(
         "устройство и inode, размер, время изменения",
