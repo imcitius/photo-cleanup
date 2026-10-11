@@ -2966,10 +2966,10 @@ mod windows_acl {
     use windows_sys::Win32::Storage::FileSystem::{
         CreateDirectoryW, FileFullDirectoryInfo, FileFullDirectoryRestartInfo,
         FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdType,
-        GetFileInformationByHandleEx, OpenFileById, SetFileInformationByHandle,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO,
-        FILE_ID_BOTH_DIR_INFO, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+        GetFileInformationByHandleEx, OpenFileById, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_ID_BOTH_DIR_INFO,
+        FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -3233,25 +3233,32 @@ mod windows_acl {
 
     /// Rename the object open as `entry` (with `DELETE` access) to `name`
     /// in the directory open as `to`, through the handles only
-    /// (`FILE_RENAME_INFO` with `RootDirectory`): no path is resolved, and
-    /// an existing entry at `name` fails the call and is kept.
+    /// (`NtSetInformationFile(FileRenameInformation)` with
+    /// `RootDirectory`): no path is resolved, and an existing entry at
+    /// `name` fails the call and is kept. Not `SetFileInformationByHandle`:
+    /// it turns a relative name into an absolute path under the current
+    /// directory first, which with a `RootDirectory` is os error 87 (seen
+    /// natively on the CI runner, el-2yxx0).
     pub(super) fn rename_into(
         entry: &fs::File,
         to: &fs::File,
         name: &std::ffi::OsStr,
     ) -> io::Result<()> {
-        use windows_sys::Win32::Storage::FileSystem::{
-            FileRenameInfo, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
+        use windows_sys::Wdk::Storage::FileSystem::{
+            FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
+            FILE_RENAME_INFORMATION_0,
         };
+        use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+        use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
         let wide: Vec<u16> = name.encode_wide().collect();
-        let header = mem::offset_of!(FILE_RENAME_INFO, FileName);
-        let bytes = header + wide.len() * 2 + 2;
+        let header = mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
+        let bytes = (header + wide.len() * 2).max(mem::size_of::<FILE_RENAME_INFORMATION>());
         let mut buf = vec![0u64; bytes.div_ceil(8)];
-        let info = buf.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-        // SAFETY: `buf` is 8-byte aligned and holds the header plus the name
-        // and a terminating NUL; the fields are written in place.
+        let info = buf.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+        // SAFETY: `buf` is 8-byte aligned, zeroed and holds the header plus
+        // the name; the fields are written in place.
         unsafe {
-            (*info).Anonymous = FILE_RENAME_INFO_0 { ReplaceIfExists: 0 };
+            (*info).Anonymous = FILE_RENAME_INFORMATION_0 { ReplaceIfExists: 0 };
             (*info).RootDirectory = to.as_raw_handle() as HANDLE;
             (*info).FileNameLength = (wide.len() * 2) as u32;
             ptr::copy_nonoverlapping(
@@ -3260,17 +3267,23 @@ mod windows_acl {
                 wide.len(),
             );
         }
-        // SAFETY: `entry` is open with DELETE; `buf` lives for the call.
-        let ok = unsafe {
-            SetFileInformationByHandle(
+        // SAFETY: plain data, written by the call.
+        let mut status_block: IO_STATUS_BLOCK = unsafe { mem::zeroed() };
+        // SAFETY: `entry` is open with DELETE, `to` is an open directory;
+        // `buf` and `status_block` live for the call.
+        let status = unsafe {
+            NtSetInformationFile(
                 entry.as_raw_handle() as HANDLE,
-                FileRenameInfo,
+                &mut status_block,
                 buf.as_ptr().cast(),
                 bytes as u32,
+                FileRenameInformation,
             )
         };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
+        if status < 0 {
+            // SAFETY: no preconditions.
+            let code = unsafe { RtlNtStatusToDosError(status) };
+            return Err(io::Error::from_raw_os_error(code as i32));
         }
         Ok(())
     }
@@ -4010,6 +4023,10 @@ mod ownership_tests {
     /// One entry that cannot be settled does not hide the others (B3-R2):
     /// the replaced staging folder is named and left, the reservations are
     /// still moved aside and named, and a second abort has nothing to do.
+    /// Unix only: `Cleanup` exists only for an admitted target, and Windows
+    /// refuses the target at admission
+    /// (`windows_refuses_a_target_before_anything_is_staged`).
+    #[cfg(unix)]
     #[test]
     fn abort_names_every_entry_even_when_one_is_not_ours() {
         let (_t, root) = temp();
