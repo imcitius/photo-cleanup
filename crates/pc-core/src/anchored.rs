@@ -60,12 +60,19 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// The file type bits of `mode`, in the platform's own `mode_t` (u16 on
+    /// macOS, u32 on Linux). `mode` was read from `st_mode`, so it fits.
+    #[allow(clippy::unnecessary_cast)] // a no-op cast on Linux only
+    fn type_bits(&self) -> libc::mode_t {
+        self.mode as libc::mode_t & libc::S_IFMT
+    }
+
     pub fn is_dir(&self) -> bool {
-        self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFDIR)
+        self.type_bits() == libc::S_IFDIR
     }
 
     pub fn is_file(&self) -> bool {
-        self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFREG)
+        self.type_bits() == libc::S_IFREG
     }
 }
 
