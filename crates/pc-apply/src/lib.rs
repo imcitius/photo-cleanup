@@ -230,6 +230,7 @@ pub(crate) fn quarantine_target_for(path: &str, override_root: Option<&Path>) ->
 }
 
 /// The nearest existing folder of `path` (itself, if it exists).
+#[cfg(not(windows))]
 fn nearest_existing(path: &Path) -> &Path {
     let mut at = path;
     while fs::symlink_metadata(at).is_err() {
@@ -339,7 +340,8 @@ pub fn check_organize(moves: &[pc_organize::Move]) -> Result<()> {
 
 /// Tests only: one bound move of one object, outside any operation — the
 /// boundary every unit's member goes through ([`unit::move_unit`]).
-#[cfg(test)]
+// Its only callers, the binding tests, are Unix-only.
+#[cfg(all(test, unix))]
 pub(crate) fn rename_with_parents(
     src: &Path,
     dst: &Path,
@@ -385,6 +387,7 @@ pub(crate) fn close_refused(
 }
 
 /// What a refused rename says.
+#[cfg(unix)]
 pub(crate) fn rename_error(e: std::io::Error, src: &Path, dst: &Path) -> anyhow::Error {
     if e.kind() == std::io::ErrorKind::AlreadyExists {
         anyhow::anyhow!(
@@ -420,6 +423,8 @@ pub(crate) fn rename_error(e: std::io::Error, src: &Path, dst: &Path) -> anyhow:
 /// build: the feature without debug assertions is a compile error.
 #[cfg(any(test, feature = "test-seams"))]
 #[doc(hidden)]
+// The move seams serve tests of moves, which Windows refuses (el-usdqi D4).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub mod race {
     use std::cell::RefCell;
     use std::io;
@@ -501,7 +506,8 @@ pub mod race {
     /// While the guard lives, `hook(moment, src, dst)` runs on this thread
     /// at both [`Syscall`] moments of every bound move; an `Err` at
     /// `Before` is the move's error, at `After` it is ignored.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Used by the Unix-only binding tests.
+    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
     pub(crate) fn at_rename(
         hook: impl FnMut(Syscall, &Path, &Path) -> io::Result<()> + 'static,
     ) -> SyscallGuard {
@@ -509,7 +515,7 @@ pub mod race {
         SyscallGuard
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
     pub(crate) struct SyscallGuard;
 
     impl Drop for SyscallGuard {
@@ -564,6 +570,7 @@ pub mod race {
         Ok(())
     }
 
+    #[cfg(unix)]
     pub(crate) fn fire(src: &Path, dst: &Path) -> io::Result<()> {
         HOOK.with(|h| match h.borrow_mut().as_mut() {
             Some(hook) => hook(src, dst),
@@ -580,9 +587,15 @@ pub mod race {
 }
 
 #[cfg(test)]
+// Most of these tests need a move, which Windows refuses (el-usdqi D4);
+// their helpers are unused there.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod legacy;
 
 #[cfg(test)]
+// Most of these tests need a move, which Windows refuses (el-usdqi D4);
+// their helpers are unused there.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod race_tests;
 
 #[cfg(all(test, unix))]
@@ -914,6 +927,8 @@ mod lightroom_tests {
         assert!(db.journal_quarantined(None).unwrap().is_empty());
     }
 
+    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+    #[cfg(unix)]
     #[test]
     fn a_lightroom_bundle_moved_by_an_earlier_version_still_comes_home() {
         // Returning is putting back: the rule that keeps Lightroom where it
@@ -939,6 +954,9 @@ mod lightroom_tests {
 }
 
 #[cfg(test)]
+// Most of these tests need a move, which Windows refuses (el-usdqi D4);
+// their helpers are unused there.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod undo_tests {
     use super::*;
     use pc_db::{Db, JournalStatus, Moved, NewJournalEntry};
@@ -978,6 +996,8 @@ mod undo_tests {
         (id, src, dst)
     }
 
+    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+    #[cfg(unix)]
     #[test]
     fn an_undo_that_cannot_finish_moves_nothing_and_can_be_asked_again() {
         // Half an undo is not an undo. The photograph used to come home while

@@ -343,9 +343,11 @@ async fn restart_marks_abandoned_work_interrupted_without_replaying_pending_move
 
 /// A cache that refuses every thumbnail, as a bound cache replaced at its
 /// path does (el-5x1uh O2). The database itself is confirmed.
+#[cfg(unix)]
 #[derive(Debug)]
 struct RefusedCache;
 
+#[cfg(unix)]
 impl pc_core::storage::StorageBinding for RefusedCache {
     fn check_database(&self) -> Result<(), String> {
         Ok(())
@@ -363,6 +365,9 @@ impl pc_core::storage::StorageBinding for RefusedCache {
 /// progress, no file is recorded without its thumbnail and nothing is
 /// written into the cache — as the command line, which runs the same
 /// `pc_work::index` and exits with the same error.
+// SQLite's Windows VFS cannot answer SQLITE_FCNTL_HAS_MOVED, so a bound
+// database is refused at open there and the job never starts.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn an_index_job_over_a_refused_cache_fails_and_names_the_refusal() {
     let tmp = tempfile::tempdir().unwrap();

@@ -579,6 +579,9 @@ pub(crate) fn not_tried_folder() -> String {
 }
 
 #[cfg(test)]
+// Most of these tests need a move, which Windows refuses (el-usdqi D4);
+// their helpers are unused there.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
 
@@ -610,6 +613,8 @@ mod tests {
         }
     }
 
+    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+    #[cfg(unix)]
     #[test]
     fn an_undo_brings_back_only_what_this_move_took() {
         // A stranger's sidecar can already be sitting in quarantine: another
@@ -647,6 +652,8 @@ mod tests {
         );
     }
 
+    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+    #[cfg(unix)]
     #[test]
     fn a_sidecar_that_cannot_move_keeps_its_frame_home_and_says_why() {
         // The sidecar's place in quarantine is taken. It used to be left
@@ -680,6 +687,8 @@ mod tests {
         assert!(db.journal_quarantined(None).unwrap().is_empty());
     }
 
+    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+    #[cfg(unix)]
     #[test]
     fn a_sidecar_in_quarantine_belongs_to_the_run_that_put_it_there() {
         // Orphan quarantine offers to adopt or purge whatever the journal
@@ -727,6 +736,8 @@ mod tests {
         assert!(!known("from-another-database.jpg"));
     }
 
+    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+    #[cfg(unix)]
     #[test]
     fn an_old_journal_does_not_reach_into_a_new_index() {
         // A reset empties the index but keeps the journal, because the

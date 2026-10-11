@@ -278,6 +278,8 @@ fn reconcile_uses_identity_instead_of_home_name() {
 /// the row was finished. Recovery works from the evidence recorded before
 /// the move, so the frame comes back, and a file swapped in at its
 /// quarantine name meanwhile does not.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn retry_after_crash_uses_persisted_object_evidence() {
     for swapped in [false, true] {
@@ -323,6 +325,8 @@ fn retry_after_crash_uses_persisted_object_evidence() {
 /// in place: same device and inode, different object state — what an
 /// inode handed out again looks like to `dev:ino`. The retry does not
 /// accept it as the frame the operation moved.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn identity_reuse_is_not_silently_accepted() {
     let a = archive();
@@ -378,6 +382,8 @@ fn repeated_retry_keeps_the_original_note() {
 
 /// Every attempt is its own event: identical ones, and one whose words are
 /// contained in an earlier one, are all kept, in order.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn repeated_and_distinct_refusals_preserve_all_events() {
     let a = archive();
@@ -433,6 +439,8 @@ fn reconcile_ambiguity_preserves_prior_evidence() {
 }
 
 /// D6b. A successful recovery adds its own line and keeps the history.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn reconcile_success_preserves_prior_evidence() {
     let a = archive();
@@ -455,6 +463,8 @@ fn reconcile_success_preserves_prior_evidence() {
 
 /// The frame's way home is taken, and the journal cannot record that. The
 /// caller hears both: the refusal, and that it is not written down.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_note_write_failure_is_reported_with_the_original_refusal() {
     let a = archive();
@@ -487,6 +497,8 @@ fn a_note_write_failure_is_reported_with_the_original_refusal() {
 /// D7. The sidecar's place in quarantine is taken: the frame (9 bytes)
 /// does not move without it (user decision (c)), and nothing is counted as
 /// held.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_refused_sidecar_keeps_its_frame_and_nothing_is_counted() {
     let a = archive();
@@ -512,6 +524,8 @@ fn a_refused_sidecar_keeps_its_frame_and_nothing_is_counted() {
 /// A reorganisation stopped in its litter sweep: the frame, its sidecar
 /// and the first service file moved; the second service file met the
 /// volume. All three moves are in what the stop reports.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn partial_outcomes_include_moved_sidecars_and_litter() {
     let a = archive();

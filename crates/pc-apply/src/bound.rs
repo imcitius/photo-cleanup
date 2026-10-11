@@ -47,7 +47,9 @@
 //! comparison after it are residuals, stated in DESIGN §11.2.
 
 use anyhow::{anyhow, bail, Result};
-use pc_core::proof::{Proof, Verdict};
+use pc_core::proof::Proof;
+#[cfg(unix)]
+use pc_core::proof::Verdict;
 pub use pc_core::whereabouts::Whereabouts;
 
 #[cfg(unix)]
@@ -350,21 +352,18 @@ impl Held {
     }
 
     /// The same object, under the same name, unchanged.
+    // Only Unix binds an object; elsewhere `bind` refuses before this is reachable.
+    #[cfg(unix)]
     pub(crate) fn verify(&self) -> Result<()> {
-        #[cfg(unix)]
-        {
-            if let Some(f) = &self.file {
-                match self.proof.check_file(f) {
-                    Verdict::Same => {}
-                    Verdict::Differs(why) | Verdict::Unprovable(why) => {
-                        bail!("{}", self.entry.differs(why))
-                    }
+        if let Some(f) = &self.file {
+            match self.proof.check_file(f) {
+                Verdict::Same => {}
+                Verdict::Differs(why) | Verdict::Unprovable(why) => {
+                    bail!("{}", self.entry.differs(why))
                 }
             }
-            self.entry.verify(&self.proof)
         }
-        #[cfg(not(unix))]
-        bail!("unsupported")
+        self.entry.verify(&self.proof)
     }
 }
 

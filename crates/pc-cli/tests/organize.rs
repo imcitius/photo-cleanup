@@ -5,6 +5,10 @@
 //! frames, the index keeps pointing at real paths, and one command puts the
 //! whole archive back exactly as it was.
 
+// The tests that move need Windows to move, and it refuses (el-usdqi D4);
+// what only they read is unused there.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -177,6 +181,8 @@ fn two_frames_with_one_sony_filename_both_survive() {
     assert_eq!(plan.renamed, 1);
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn applying_moves_the_files_the_sidecars_and_the_index() {
     let w = build_world();
@@ -216,6 +222,8 @@ fn applying_moves_the_files_the_sidecars_and_the_index() {
     );
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn undo_puts_every_file_back_where_it_was() {
     let w = build_world();
@@ -243,6 +251,8 @@ fn undo_puts_every_file_back_where_it_was() {
     );
 }
 
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_second_pass_has_nothing_left_to_do() {
     let w = build_world();

@@ -136,6 +136,8 @@ impl std::error::Error for Refusal {
     }
 }
 
+// Only the Unix layout writer checks entries; on Windows the layout is refused.
+#[cfg(unix)]
 fn foreign(path: &Path, (ru, en): (&str, &str)) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,

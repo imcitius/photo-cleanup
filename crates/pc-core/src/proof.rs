@@ -73,6 +73,8 @@ pub enum Verdict {
     Unprovable(&'static str),
 }
 
+// Only the Unix branch of `Proof::of` names an object; elsewhere it returns `None`.
+#[cfg(unix)]
 fn nanos(t: std::io::Result<std::time::SystemTime>) -> Option<i128> {
     let t = t.ok()?;
     Some(match t.duration_since(std::time::UNIX_EPOCH) {

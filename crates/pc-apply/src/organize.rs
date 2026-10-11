@@ -522,6 +522,8 @@ pub fn undo_run(db: &Db, run_id: i64) -> Result<(Tally, Vec<String>)> {
 mod tests {
     use super::*;
 
+    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+    #[cfg(unix)]
     #[test]
     fn an_undo_after_a_reset_moves_the_file_and_leaves_the_index_alone() {
         // Same reuse of row ids as in quarantine: an old reorganisation entry
@@ -603,6 +605,8 @@ mod tests {
         );
     }
 
+    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+    #[cfg(unix)]
     #[test]
     fn a_service_file_is_quarantined_not_deleted_and_comes_back() {
         // An AppleDouble can carry a resource fork, and Finder's folder note

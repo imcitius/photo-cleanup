@@ -8,7 +8,10 @@
 //! a half-finished undo or recovery can be asked again and finishes.
 
 use super::*;
+// Shared slots for hooks that plant strangers; those tests are Unix-only.
+#[cfg(unix)]
 use std::cell::RefCell;
+#[cfg(unix)]
 use std::rc::Rc;
 
 /// Everything about a directory entry that a stranger would care about.
@@ -164,6 +167,8 @@ fn a_refused_candidate_never_writes_through_a_layout_symlink() {
 /// Nothing in the archive changes when the check before the run refuses a
 /// candidate — with the default quarantine beside the file, and with a
 /// configured one that does not exist yet.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn the_check_before_a_run_writes_nothing() {
     for gathered in [false, true] {
@@ -236,6 +241,8 @@ fn a_stranger_at_the_layout_name_stops_the_move_and_stays_intact() {
 
 /// The layout is published once, and a second disk's label joins it; what
 /// was recorded first is never lost.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn the_layout_is_written_once_and_grows() {
     let tmp = tempfile::tempdir().unwrap();
@@ -379,6 +386,8 @@ fn an_old_half_undo_without_a_list_is_not_finished_by_guessing() {
 /// the photograph that already moved is put back with it (user decision
 /// (c)), the refusal names the sidecar, and the next photograph is never
 /// touched.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_volume_refusal_at_a_sidecar_stops_apply_after_journaling_the_photo() {
     let a = archive();
@@ -418,6 +427,8 @@ fn a_volume_refusal_at_a_sidecar_stops_apply_after_journaling_the_photo() {
 }
 
 /// The same at a sidecar in a reorganisation.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_volume_refusal_at_a_sidecar_stops_organize() {
     let a = archive();
@@ -456,6 +467,8 @@ fn a_volume_refusal_at_a_sidecar_stops_organize() {
 /// The litter sweep after a reorganisation: the first service file refused
 /// by the volume stops the sweep, so the second emptied folder is left as
 /// it was, and organize reports the stop.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_volume_refusal_in_the_litter_sweep_stops_it() {
     let a = archive();
@@ -486,6 +499,8 @@ fn a_volume_refusal_in_the_litter_sweep_stops_it() {
 
 /// Walking a reorganisation back: a volume refusal stops the walk instead of
 /// being collected as one more failure while the next entries are tried.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_volume_refusal_stops_the_undo_of_a_run() {
     let a = archive();
@@ -526,6 +541,8 @@ fn a_volume_refusal_stops_the_undo_of_a_run() {
 /// The second photograph's move is refused by the volume, the third is
 /// never tried. The first stays moved and undoable, and the caller is told
 /// exactly that — not that nothing moved.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_run_stopped_halfway_says_what_had_moved_and_how_to_undo_it() {
     let a = archive();
@@ -598,6 +615,8 @@ fn a_refused_recovery_is_written_down_and_stays_pending() {
 /// and the first goes back into quarantine (user decision (c)). The journal
 /// says where both are, the entry stays pending, and the volume refusal
 /// keeps its type for the caller.
+// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+#[cfg(unix)]
 #[test]
 fn a_recovery_stopped_by_the_volume_says_what_came_back() {
     let a = archive();

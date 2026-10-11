@@ -51,6 +51,8 @@
 //! detected afterwards and reported, not prevented.
 
 use anyhow::{anyhow, bail, Result};
+// Evidence is checked only by the Unix purge; elsewhere purge refuses.
+#[cfg(unix)]
 use pc_core::proof::{Kind, Proof};
 use pc_db::{Db, JournalEntry, JournalStatus};
 
