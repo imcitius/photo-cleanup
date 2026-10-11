@@ -2316,6 +2316,8 @@ mod at {
             let name = CString::new(entry.file_name().as_bytes())?;
             if kind.is_dir() {
                 mkdir(to, &name, 0o700)?;
+                #[cfg(test)]
+                super::reviewer_round3::after_mkdir();
                 copy_tree(&entry.path(), &open_dir_at(to, &name)?)?;
             } else if kind.is_file() {
                 let mut out = open_at(
@@ -6513,5 +6515,494 @@ mod windows_registration_tests {
             fs::read(foreign.join("IMG_0001.JPG")).unwrap(),
             b"only copy"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod reviewer_round3 {
+    use super::caller_tests::{plenty, Env};
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    const BYTES: &[u8] = b"synthetic foreign only copy 72819";
+    type Stamp = (u64, u64, u32, u32, i64, i64);
+    fn stamp(p: &Path) -> Stamp {
+        let m = fs::symlink_metadata(p).unwrap();
+        (
+            m.dev(),
+            m.ino(),
+            m.mode(),
+            m.uid(),
+            m.mtime(),
+            m.mtime_nsec(),
+        )
+    }
+    fn plant(p: &Path) -> Stamp {
+        fs::write(p, BYTES).unwrap();
+        fs::set_permissions(p, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_019))
+            .unwrap();
+        stamp(p)
+    }
+    fn preserved(p: &Path, before: Stamp) {
+        assert_eq!(fs::read(p).unwrap(), BYTES);
+        assert_eq!(stamp(p), before);
+    }
+    #[test]
+    fn reviewer_round3_caller_must_not_succeed_with_nonempty_saved_staging() {
+        let env = Env::new();
+        let target = env.root.join("target");
+        let saved = env.root.join("saved-nonempty-staging");
+        let before_bootstrap = env.bootstrap();
+        let mut before = None;
+        let result = move_data_with(
+            &env.dirs,
+            &env.layout,
+            Source::System,
+            &target,
+            plenty,
+            &mut |step, at| {
+                if step == Step::Publish {
+                    before = Some(plant(&target.join(PARTIAL_DB).join("foreign.raw")));
+                }
+                if step == Step::BeforeMove {
+                    fs::rename(at, &saved).unwrap();
+                    fs::create_dir(at).unwrap();
+                }
+            },
+        );
+        preserved(&saved.join("foreign.raw"), before.unwrap());
+        eprintln!(
+            "REVIEW R3 silent success: result={result:?}; saved={}; bootstrap_changed={}",
+            saved.display(),
+            env.bootstrap() != before_bootstrap
+        );
+        assert!(
+            matches!(result, Err(RelocateError::Incomplete { .. })),
+            "caller must refuse switching while a nonempty staging was left: {result:?}"
+        );
+        assert_eq!(env.bootstrap(), before_bootstrap);
+    }
+    #[test]
+    fn reviewer_round3_caller_names_all_twenty_five_foreign_entries() {
+        let env = Env::new();
+        let target = env.root.join("target");
+        let mut stamps = Vec::new();
+        let result = move_data_with(
+            &env.dirs,
+            &env.layout,
+            Source::System,
+            &target,
+            plenty,
+            &mut |step, _| {
+                if step == Step::Publish {
+                    for n in 0..25 {
+                        let name = format!("foreign-{n:02}.raw");
+                        stamps.push((name.clone(), plant(&target.join(PARTIAL_DB).join(name))));
+                    }
+                }
+            },
+        );
+        assert!(
+            matches!(result, Err(RelocateError::Incomplete { .. })),
+            "{result:?}"
+        );
+        let error = result.unwrap_err().to_string();
+        let moved = ownership_tests::leftover(&target).join(PARTIAL_DB);
+        for (name, before) in &stamps {
+            preserved(&moved.join(name), *before);
+        }
+        let missing: Vec<_> = stamps
+            .iter()
+            .filter(|(name, _)| !error.contains(name))
+            .map(|(name, _)| name)
+            .collect();
+        eprintln!("REVIEW R3 full inventory: missing={missing:?}; error={error}");
+        assert!(
+            missing.is_empty(),
+            "caller omitted retained foreign paths: {missing:?}"
+        );
+    }
+    #[test]
+    fn reviewer_round3_caller_names_foreign_entries_on_io_refusal() {
+        let env = Env::new();
+        let target = env.root.join("target");
+        let mut stamps = Vec::new();
+        let result = move_data_with(
+            &env.dirs,
+            &env.layout,
+            Source::System,
+            &target,
+            plenty,
+            &mut |step, _| {
+                if step == Step::Publish {
+                    for name in ["foreign-a.raw", "foreign-b.raw"] {
+                        stamps.push((name, plant(&target.join(PARTIAL_DB).join(name))));
+                    }
+                }
+                if step == Step::BeforeMove {
+                    fs::set_permissions(&target, fs::Permissions::from_mode(0o500)).unwrap();
+                }
+            },
+        );
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            matches!(result, Err(RelocateError::Incomplete { .. })),
+            "{result:?}"
+        );
+        let error = result.unwrap_err().to_string();
+        for (name, before) in stamps {
+            preserved(&target.join(PARTIAL_DB).join(name), before);
+        }
+        eprintln!("REVIEW R3 I/O inventory: {error}");
+        assert!(
+            error.contains("foreign-a.raw") && error.contains("foreign-b.raw"),
+            "caller omits visible retained foreign siblings: {error}"
+        );
+    }
+    #[test]
+    fn reviewer_round3_original_b3_locked_child_preserves_and_names_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let handle = owned.handle.as_file().try_clone().unwrap();
+        fs::create_dir(path.join("locked-own-folder")).unwrap();
+        let a = plant(&path.join("foreign-a.raw"));
+        let b = plant(&path.join("foreign-b.raw"));
+        fs::set_permissions(
+            path.join("locked-own-folder"),
+            fs::Permissions::from_mode(0o0),
+        )
+        .unwrap();
+        let result = owned.release();
+        let actual = anchored::current_path(&handle).unwrap();
+        fs::set_permissions(
+            actual.join("locked-own-folder"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        preserved(&actual.join("foreign-a.raw"), a);
+        preserved(&actual.join("foreign-b.raw"), b);
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("foreign-a.raw") && error.contains("foreign-b.raw"),
+            "{error}"
+        );
+    }
+    #[test]
+    fn reviewer_round3_original_b1_foreign_triad_and_owned_copy_are_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("our-copy"), b"synthetic copied data").unwrap();
+        let path = temp.path().join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let handle = owned.handle.as_file().try_clone().unwrap();
+        at::copy_tree(&source, owned.handle.as_file()).unwrap();
+        let original = temp.path().join("original.raw");
+        let original_stamp = plant(&original);
+        let regular_stamp = plant(&path.join("foreign.raw"));
+        std::os::unix::fs::symlink(&original, path.join("foreign-link")).unwrap();
+        let link_stamp = stamp(&path.join("foreign-link"));
+        fs::hard_link(&original, path.join("foreign-alias")).unwrap();
+        let error = owned.release().unwrap_err();
+        let actual = anchored::current_path(&handle).unwrap();
+        preserved(&original, original_stamp);
+        preserved(&actual.join("foreign.raw"), regular_stamp);
+        preserved(&actual.join("foreign-alias"), original_stamp);
+        assert_eq!(
+            fs::read_link(actual.join("foreign-link")).unwrap(),
+            original
+        );
+        assert_eq!(stamp(&actual.join("foreign-link")), link_stamp);
+        assert_eq!(fs::metadata(&original).unwrap().nlink(), 2);
+        assert_eq!(
+            fs::read(actual.join("our-copy")).unwrap(),
+            b"synthetic copied data"
+        );
+        for name in ["foreign.raw", "foreign-link", "foreign-alias", "our-copy"] {
+            assert!(error.contains(name), "{error}");
+        }
+    }
+    type AfterMkdir = Option<Box<dyn FnOnce()>>;
+    thread_local! { static AFTER_MKDIR: std::cell::RefCell<AfterMkdir> = const { std::cell::RefCell::new(None) }; }
+    pub(super) fn after_mkdir() {
+        AFTER_MKDIR.with(|slot| {
+            if let Some(f) = slot.borrow_mut().take() {
+                f();
+            }
+        });
+    }
+    #[test]
+    fn reviewer_round3_b2_foreign_directory_at_capture_keeps_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(source.join("thumbs")).unwrap();
+        let path = temp.path().join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let handle = owned.handle.as_file().try_clone().unwrap();
+        let foreign = temp.path().join("foreign-folder");
+        fs::create_dir(&foreign).unwrap();
+        fs::set_permissions(&foreign, fs::Permissions::from_mode(0o755)).unwrap();
+        let before = stamp(&foreign);
+        let inserted = path.join("thumbs");
+        let saved = temp.path().join("saved-own-child");
+        AFTER_MKDIR.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&inserted, saved).unwrap();
+                fs::rename(foreign, inserted).unwrap();
+            }))
+        });
+        at::copy_tree(&source, owned.handle.as_file()).unwrap();
+        let error = owned.release().unwrap_err();
+        let actual = anchored::current_path(&handle).unwrap();
+        assert_eq!(stamp(&actual.join("thumbs")), before);
+        assert!(error.contains("thumbs"), "{error}");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reviewer_round3_b1_inode_reuse_keeps_foreign_payload_and_names_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("copy"), b"synthetic cache").unwrap();
+        let path = temp.path().join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let handle = owned.handle.as_file().try_clone().unwrap();
+        at::copy_tree(&source, owned.handle.as_file()).unwrap();
+        let copied = path.join("copy");
+        let original_ino = fs::metadata(&copied).unwrap().ino();
+        fs::remove_file(copied).unwrap();
+        let foreign = path.join("new-foreign.raw");
+        let mut collided = false;
+        for attempt in 0..16384 {
+            fs::write(&foreign, BYTES).unwrap();
+            if fs::metadata(&foreign).unwrap().ino() == original_ino {
+                collided = true;
+                eprintln!("REVIEW R3 inode reuse at {attempt}: {original_ino}");
+                break;
+            }
+            fs::remove_file(&foreign).unwrap();
+        }
+        assert!(collided, "fixture precondition: no inode reuse");
+        let before = stamp(&foreign);
+        let error = owned.release().unwrap_err();
+        let actual = anchored::current_path(&handle).unwrap();
+        preserved(&actual.join("new-foreign.raw"), before);
+        assert!(error.contains("new-foreign.raw"), "{error}");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod reviewer_round3_windows {
+    use super::*;
+    #[test]
+    fn reviewer_round3_junction_swapped_before_rmdir_must_be_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        fs::write(path.join("own-copy"), b"synthetic owned copy").unwrap();
+        let saved = temp.path().join("saved-staging");
+        let foreign = temp.path().join("foreign-target");
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("foreign.raw"), b"synthetic only foreign copy").unwrap();
+        let result = owned.release_with(&mut |step, at| {
+            if step == Step::BeforeMove {
+                fs::rename(at, &saved).unwrap();
+                let out = std::process::Command::new("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(at)
+                    .arg(&foreign)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{out:?}");
+                assert!(fs::symlink_metadata(at).unwrap().file_type().is_symlink());
+            }
+        });
+        assert_eq!(
+            fs::read(saved.join("own-copy")).unwrap(),
+            b"synthetic owned copy"
+        );
+        assert_eq!(
+            fs::read(foreign.join("foreign.raw")).unwrap(),
+            b"synthetic only foreign copy"
+        );
+        eprintln!(
+            "REVIEW R3 Windows junction: result={result:?}; junction_exists={}",
+            fs::symlink_metadata(&path).is_ok()
+        );
+        assert!(
+            fs::symlink_metadata(&path).is_ok(),
+            "foreign junction namespace object was deleted"
+        );
+        assert!(
+            result.is_err(),
+            "nonempty staging was left without reporting"
+        );
+    }
+    #[test]
+    fn reviewer_round3_nt_rename_never_overwrites_existing_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        fs::write(path.join("own-copy"), b"synthetic own copy").unwrap();
+        let dest = temp.path().join("leftover");
+        let destination = OwnedDirectory::create(&dest).unwrap();
+        fs::write(dest.join("staging"), b"synthetic foreign occupant").unwrap();
+        let result = windows_acl::rename_into(
+            owned.handle.as_file(),
+            destination.handle.as_file(),
+            std::ffi::OsStr::new("staging"),
+        );
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(
+            fs::read(dest.join("staging")).unwrap(),
+            b"synthetic foreign occupant"
+        );
+        assert_eq!(
+            fs::read(path.join("own-copy")).unwrap(),
+            b"synthetic own copy"
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod reviewer_round3_original_windows {
+    use super::*;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::process::Command;
+
+    fn metadata(path: &Path) -> (u32, u64, u64, u64) {
+        let m = fs::symlink_metadata(path).unwrap();
+        (
+            m.file_attributes(),
+            m.creation_time(),
+            m.last_write_time(),
+            m.file_size(),
+        )
+    }
+
+    #[test]
+    fn reviewer_foreign_file_present_before_cleanup_is_retained_and_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let foreign = temp.path().join("foreign-photo.raw");
+        fs::write(&foreign, b"synthetic foreign original").unwrap();
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let inserted = path.join("foreign-photo.raw");
+        fs::rename(&foreign, &inserted).unwrap();
+        let before = metadata(&inserted);
+        let result = owned.release();
+        let inserted = ownership_tests::leftover(temp.path())
+            .join(PARTIAL_THUMBS)
+            .join(inserted.file_name().unwrap());
+        eprintln!(
+            "foreign regular: result={result:?}, retained={}",
+            inserted.exists()
+        );
+        assert!(
+            inserted.exists(),
+            "cleanup deleted a pre-existing foreign file; result={result:?}"
+        );
+        assert_eq!(fs::read(&inserted).unwrap(), b"synthetic foreign original");
+        assert_eq!(metadata(&inserted), before);
+        assert!(result.unwrap_err().contains("foreign-photo.raw"));
+    }
+
+    #[test]
+    fn reviewer_foreign_junction_present_before_cleanup_is_retained_and_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("foreign-target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("original.raw"), b"synthetic only copy").unwrap();
+        let foreign = temp.path().join("foreign-junction");
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&foreign)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let inserted = path.join("foreign-junction");
+        fs::rename(&foreign, &inserted).unwrap();
+        let before = metadata(&inserted);
+        let destination = fs::read_link(&inserted).unwrap();
+        let result = owned.release();
+        let inserted = ownership_tests::leftover(temp.path())
+            .join(PARTIAL_THUMBS)
+            .join(inserted.file_name().unwrap());
+        let retained = fs::symlink_metadata(&inserted).is_ok();
+        eprintln!(
+            "foreign junction: result={result:?}, retained={retained}, target_retained={}",
+            target.join("original.raw").exists()
+        );
+        assert_eq!(
+            fs::read(target.join("original.raw")).unwrap(),
+            b"synthetic only copy"
+        );
+        assert!(
+            retained,
+            "cleanup deleted the foreign junction object; result={result:?}"
+        );
+        assert_eq!(metadata(&inserted), before);
+        assert_eq!(fs::read_link(&inserted).unwrap(), destination);
+        assert!(result.unwrap_err().contains("foreign-junction"));
+    }
+
+    #[test]
+    fn reviewer_foreign_hard_link_present_before_cleanup_is_retained_and_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let foreign = temp.path().join("foreign-original.raw");
+        let alias = temp.path().join("foreign-alias.raw");
+        fs::write(&foreign, b"synthetic linked original").unwrap();
+        fs::hard_link(&foreign, &alias).unwrap();
+        let path = temp.path().join(PARTIAL_THUMBS);
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let inserted = path.join("foreign-alias.raw");
+        fs::rename(&alias, &inserted).unwrap();
+        let before = metadata(&foreign);
+        let result = owned.release();
+        let inserted = ownership_tests::leftover(temp.path())
+            .join(PARTIAL_THUMBS)
+            .join(inserted.file_name().unwrap());
+        eprintln!(
+            "foreign hard link: result={result:?}, alias_retained={}, original_retained={}",
+            inserted.exists(),
+            foreign.exists()
+        );
+        assert_eq!(fs::read(&foreign).unwrap(), b"synthetic linked original");
+        assert_eq!(metadata(&foreign), before);
+        assert!(
+            inserted.exists(),
+            "cleanup removed a foreign hard link; result={result:?}"
+        );
+        assert!(result.unwrap_err().contains("foreign-alias.raw"));
+    }
+
+    #[test]
+    fn reviewer_sharing_refusal_never_registers_a_valid_private_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private");
+        create_private_dir(&path).unwrap();
+        let before = metadata(&path);
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .custom_flags(0x0200_0000 | 0x0020_0000)
+            .open(&path)
+            .unwrap();
+        let error = open_created_dir(&path).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot be opened for deleting"),
+            "{error}"
+        );
+        assert_eq!(metadata(&path), before);
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+        drop(locked);
     }
 }
