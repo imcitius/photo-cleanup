@@ -518,7 +518,7 @@ mod platform {
         let first_made = fan_out(first, true).map_err(|e| refused(first, e.to_string()))?;
         let fan_made = match fan_out(fan, first_made) {
             Ok(made) => made,
-            Err(_) if !first_made && !first.join(fan.file_name().unwrap()).exists() => {
+            Err(_) if !first_made && !fan.exists() => {
                 return Err(refused(first, super::unproven()))
             }
             Err(e) => return Err(refused(fan, e.to_string())),
