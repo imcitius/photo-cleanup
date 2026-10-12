@@ -25,16 +25,16 @@
 //! - **One writer.** The database's writer lock is held for the whole copy,
 //!   so the command line or a second server cannot write to the source
 //!   between the snapshot and the switch.
-//! - **Cleanup only owns its own namespace**: the private `.partial` directory
-//!   and unchanged reservations this run created are removed, and only those — a `.partial` found there
-//!   beforehand blocks the move instead of being cleaned up, because it is
-//!   not ours to delete. Removal is never "check the name, then delete the
-//!   name": the entry is first moved into a fresh private folder, and only
-//!   what is proven there to be this run's own object is deleted (see
-//!   [`remove_owned`] for the conditions and limits of that guarantee). What
-//!   cannot be removed is returned as an error naming it; after a published
-//!   copy that makes [`Copied::commit`] (and [`move_data`]) refuse to
-//!   switch, so the shell does not restart as if cleanup had finished.
+//! - **Cleanup unlinks nothing.** A failed or cancelled run leaves its own
+//!   entries — the private `.partial` folder with whatever is in it, the
+//!   published `thumbs/`, the sidecar reservations — on disk: an empty
+//!   folder goes with `rmdir`, everything else is moved, without replacing
+//!   anything, into one new `photo-cleanup-leftover-*` folder in the target
+//!   ([`Leftovers`]), and the error names every entry and that folder. A
+//!   `.partial` found there beforehand blocks the move instead. After a
+//!   published copy, a staging folder that is not gone makes
+//!   [`Copied::commit`] (and [`move_data`]) refuse to switch, so the shell
+//!   does not restart as if cleanup had finished.
 
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
@@ -350,9 +350,9 @@ pub struct Copied {
     pub rows: u64,
     pub thumbs_files: u64,
     pub thumbs_bytes: u64,
-    /// The copy is published and proven, but the now-empty staging folder
-    /// could not be removed; why, and where it is (either the original
-    /// `.partial` name or a `.photo-cleanup-removing-*` folder it was moved
+    /// The copy is published and proven, but the staging folder could not
+    /// be removed with `rmdir`; why, and where it is (either the original
+    /// `.partial` name or the `photo-cleanup-leftover-*` folder it was moved
     /// into). [`Copied::commit`] refuses such a copy with
     /// [`RelocateError::Incomplete`], so the caller cannot switch and
     /// restart as if cleanup had finished.
@@ -517,9 +517,9 @@ pub enum RelocateError {
     Verify { reason: String },
     /// Recording the new folder failed; the old one is still the chosen one.
     Startup { error: StartupError },
-    /// The run failed with `error`, and its cleanup could not remove all it
-    /// had created. `left` names each leftover and why. Nothing that was not
-    /// proven to be this run's own was deleted.
+    /// The run failed with `error` and left entries on disk: `left` names
+    /// each one, where it is and why, and the leftover folder they were
+    /// moved into. Cleanup deletes no file, so nothing was lost.
     Cleanup {
         error: Box<RelocateError>,
         left: Vec<String>,
@@ -827,8 +827,7 @@ fn copy_data_with(
         }
     };
     let staging_left = cleanup.succeed_with(race);
-    let mut sidecars = cleanup.sidecars.take().unwrap_or_default();
-    sidecars.keep = true;
+    let sidecars = cleanup.sidecars.take().unwrap_or_default();
     let target_ns = cleanup.target.take().expect("stage keeps the target");
     Ok(Copied {
         _source_lock: source_lock,
@@ -979,14 +978,13 @@ fn stage(
     let staging_dir = cleanup.db.as_ref().expect("registered").handle.as_file();
     anchored::move_child(staging_dir, THUMBS_DIR, &thumbs, target_dir.file())
         .map_err(|e| publish_err(&partial, THUMBS_DIR, &target, &e))?;
-    // Published, but ours until the database is: a failure below removes
-    // it again, by identity.
+    // Published, but ours until the database is: a failure below sets it
+    // aside again, by identity.
     let kept = same_file::Handle::from_file(thumbs.as_file().try_clone().map_err(copy_err)?)
         .map_err(copy_err)?;
     cleanup.thumbs = Some(OwnedDirectory {
         path: to.thumbs.clone(),
         handle: thumbs,
-        keep: false,
     });
     anchored::move_child(staging_dir, DB_FILE, &snap.db, target_dir.file())
         .map_err(|e| publish_err(&partial, DB_FILE, &target, &e))?;
@@ -1024,66 +1022,50 @@ fn publish_err(partial: &Path, name: &str, target: &Path, e: &io::Error) -> Relo
 
 /// Try the call everything of this run is moved with — a rename that never
 /// replaces ([`at::rename_no_replace`]) — inside the open `target`, before
-/// anything is written there that the run would have to remove again
+/// anything is written there that the run would have to set aside again
 /// (el-21zyg). [`volume::check_exclusive_rename`] already asked the volume;
 /// this catches a volume that does not say (Linux has no such query) or
 /// says wrongly.
 ///
-/// The trial runs in a fresh private folder ([`Aside::create`]): an empty
-/// file is created in it exclusively and renamed within it. Whatever the
-/// answer, the file is deleted only from that folder's descriptor and only
-/// while the entry is the file just made, then the folder is removed as
-/// the cleanup removes its own ([`Aside::remove`]). Anything that cannot be
-/// removed that way is left where it is and named.
+/// The trial renames an empty folder made for it, then removes it with
+/// `rmdir`, which removes nothing but an empty folder: whatever someone puts
+/// into it meanwhile keeps it, and it is named.
 ///
 /// Not supported → [`Blocker::NoExclusiveRename`] for `target`, nothing
 /// left behind; a leftover of the trial → [`RelocateError::Cleanup`]
 /// naming it. Never falls back to a rename that could replace an entry.
 #[cfg(unix)]
 fn probe_exclusive_rename(target: &Path, target_dir: &fs::File) -> Result<(), RelocateError> {
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::MetadataExt;
-    const FROM: &std::ffi::CStr = c"rename-probe";
-    const TO: &std::ffi::CStr = c"rename-probe-moved";
-    // Not the run's `race` hook: the trial is not the cleanup it watches.
-    let aside = Aside::create(target, target_dir, &mut no_race).map_err(copy_err)?;
-    let file = match at::open_at(
-        &aside.dir,
-        FROM,
-        libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-        0o600,
-    ) {
-        Ok(file) => file,
-        Err(e) => {
-            let made = format!(
-                "{} could not be created: {e}",
-                aside.describe(std::ffi::OsStr::new("rename-probe"))
-            );
-            return Err(match aside.remove(target_dir, Ok(())) {
-                Ok(()) => copy_err(made),
-                Err(left) => RelocateError::Cleanup {
-                    error: Box::new(copy_err(made)),
-                    left: vec![left],
-                },
-            });
-        }
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let name = format!(
+        "{PROBE_PREFIX}-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let moved = format!("{name}-moved");
+    let (from, to) = (
+        std::ffi::CString::new(name.as_str()).map_err(copy_err)?,
+        std::ffi::CString::new(moved.as_str()).map_err(copy_err)?,
+    );
+    at::mkdir(target_dir, &from, 0o700).map_err(|e| {
+        copy_err(format!(
+            "{} could not be created: {e}",
+            target.join(&name).display()
+        ))
+    })?;
+    let renamed = at::rename_no_replace(target_dir, &from, target_dir, &to);
+    let (left_name, left_c) = if renamed.is_ok() {
+        (moved, to)
+    } else {
+        (name, from)
     };
-    let renamed = at::rename_no_replace(&aside.dir, FROM, &aside.dir, TO);
-    let name = if renamed.is_ok() { TO } else { FROM };
-    let shown = || aside.describe(std::ffi::OsStr::from_bytes(name.to_bytes()));
-    let removed = match (at::lstat(&aside.dir, name), file.metadata()) {
-        (Ok(st), Ok(m))
-            if at::kind(&st) == libc::S_IFREG && at::identity(&st) == (m.dev(), m.ino()) =>
-        {
-            at::unlink(&aside.dir, name, false)
-                .map_err(|e| format!("{} could not be removed: {e}", shown()))
-        }
-        _ => Err(format!(
-            "{} was left in place: it is not the trial file this run made",
-            shown()
-        )),
-    };
-    let left = aside.remove(target_dir, removed).err();
+    let left = at::rmdir(target_dir, &left_c).err().map(|e| {
+        format!(
+            "{} (an empty folder this run made to try a rename) was left in place: {e}",
+            target.join(left_name).display()
+        )
+    });
     let error = match renamed {
         Ok(()) => None,
         Err(e) => Some(blocked(Blocker::NoExclusiveRename {
@@ -1097,8 +1079,7 @@ fn probe_exclusive_rename(target: &Path, target_dir: &fs::File) -> Result<(), Re
         (error, Some(left)) => Err(RelocateError::Cleanup {
             error: Box::new(error.unwrap_or_else(|| {
                 copy_err(format!(
-                    "the trial rename in {} worked, but its private folder could not be \
-                     removed",
+                    "the trial rename in {} worked, but its folder could not be removed",
                     target.display()
                 ))
             })),
@@ -1106,6 +1087,10 @@ fn probe_exclusive_rename(target: &Path, target_dir: &fs::File) -> Result<(), Re
         }),
     }
 }
+
+/// Prefix of the empty folder [`probe_exclusive_rename`] renames.
+#[cfg(unix)]
+const PROBE_PREFIX: &str = ".photo-cleanup-rename-probe";
 
 /// Windows renames through handles ([`anchored::move_child`]) and does not
 /// copy at all ([`crate::namespace`]); other systems have no exclusive
@@ -1585,12 +1570,19 @@ fn looks_like_ours(db: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Removes what this run put in the target, unless the run succeeded.
+/// What this run put in the target, until the run succeeds or gives up.
 ///
-/// [`Cleanup::abort`] reports what it could not remove; `Drop` is only the
-/// last resort (a panic) and has nowhere to report to.
+/// Nothing in here is ever unlinked (DESKTOP.md, «Очистка временных
+/// файлов»). [`Cleanup::abort`] leaves every entry of the run on disk: an
+/// empty folder goes with `rmdir`, which cannot remove contents; everything
+/// else is moved, without replacing anything, into one new
+/// `photo-cleanup-leftover-*` folder in the target ([`Leftovers`]), so that
+/// the names a retry needs are free, and every entry is named in the
+/// result. `Drop` is only the last resort (a panic) and has nowhere to
+/// report to.
 struct Cleanup {
-    /// The admitted target; folders it created are removed on abort.
+    /// The admitted target; folders it created are removed on abort if
+    /// they are empty.
     target: Option<Protected>,
     sidecars: Option<SidecarReservations>,
     /// The private staging folder (`photo-cleanup.db.partial`), with the
@@ -1610,34 +1602,37 @@ impl Cleanup {
         }
     }
 
-    /// The copy is published: keep it, the thumbnails and the reservations;
-    /// remove the database's now-empty staging folder. A failure there is
-    /// returned, not fatal — the copy itself is complete — and
-    /// [`Copied::commit`] turns it into an error.
+    /// The copy is published: keep it, the thumbnails and the reservations.
+    /// The database's staging folder is empty now and goes with `rmdir`;
+    /// if it is not empty, or `rmdir` fails, it is set aside like an
+    /// aborted run's and the lines come back — the copy itself is complete,
+    /// and [`Copied::commit`] turns them into an error.
     fn succeed_with(&mut self, race: &mut dyn FnMut(Step, &Path)) -> Option<String> {
-        if let Some(thumbs) = &mut self.thumbs {
-            thumbs.keep = true;
-        }
         self.thumbs = None;
-        self.db.take().and_then(|db| db.release_with(race).err())
+        let db = self.db.take()?;
+        let mut left = Leftovers::default();
+        left.settle(&db.path, &db.handle, Owned::Directory, race);
+        let lines = left.finish();
+        (!lines.is_empty()).then(|| lines.join("; "))
     }
 
-    /// Undo this run, one line per thing it could not remove.
+    /// Give up: one line per entry of this run that is still on disk, and
+    /// where.
     fn abort(&mut self) -> Vec<String> {
-        let mut left = Vec::new();
+        let mut left = Leftovers::default();
         for owned in [self.thumbs.take(), self.db.take()].into_iter().flatten() {
-            left.extend(owned.release().err());
+            left.settle(&owned.path, &owned.handle, Owned::Directory, &mut no_race);
         }
         if let Some(sidecars) = self.sidecars.take() {
-            left.extend(sidecars.release());
+            sidecars.release_into(&mut left, &mut no_race);
         }
         if let Some(target) = &mut self.target {
-            // `rmdir` removes only an empty folder: one that someone put
-            // something into meanwhile (our own writer lock included) stays,
+            // `rmdir` removes only an empty folder: one that holds anything
+            // — our own writer lock or leftover folder included — stays,
             // and that is not an error.
             let _ = target.remove_created();
         }
-        left
+        left.finish()
     }
 }
 
@@ -1689,46 +1684,37 @@ fn same_entry(path: &Path, handle: &same_file::Handle, directory: bool) -> bool 
     })
 }
 
-/// What kind of entry a cleanup owns.
+/// What kind of entry this run made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Owned {
-    /// A staging directory with everything in it.
+    /// A staging folder, with whatever is in it.
     Directory,
-    /// A reservation that must still be empty.
-    EmptyFile,
+    /// A sidecar reservation.
+    File,
 }
 
 impl Owned {
+    /// The entry at `path` itself (never a link's target) is the object
+    /// behind `handle`.
     fn is_ours(self, path: &Path, handle: &same_file::Handle) -> bool {
-        match self {
-            Self::Directory => same_entry(path, handle, true),
-            Self::EmptyFile => {
-                same_entry(path, handle, false)
-                    && handle.as_file().metadata().is_ok_and(|m| m.len() == 0)
-            }
-        }
+        same_entry(path, handle, self == Self::Directory)
     }
 
-    /// [`Owned::is_ours`] for `name` in the open directory `dir`: the entry
-    /// itself (never a link's target) is the object behind `handle`.
+    /// [`Owned::is_ours`] for `name` in the open directory `dir`.
     #[cfg(unix)]
     fn is_ours_at(self, dir: &fs::File, name: &std::ffi::CStr, handle: &same_file::Handle) -> bool {
         let wanted = match self {
             Self::Directory => libc::S_IFDIR,
-            Self::EmptyFile => libc::S_IFREG,
+            Self::File => libc::S_IFREG,
         };
         at::lstat(dir, name).is_ok_and(|st| {
-            at::kind(&st) == wanted
-                && at::identity(&st) == (handle.dev(), handle.ino())
-                && (self == Self::Directory
-                    || handle.as_file().metadata().is_ok_and(|m| m.len() == 0))
+            at::kind(&st) == wanted && at::identity(&st) == (handle.dev(), handle.ino())
         })
     }
 }
 
-/// Points inside [`remove_owned_with`] where another process could act.
-/// Tests act there; production passes [`no_race`]. Windows deletes through
-/// handles and has only `Created` and `BeforeDelete`.
+/// Points where another process could act. Tests act there; production
+/// passes [`no_race`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(unix), allow(dead_code))]
 enum Step {
@@ -1750,208 +1736,450 @@ enum Step {
     /// The target's path was checked; the proven copies are about to be
     /// moved out of the staging folder into the target.
     Publish,
-    /// The public name was checked; it is about to be moved aside.
+    /// [`Leftovers::settle`] found this run's entry at its name; it is
+    /// about to be removed with `rmdir` (an empty folder) or set aside.
     BeforeMove,
-    /// A private cleanup folder was made; it is about to be checked.
-    AsideCreated,
-    /// Moved aside, not yet checked there.
+    /// The leftover folder (the path given) was made, not yet checked.
+    LeftoverCreated,
+    /// Moved into the leftover folder (the path given), not yet checked
+    /// there.
     Moved,
-    /// Proven ours in the private folder (Windows: at its name); about to
-    /// be deleted.
-    BeforeDelete,
 }
 
 fn no_race(_: Step, _: &Path) {}
 
-/// Remove `path` only if it is still the object behind `handle`.
+/// Prefix of the folder an aborted run's entries are moved into.
+const LEFTOVER_PREFIX: &str = "photo-cleanup-leftover";
+
+/// What a run leaves on disk, collected entry by entry: one line per entry,
+/// whatever happened to the others — an error on one never hides the rest
+/// (review el-5izhs, B3-R2).
 ///
-/// POSIX has no "unlink this name only if it is still that inode", so a
-/// check of `path` followed by a delete of `path` can delete whatever
-/// another process renamed onto `path` in between. And every *name* the
-/// cleanup uses — `path`, its parent, a private folder next to it — can be
-/// renamed by anyone allowed to rename entries in the folder that holds it
-/// (review el-5null: the whole private folder was renamed after the proof
-/// and a foreign tree put under the old names; deleting by path deleted
-/// it). So on Unix, after the parent is opened, nothing is addressed by a
-/// path again; every step names an entry relative to an open directory
-/// descriptor (`*at` system calls):
+/// Nothing is unlinked here. For each entry of this run
+/// ([`Leftovers::settle`]):
 ///
-/// 1. The parent is opened once. A replaced, changed or symlinked entry at
-///    `name` in it is left alone.
-/// 2. A fresh folder with a unique name is created beside it, private to
-///    this user from the start, opened relative to the parent descriptor
-///    and checked through its own descriptor ([`Aside::create`]); `name`
-///    is renamed into that descriptor without replacement. A rename moves
-///    exactly the entry that is at `name` at that instant — never follows
-///    a symlink, never replaces anything.
-/// 3. The moved entry is checked again in the private folder, through its
-///    descriptor. If it is not ours (it was swapped in after step 1) it is
-///    renamed back into the parent descriptor without replacement; if the
-///    name was taken again meanwhile it stays in the private folder and
-///    the error says where. Nothing is deleted.
-/// 4. Only an entry proven ours in the private folder is deleted, relative
-///    to the private folder's descriptor, a directory entry by entry
-///    through descriptors ([`at::remove_tree`]). Renaming the private
-///    folder, the parent or any ancestor meanwhile changes nothing: the
-///    descriptors still point at the folders that were checked, and no
-///    other account can change what is inside the private folder.
-/// 5. The private folder is removed by name only if that name still holds
-///    the folder behind its descriptor; otherwise the name is left alone
-///    and the error says where the private folder is now (if the system
-///    can say: `F_GETPATH` on macOS, `/proc/self/fd` on Linux).
+/// - an empty folder is removed with `rmdir`, which removes nothing but an
+///   empty folder. Known limits, outside the threat model (same-user
+///   interference exactly between two system calls; user decision
+///   2026-10-05, confirmed 2026-10-12 after review el-vuz4b): an *empty*
+///   foreign folder renamed onto our name between the identity check and
+///   `rmdir` is removed — it holds no data — and our own folder stays
+///   wherever it was moved, possibly not empty, unreported (B1-R3); on
+///   Windows a junction put there is removed as a link object, its target
+///   untouched (B3-R3);
+/// - anything else is moved, without replacing anything
+///   ([`at::rename_no_replace`]; Windows: our own object, through its
+///   handle), into one leftover folder made for this run next to it
+///   ([`LeftoverFolder`]). Retries take a fresh name for theirs and never
+///   look inside an old one;
+/// - an entry that is no longer ours at its name is left exactly where it
+///   is, and the line says so and, if the system can say, where ours is.
 ///
-/// Windows needs none of this: an object can be deleted through a handle
-/// to it. The name is checked, and then the object behind `handle` is
-/// deleted wherever it is by then, a directory entry by entry through
-/// handles opened by file ID (`windows_acl::delete_tree`). No path is used
-/// for the delete.
-///
-/// What this proves, and under which conditions (DESKTOP.md, "Очистка
-/// временных файлов"): if `handle` really is the object this run created,
-/// no other entry is deleted — whatever is renamed onto `path`, onto the
-/// private folder's name or onto any ancestor, before or after any check.
-/// That needs both preconditions:
-///
-/// - `handle` was captured correctly. `OwnedDirectory::create_with` opens
-///   it by name after creating it and accepts it only as an empty directory
-///   of this user that no other account can use, opened without following
-///   links ([`open_created_dir`]); a swap by another OS user fails that
-///   check and nothing is registered (el-2xri).
-/// - The private folder and our own staging directory are not manipulated
-///   with the user's own authority. Owner-only access (Unix mode 0700
-///   without extended ACL entries, a protected owner-only DACL on Windows)
-///   keeps other OS users out of them; it is **not** a boundary against a
-///   process running as the same user, root or admin, which can change the
-///   user's files directly anyway and is outside the product's threat
-///   model.
-///
-/// Known limits, pinned by tests: (a) on Unix a replacement is briefly
-/// absent from `path` between steps 2 and 3; (b) whatever is moved into
-/// the private folder, or into our own staging directory, after the step 3
-/// check is treated as ours; (c) bytes written through a descriptor opened
-/// on our own reservation (possible through its public name before step 2)
-/// go with it; (d) step 5 is a check and then `rmdir` of the name: an
-/// *empty* folder renamed onto the private folder's name between the two
-/// is removed (`rmdir` never removes contents). Every failure returns an
-/// error naming what was left and where — the original name or the private
-/// folder.
-fn remove_owned(path: &Path, handle: &same_file::Handle, kind: Owned) -> Result<(), String> {
-    remove_owned_with(path, handle, kind, &mut no_race)
+/// On Unix a foreign entry swapped onto our name in the instant between
+/// the check and the move ends up in the leftover folder; it is checked
+/// there, put back if its name is free, and otherwise named as *not* this
+/// run's, so the user is never told that folder holds only our own
+/// entries.
+#[derive(Default)]
+struct Leftovers {
+    folders: Vec<LeftoverFolder>,
+    lines: Vec<String>,
+    /// A foreign entry could not be put back from a leftover folder.
+    foreign: bool,
+}
+
+impl Leftovers {
+    /// Put this run's entry at `path` (the object behind `handle`) where it
+    /// no longer blocks a retry, or say why it is where it is.
+    fn settle(
+        &mut self,
+        path: &Path,
+        handle: &same_file::Handle,
+        kind: Owned,
+        race: &mut dyn FnMut(Step, &Path),
+    ) {
+        match fs::symlink_metadata(path) {
+            // Not at its name: done only if it is gone altogether (SQLite
+            // consumes empty sidecars).
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                self.lines.extend(not_at_name(path, handle, kind).err());
+                return;
+            }
+            Err(e) => {
+                self.lines.push(format!(
+                    "{} was left in place: {e}{}",
+                    path.display(),
+                    contents(handle, kind)
+                ));
+                return;
+            }
+            Ok(_) if !kind.is_ours(path, handle) => {
+                self.lines.push(replaced(path, handle, kind));
+                return;
+            }
+            Ok(_) => {}
+        }
+        race(Step::BeforeMove, path);
+        if kind == Owned::Directory {
+            match fs::remove_dir(path) {
+                Ok(()) => return,
+                Err(e) if !not_empty(&e) => {
+                    self.lines.push(if kind.is_ours(path, handle) {
+                        format!(
+                            "{} was left in place: this run's own folder could not be removed: \
+                             {e}{}",
+                            path.display(),
+                            contents(handle, kind)
+                        )
+                    } else {
+                        replaced(path, handle, kind)
+                    });
+                    return;
+                }
+                Err(_) => {}
+            }
+        }
+        self.set_aside(path, handle, kind, race);
+    }
+
+    /// The leftover folder in `parent`, made on first use.
+    fn folder(
+        &mut self,
+        parent: &Path,
+        race: &mut dyn FnMut(Step, &Path),
+    ) -> io::Result<&LeftoverFolder> {
+        let i = match self.folders.iter().position(|f| f.parent == parent) {
+            Some(i) => i,
+            None => {
+                self.folders.push(LeftoverFolder::create(parent, race)?);
+                self.folders.len() - 1
+            }
+        };
+        Ok(&self.folders[i])
+    }
+
+    #[cfg(unix)]
+    fn set_aside(
+        &mut self,
+        path: &Path,
+        handle: &same_file::Handle,
+        kind: Owned,
+        race: &mut dyn FnMut(Step, &Path),
+    ) {
+        use std::os::unix::ffi::OsStrExt;
+        let kept = |why: &dyn fmt::Display| {
+            format!(
+                "{} was left in place: this run's own entry could not be moved aside: {why}{}",
+                path.display(),
+                contents(handle, kind)
+            )
+        };
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return self.lines.push(kept(&"it has no parent folder"));
+        };
+        let entry = match std::ffi::CString::new(name.as_bytes()) {
+            Ok(entry) => entry,
+            Err(e) => return self.lines.push(kept(&e)),
+        };
+        let parent_dir = match at::open_dir(parent) {
+            Ok(dir) => dir,
+            Err(e) => return self.lines.push(kept(&e)),
+        };
+        if !kind.is_ours_at(&parent_dir, &entry, handle) {
+            return self.lines.push(replaced(path, handle, kind));
+        }
+        let folder = match self.folder(parent, race) {
+            Ok(folder) => folder,
+            Err(e) => return self.lines.push(kept(&e)),
+        };
+        let moved = folder.path.join(name);
+        if let Err(e) = at::rename_no_replace(&parent_dir, &entry, &folder.dir, &entry) {
+            return self.lines.push(kept(&e));
+        }
+        race(Step::Moved, &moved);
+        let moved = folder.now().join(name);
+        if kind.is_ours_at(&folder.dir, &entry, handle) {
+            let line = kept_line(&moved, path, handle, kind);
+            return self.lines.push(line);
+        }
+        // Swapped onto our name after the check: not ours, so not ours to
+        // move. Back to its name if that is still free.
+        let line = match at::rename_no_replace(&folder.dir, &entry, &parent_dir, &entry) {
+            Ok(()) => replaced(path, handle, kind),
+            Err(e) => {
+                self.foreign = true;
+                format!(
+                    "{} is NOT this run's: someone else put it at {} just before it was moved \
+                     aside, and it could not be put back ({e}); {}",
+                    moved.display(),
+                    path.display(),
+                    replaced(path, handle, kind)
+                )
+            }
+        };
+        self.lines.push(line);
+    }
+
+    /// Windows moves the object behind `handle` itself, wherever it is
+    /// (`FILE_RENAME_INFO` with the leftover folder's handle as root): what
+    /// is at the name is never moved.
+    #[cfg(windows)]
+    fn set_aside(
+        &mut self,
+        path: &Path,
+        handle: &same_file::Handle,
+        kind: Owned,
+        race: &mut dyn FnMut(Step, &Path),
+    ) {
+        let kept = |why: &dyn fmt::Display| {
+            format!(
+                "{} was left in place: this run's own entry could not be moved aside: {why}{}",
+                path.display(),
+                contents(handle, kind)
+            )
+        };
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return self.lines.push(kept(&"it has no parent folder"));
+        };
+        let folder = match self.folder(parent, race) {
+            Ok(folder) => folder,
+            Err(e) => return self.lines.push(kept(&e)),
+        };
+        let moved = folder.path.join(name);
+        if let Err(e) = windows_acl::rename_into(handle.as_file(), &folder.dir, name) {
+            return self.lines.push(kept(&e));
+        }
+        race(Step::Moved, &moved);
+        let line = kept_line(&folder.now().join(name), path, handle, kind);
+        self.lines.push(line);
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn set_aside(
+        &mut self,
+        path: &Path,
+        _: &same_file::Handle,
+        _: Owned,
+        _: &mut dyn FnMut(Step, &Path),
+    ) {
+        self.lines.push(format!(
+            "{} was left in place: no safe way to move it aside on this platform",
+            path.display()
+        ));
+    }
+
+    /// One line per entry still on disk, and per leftover folder what may
+    /// be done with it. A leftover folder that ended up empty (nothing
+    /// could be moved into it) goes with `rmdir`, like any empty folder.
+    fn finish(self) -> Vec<String> {
+        let mut lines = self.lines;
+        for folder in &self.folders {
+            if entry_names(&folder.dir).is_ok_and(|names| names.is_empty())
+                && fs::remove_dir(folder.now()).is_ok()
+            {
+                continue;
+            }
+            lines.push(if self.foreign {
+                format!(
+                    "{} also holds an entry that is not this run's (see above): look at \
+                     everything in it before deleting anything",
+                    folder.shown()
+                )
+            } else {
+                format!(
+                    "{} holds this run's own entries listed above, with everything that was \
+                     in them — not necessarily made by this run: look at all of it before \
+                     deleting anything",
+                    folder.shown()
+                )
+            });
+        }
+        lines
+    }
+
+    /// [`Leftovers::finish`], `Ok` only if nothing was left.
+    #[cfg(test)]
+    fn result(self) -> Result<(), String> {
+        let lines = self.finish();
+        if lines.is_empty() {
+            Ok(())
+        } else {
+            Err(lines.join("; "))
+        }
+    }
+}
+
+/// `rmdir` failed because the folder holds something.
+fn not_empty(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::DirectoryNotEmpty || (cfg!(unix) && e.raw_os_error() == Some(EEXIST))
 }
 
 #[cfg(unix)]
-fn remove_owned_with(
-    path: &Path,
-    handle: &same_file::Handle,
-    kind: Owned,
-    race: &mut dyn FnMut(Step, &Path),
-) -> Result<(), String> {
-    use std::os::unix::ffi::OsStrExt;
-    let kept = |why: &dyn fmt::Display| format!("{} was left in place: {why}", path.display());
-    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-        return Err(kept(&"it has no parent folder"));
-    };
-    let entry = std::ffi::CString::new(name.as_bytes()).map_err(|e| kept(&e))?;
-    let parent_dir = match at::open_dir(parent) {
-        // Gone with its parent: nothing of ours is at this name.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return not_at_name(path, handle),
-        Err(e) => return Err(kept(&e)),
-        Ok(dir) => dir,
-    };
-    match at::lstat(&parent_dir, &entry) {
-        // Gone already (SQLite consumes empty sidecars): nothing to do.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return not_at_name(path, handle),
-        Err(e) => return Err(kept(&e)),
-        Ok(_) if !kind.is_ours_at(&parent_dir, &entry, handle) => {
-            return Err(kept(&"it was replaced or changed by someone else"))
-        }
-        Ok(_) => {}
-    }
-    let aside = Aside::create(parent, &parent_dir, race).map_err(|e| kept(&e))?;
-    race(Step::BeforeMove, path);
-    if let Err(e) = at::rename_no_replace(&parent_dir, &entry, &aside.dir, &entry) {
-        let result = match e.kind() {
-            io::ErrorKind::NotFound => not_at_name(path, handle),
-            _ => Err(kept(&e)),
-        };
-        return aside.remove(&parent_dir, result);
-    }
-    race(Step::Moved, &aside.path.join(name));
-    if !kind.is_ours_at(&aside.dir, &entry, handle) {
-        return match at::rename_no_replace(&aside.dir, &entry, &parent_dir, &entry) {
-            Ok(()) => aside.remove(&parent_dir, Err(kept(&"it was replaced by someone else"))),
-            Err(e) => Err(format!(
-                "{} replaced {} and was moved aside; it could not be put back ({e}). Nothing was deleted",
-                aside.describe(name),
-                path.display()
-            )),
-        };
-    }
-    race(Step::BeforeDelete, &aside.path.join(name));
-    match kind {
-        Owned::Directory => at::remove_tree(&aside.dir, &entry),
-        Owned::EmptyFile => at::unlink(&aside.dir, &entry, false),
-    }
-    .map_err(|e| {
-        format!(
-            "{} (this run's own {}) could not be removed: {e}",
-            aside.describe(name),
-            path.display()
-        )
-    })?;
-    aside.remove(&parent_dir, Ok(()))
+const EEXIST: i32 = libc::EEXIST;
+#[cfg(not(unix))]
+const EEXIST: i32 = -1;
+
+/// This run's entry now at `moved`, with what is in it if it is a folder.
+fn kept_line(moved: &Path, was: &Path, handle: &same_file::Handle, kind: Owned) -> String {
+    let what = contents(handle, kind);
+    format!(
+        "{} (this run's own {}{what}) was moved there and kept",
+        moved.display(),
+        was.display()
+    )
 }
 
+/// The names in the folder open as `dir`, listed through the handle.
+fn entry_names(dir: &fs::File) -> io::Result<Vec<String>> {
+    #[cfg(unix)]
+    return Ok(at::names(dir)?
+        .into_iter()
+        .map(|n| n.to_string_lossy().into_owned())
+        .collect());
+    #[cfg(windows)]
+    return windows_acl::names(dir);
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// What this run's folder behind `handle` holds, for its line: the whole
+/// tree, every entry by its path inside the folder, however many there are
+/// (review el-vuz4b, B2-R3: a name left out is a file the user is not told
+/// about). Empty for a sidecar reservation.
+fn contents(handle: &same_file::Handle, kind: Owned) -> String {
+    if kind == Owned::File {
+        return String::new();
+    }
+    match inventory(handle.as_file()) {
+        Ok(names) if names.is_empty() => ", empty".into(),
+        Ok(names) => format!(
+            ", holding {} entr{} (all kept; anyone may have put them there): {}",
+            names.len(),
+            if names.len() == 1 { "y" } else { "ies" },
+            names.join(", ")
+        ),
+        Err(e) => format!(", whose contents could not be listed: {e}"),
+    }
+}
+
+/// Every entry in the folder open as `dir`, recursively, as paths relative
+/// to it (`thumbs/`, `thumbs/ab.jpg`). Only reads: subfolders are opened
+/// through their parent's handle, never through a link; a link or a
+/// junction is named, not entered. A subfolder that cannot be listed is
+/// named with the reason, and the rest is still listed; `Err` only if
+/// `dir` itself cannot be.
+fn inventory(dir: &fs::File) -> io::Result<Vec<String>> {
+    fn walk(dir: &fs::File, prefix: &str, out: &mut Vec<String>) -> io::Result<()> {
+        for (name, entry) in listing(dir)? {
+            let shown = format!("{prefix}{name}");
+            match entry {
+                Listed::Other => out.push(shown),
+                Listed::Unknown(e) => out.push(format!("{shown} (could not be examined: {e})")),
+                Listed::Folder(key) => {
+                    let shown = format!("{shown}/");
+                    let at = out.len();
+                    out.push(shown.clone());
+                    if let Err(e) = open_listed(dir, &key).and_then(|sub| walk(&sub, &shown, out)) {
+                        out[at] = format!("{shown} (its contents could not be listed: {e})");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out)?;
+    Ok(out)
+}
+
+/// An entry found by [`listing`].
+enum Listed {
+    /// A plain folder, to be opened with [`open_listed`].
+    Folder(ListedKey),
+    /// Anything else, links included: named, never entered.
+    Other,
+    /// Its type could not be read.
+    Unknown(io::Error),
+}
+
+#[cfg(unix)]
+type ListedKey = std::ffi::CString;
 #[cfg(windows)]
-fn remove_owned_with(
-    path: &Path,
-    handle: &same_file::Handle,
-    kind: Owned,
-    race: &mut dyn FnMut(Step, &Path),
-) -> Result<(), String> {
-    let kept = |why: &dyn fmt::Display| format!("{} was left in place: {why}", path.display());
-    match fs::symlink_metadata(path) {
-        // Gone already (SQLite consumes empty sidecars): nothing to do.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return not_at_name(path, handle),
-        Err(e) => return Err(kept(&e)),
-        Ok(_) if !kind.is_ours(path, handle) => {
-            return Err(kept(&"it was replaced or changed by someone else"))
-        }
-        Ok(_) => {}
-    }
-    race(Step::BeforeDelete, path);
-    let own = |why: &dyn fmt::Display| {
-        format!(
-            "this run's own {} could not be removed: {why}; whatever is at that name now \
-             was not touched",
-            path.display()
-        )
-    };
-    if kind == Owned::EmptyFile && !handle.as_file().metadata().is_ok_and(|m| m.len() == 0) {
-        return Err(kept(&"it was written to by someone else"));
-    }
-    windows_acl::delete_tree(handle.as_file(), kind == Owned::Directory).map_err(|e| own(&e))
-}
-
+type ListedKey = i64;
 #[cfg(not(any(unix, windows)))]
-fn remove_owned_with(
-    path: &Path,
-    _: &same_file::Handle,
-    _: Owned,
-    _: &mut dyn FnMut(Step, &Path),
-) -> Result<(), String> {
-    Err(format!(
-        "{} was left in place: no safe way to remove it on this platform",
-        path.display()
-    ))
+type ListedKey = ();
+
+/// The entries in the folder open as `dir`, sorted by name.
+fn listing(dir: &fs::File) -> io::Result<Vec<(String, Listed)>> {
+    #[cfg(unix)]
+    let mut entries: Vec<_> = at::names(dir)?
+        .into_iter()
+        .map(|name| {
+            let entry = match at::lstat(dir, &name) {
+                Ok(st) if at::kind(&st) == libc::S_IFDIR => Listed::Folder(name.clone()),
+                Ok(_) => Listed::Other,
+                Err(e) => Listed::Unknown(e),
+            };
+            (name.to_string_lossy().into_owned(), entry)
+        })
+        .collect();
+    #[cfg(windows)]
+    let mut entries: Vec<_> = windows_acl::entries(dir)?
+        .into_iter()
+        .map(|(name, id, folder)| {
+            (
+                name,
+                if folder {
+                    Listed::Folder(id)
+                } else {
+                    Listed::Other
+                },
+            )
+        })
+        .collect();
+    #[cfg(not(any(unix, windows)))]
+    let mut entries: Vec<(String, Listed)> = {
+        let _ = dir;
+        return Err(io::Error::from(io::ErrorKind::Unsupported));
+    };
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries)
 }
 
-/// Nothing is at `path` any more. That is done only if the object behind
-/// `handle` is gone too (deleted — SQLite consumes empty sidecars — or gone
+/// The folder `key` found by [`listing`] in `dir`, opened as itself.
+fn open_listed(dir: &fs::File, key: &ListedKey) -> io::Result<fs::File> {
+    #[cfg(unix)]
+    return at::open_dir_at(dir, key);
+    #[cfg(windows)]
+    return windows_acl::open_folder(dir, *key);
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (dir, key);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// `path` holds something that is not this run's entry any more.
+fn replaced(path: &Path, handle: &same_file::Handle, kind: Owned) -> String {
+    let line = format!(
+        "{} was left in place: it is not this run's entry any more, someone else put it there",
+        path.display()
+    );
+    match not_at_name(path, handle, kind) {
+        Ok(()) => line,
+        Err(ours) => format!("{line}; {ours}"),
+    }
+}
+
+/// Nothing of ours is at `path` any more. That is done only if the object
+/// behind `handle` is gone too (SQLite consumes empty sidecars, or it went
 /// with its parent). If it still exists it was moved away with its name or
 /// a folder above it (review el-2ztq8: the target renamed after the check):
 /// it is left where it is, and the error says where, if the system can say.
-fn not_at_name(path: &Path, handle: &same_file::Handle) -> Result<(), String> {
+fn not_at_name(path: &Path, handle: &same_file::Handle, kind: Owned) -> Result<(), String> {
     #[cfg(unix)]
     let exists = {
         use std::os::unix::fs::MetadataExt;
@@ -1966,84 +2194,67 @@ fn not_at_name(path: &Path, handle: &same_file::Handle) -> Result<(), String> {
     }
     Err(match anchored::current_path(handle.as_file()) {
         Some(now) => format!(
-            "{} is no longer at that name: this run's own entry was moved by someone else \
-             to {} and was left there",
+            "this run's own entry from {} was moved by someone else to {} and was left there{}",
             path.display(),
-            now.display()
+            now.display(),
+            contents(handle, kind)
         ),
         None => format!(
-            "{} is no longer at that name: this run's own entry was moved by someone else \
-             to an unknown place and was left there",
-            path.display()
+            "this run's own entry from {} was moved by someone else to an unknown place and \
+             was left there{}",
+            path.display(),
+            contents(handle, kind)
         ),
     })
 }
 
-/// Prefix of the private folders cleanup moves entries into (Unix).
-#[cfg(any(unix, test))]
-const ASIDE_PREFIX: &str = ".photo-cleanup-removing";
-
-/// A new, empty folder next to an entry being removed, private to this
-/// user, held open: every operation in it goes through [`Aside::dir`].
-#[cfg(unix)]
-struct Aside {
-    /// Where it was made; only for messages and test hooks.
+/// A new folder `photo-cleanup-leftover-<UTC time>[-n]` in `parent` for
+/// this run's entries, private to this user from its creation
+/// ([`create_private_dir`]) and checked like a staging folder
+/// ([`open_created_dir`]) before anything is moved into it. A name that is
+/// taken is skipped (the creating call fails on any existing entry), never
+/// checked first and reused.
+struct LeftoverFolder {
+    parent: PathBuf,
     path: PathBuf,
-    name: std::ffi::CString,
     dir: fs::File,
 }
 
-#[cfg(unix)]
-impl Aside {
-    /// A folder in `parent` that nobody else has a name for, made private
-    /// to this user at creation ([`create_private_dir`]), then opened
-    /// relative to `parent_dir` without following links and checked
-    /// through that descriptor like a staging directory
-    /// ([`fresh_private_dir`]) before anything is moved into it. A folder
-    /// that fails the check is left where it is, and the error names it.
-    fn create(
-        parent: &Path,
-        parent_dir: &fs::File,
-        race: &mut dyn FnMut(Step, &Path),
-    ) -> io::Result<Self> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        for _ in 0..16 {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos());
-            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let name = format!("{ASIDE_PREFIX}-{}-{nanos:x}-{n}", std::process::id());
-            let path = parent.join(&name);
+impl LeftoverFolder {
+    fn create(parent: &Path, race: &mut dyn FnMut(Step, &Path)) -> io::Result<Self> {
+        let (y, mo, d, h, mi, s) = pc_core::time::civil_from_unix(pc_core::time::now_unix());
+        let stamp = format!("{LEFTOVER_PREFIX}-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}");
+        for n in 1..=100 {
+            let path = parent.join(if n == 1 {
+                stamp.clone()
+            } else {
+                format!("{stamp}-{n}")
+            });
             match create_private_dir(&path) {
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(e) => {
                     return Err(io::Error::new(
                         e.kind(),
                         format!(
-                            "the private folder {} could not be created: {e}",
+                            "the folder {} for this run's leftovers could not be created: {e}",
                             path.display()
                         ),
                     ))
                 }
                 Ok(()) => {}
             }
-            race(Step::AsideCreated, &path);
-            let name = std::ffi::CString::new(name)?;
-            let opened = at::open_dir_at(parent_dir, &name).and_then(|dir| {
-                // SAFETY: `geteuid` has no preconditions and cannot fail.
-                let euid = unsafe { libc::geteuid() };
-                fresh_private_dir(&dir, euid)
-                    .map_err(|why| io::Error::new(io::ErrorKind::AlreadyExists, why))?;
-                Ok(dir)
-            });
-            return match opened {
-                Ok(dir) => Ok(Self { path, name, dir }),
+            race(Step::LeftoverCreated, &path);
+            return match open_created_dir(&path) {
+                Ok(dir) => Ok(Self {
+                    parent: parent.to_path_buf(),
+                    path,
+                    dir,
+                }),
                 Err(e) => Err(io::Error::new(
                     e.kind(),
                     format!(
-                        "the private folder {} cannot be proven to be the one just made ({e}); \
-                         it was left in place",
+                        "{} was made for this run's leftovers, but cannot be proven to be that \
+                         folder ({e}); nothing was moved into it",
                         path.display()
                     ),
                 )),
@@ -2051,59 +2262,29 @@ impl Aside {
         }
         Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "no free name for a private cleanup folder",
+            format!("no free name for a leftover folder in {}", parent.display()),
         ))
     }
 
-    /// `name` in this folder, for a message: where it was made, and where
-    /// the folder is now if someone moved it.
-    fn describe(&self, name: &std::ffi::OsStr) -> String {
-        let made = self.path.join(name);
-        match at::current_path(&self.dir) {
-            Some(now) if !same_place(&now, &self.path) => format!(
-                "{} (its private folder was moved by someone else to {})",
-                made.display(),
-                now.display()
-            ),
-            _ => made.display().to_string(),
-        }
+    /// Where it is now, if the system can say; else where it was made.
+    fn now(&self) -> PathBuf {
+        anchored::current_path(&self.dir).unwrap_or_else(|| self.path.clone())
     }
 
-    /// Remove the (by now empty) folder and add a failure to do so to
-    /// `result`: an empty `.photo-cleanup-removing-*` folder left behind is
-    /// a leftover too, and is reported like one. The name is removed only
-    /// while it still holds this folder; `rmdir` never removes contents.
-    fn remove(self, parent_dir: &fs::File, result: Result<(), String>) -> Result<(), String> {
-        let ours = match (at::lstat(parent_dir, &self.name), self.dir.metadata()) {
-            (Ok(st), Ok(m)) => {
-                use std::os::unix::fs::MetadataExt;
-                at::identity(&st) == (m.dev(), m.ino())
-            }
-            _ => false,
-        };
-        let removed = if ours {
-            at::unlink(parent_dir, &self.name, true)
-                .map_err(|e| format!("{} could not be removed: {e}", self.path.display()))
-        } else {
-            Err(format!(
-                "the private folder {} was moved or replaced by someone else; whatever is at \
-                 that name now was left in place{}",
+    /// Where it was made, and where it is now if someone moved it.
+    fn shown(&self) -> String {
+        match anchored::current_path(&self.dir) {
+            Some(now) if !same_place(&now, &self.path) => format!(
+                "the leftover folder {} (moved by someone else to {})",
                 self.path.display(),
-                match at::current_path(&self.dir) {
-                    Some(now) => format!(", and the private folder is now {}", now.display()),
-                    None => String::new(),
-                }
-            ))
-        };
-        match (removed, result) {
-            (Ok(()), result) => result,
-            (Err(e), Ok(())) => Err(e),
-            (Err(e), Err(why)) => Err(format!("{why}; {e}")),
+                now.display()
+            ),
+            _ => format!("the leftover folder {}", self.path.display()),
         }
     }
 }
 
-/// Descriptor-relative file operations for [`remove_owned_with`]: once a
+/// Descriptor-relative file operations: once a
 /// directory is open, entries in it are named relative to its descriptor,
 /// so renaming that directory or any of its ancestors cannot redirect them
 /// (review el-5null).
@@ -2195,27 +2376,11 @@ mod at {
         pc_core::disk::rename_no_replace_at(from_dir, from, to_dir, to)
     }
 
-    /// `unlinkat`: a file, or (`directory`) an empty directory.
-    pub(super) fn unlink(dir: &fs::File, name: &CStr, directory: bool) -> io::Result<()> {
-        let flags = if directory { libc::AT_REMOVEDIR } else { 0 };
+    /// `unlinkat(AT_REMOVEDIR)`: removes `name` in `dir` only if it is an
+    /// empty directory. Relocation unlinks nothing else.
+    pub(super) fn rmdir(dir: &fs::File, name: &CStr) -> io::Result<()> {
         // SAFETY: an open descriptor and a NUL-terminated name.
-        check(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), flags) })
-    }
-
-    /// Delete the directory `name` in `dir` and everything in it. Each
-    /// level is opened relative to the one above without following links;
-    /// a link inside is removed, never followed.
-    pub(super) fn remove_tree(dir: &fs::File, name: &CStr) -> io::Result<()> {
-        let sub = open_dir_at(dir, name)?;
-        for child in names(&sub)? {
-            if kind(&lstat(&sub, &child)?) == libc::S_IFDIR {
-                remove_tree(&sub, &child)?;
-            } else {
-                unlink(&sub, &child, false)?;
-            }
-        }
-        drop(sub);
-        unlink(dir, name, true)
+        check(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) })
     }
 
     /// `mkdirat`: a new directory `name` in `dir`; an existing entry fails.
@@ -2485,7 +2650,7 @@ mod anchored {
     /// `DELETE` access, so it never conflicts with another handle's sharing.
     #[cfg(windows)]
     pub(super) fn identity(dir: &fs::File, name: &str) -> io::Result<fs::File> {
-        super::windows_acl::child(dir, name.as_ref(), false)
+        super::windows_acl::child(dir, name.as_ref())
     }
 
     #[cfg(not(windows))]
@@ -2564,10 +2729,11 @@ mod anchored {
     }
 }
 
+/// A folder this run made, as the object it made: [`Leftovers::settle`]
+/// decides what happens to it.
 struct OwnedDirectory {
     path: PathBuf,
     handle: same_file::Handle,
-    keep: bool,
 }
 
 impl OwnedDirectory {
@@ -2614,43 +2780,22 @@ impl OwnedDirectory {
         Ok(Self {
             path: path.to_path_buf(),
             handle: same_file::Handle::from_file(file)?,
-            keep: false,
         })
     }
 
+    #[cfg(test)]
     fn release(self) -> Result<(), String> {
         self.release_with(&mut no_race)
     }
 
-    /// Remove the folder if it is still ours at its name. If it is not, the
-    /// error also says where this run's own folder is now (if the system can
-    /// say), so every uncertain entry is named with its path.
-    fn release_with(mut self, race: &mut dyn FnMut(Step, &Path)) -> Result<(), String> {
-        self.keep = true;
-        remove_owned_with(&self.path, &self.handle, Owned::Directory, race).map_err(|why| {
-            match anchored::current_path(self.handle.as_file()) {
-                Some(now)
-                    if !same_place(&now, &self.path)
-                        && !why.contains(&now.display().to_string()) =>
-                {
-                    format!(
-                        "{why}; this run's own folder {} was moved by someone else to {} and \
-                     was left there",
-                        self.path.display(),
-                        now.display()
-                    )
-                }
-                _ => why,
-            }
-        })
-    }
-}
-
-impl Drop for OwnedDirectory {
-    fn drop(&mut self) {
-        if !self.keep {
-            let _ = remove_owned(&self.path, &self.handle, Owned::Directory);
-        }
+    /// This folder alone, as [`Cleanup::abort`] settles it: removed with
+    /// `rmdir` if empty, otherwise moved into a leftover folder; `Err`
+    /// names whatever is still on disk.
+    #[cfg(test)]
+    fn release_with(self, race: &mut dyn FnMut(Step, &Path)) -> Result<(), String> {
+        let mut left = Leftovers::default();
+        left.settle(&self.path, &self.handle, Owned::Directory, race);
+        left.result()
     }
 }
 
@@ -2730,20 +2875,51 @@ fn open_created_dir(path: &Path) -> io::Result<fs::File> {
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
     const GENERIC_READ: u32 = 0x8000_0000;
     const DELETE: u32 = 0x0001_0000;
-    // `DELETE`: release deletes this very object through the handle
-    // (`windows_acl::delete_tree`), never whatever is at the name then.
-    let file = fs::OpenOptions::new()
-        .access_mode(GENERIC_READ | DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?;
-    let meta = file.metadata()?;
-    let checked = if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        Err("it is not a plain directory".to_string())
-    } else {
-        volume::check_open(&file).and_then(|()| windows_acl::check(&file))
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    let open = |access: u32| {
+        fs::OpenOptions::new()
+            .access_mode(access)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
     };
-    checked.map_err(|why| io::Error::new(io::ErrorKind::AlreadyExists, why))?;
-    Ok(file)
+    let check = |file: &fs::File| -> Result<(), String> {
+        let meta = file.metadata().map_err(|e| e.to_string())?;
+        if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err("it is not a plain directory".to_string());
+        }
+        volume::check_open(file).and_then(|()| windows_acl::check(file))
+    };
+    let refused = |why: String| io::Error::new(io::ErrorKind::AlreadyExists, why);
+    // `DELETE`: an aborted run moves this very object aside through the
+    // handle (`windows_acl::rename_into`), never whatever is at the name.
+    match open(GENERIC_READ | DELETE) {
+        Ok(file) => {
+            check(&file).map_err(refused)?;
+            Ok(file)
+        }
+        // Another process holds the entry open without `FILE_SHARE_DELETE`
+        // (os error 32), or this user may not delete it (os error 5): the
+        // folder this run has just made, private and unpublished, is in
+        // neither state, so this is refused in any case. Opened again for
+        // reading only, to say why it is not ours — "in use" alone hides
+        // the reason (seen on the CI runner for `C:\Windows`, el-2yxx0).
+        Err(e)
+            if matches!(
+                e.raw_os_error(),
+                Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+            ) =>
+        {
+            let Ok(file) = open(GENERIC_READ) else {
+                return Err(e);
+            };
+            Err(refused(match check(&file) {
+                Err(why) => why,
+                Ok(()) => format!("it cannot be opened for deleting: {e}"),
+            }))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2890,8 +3066,7 @@ mod windows_acl {
     use std::path::Path;
     use std::{fs, io, iter, mem, ptr};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, LocalFree, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
-        ERROR_NOT_SUPPORTED, ERROR_NO_MORE_FILES, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, LocalFree, ERROR_NO_MORE_FILES, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -2904,15 +3079,13 @@ mod windows_acl {
         SECURITY_ATTRIBUTES, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateDirectoryW, FileDispositionInfo, FileDispositionInfoEx, FileFullDirectoryInfo,
-        FileFullDirectoryRestartInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-        FileIdType, GetFileInformationByHandleEx, OpenFileById, SetFileInformationByHandle, DELETE,
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
-        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-        FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_ID_BOTH_DIR_INFO,
-        FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+        CreateDirectoryW, FileFullDirectoryInfo, FileFullDirectoryRestartInfo,
+        FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdType,
+        GetFileInformationByHandleEx, OpenFileById, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_FULL_DIR_INFO, FILE_ID_BOTH_DIR_INFO, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0,
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, SYNCHRONIZE,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -3079,8 +3252,14 @@ mod windows_acl {
         dacl: *mut ACL,
         sd: PSECURITY_DESCRIPTOR,
     ) -> Result<(), String> {
+        // Every reason is named, not only the first: under an elevated
+        // administrator token Windows makes the Administrators group the
+        // owner of a folder created with default permissions, so such a
+        // folder fails the owner check *and* the inheritance check, and the
+        // message has to say both (seen on the CI runner, el-2yxx0).
+        let mut reasons: Vec<String> = Vec::new();
         if owner.is_null() || EqualSid(owner, user.sid()) == 0 {
-            return Err("it belongs to another account, not to this user".into());
+            reasons.push("it belongs to another account, not to this user".into());
         }
         let (mut control, mut revision) = (0u16, 0u32);
         if GetSecurityDescriptorControl(sd, &mut control, &mut revision) == 0 {
@@ -3090,10 +3269,11 @@ mod windows_acl {
             ));
         }
         if control & SE_DACL_PROTECTED == 0 {
-            return Err("its permissions are inherited from the parent folder".into());
+            reasons.push("its permissions are inherited from the parent folder".into());
         }
         if dacl.is_null() {
-            return Err("it has no access list, so everybody has full access".into());
+            reasons.push("it has no access list, so everybody has full access".into());
+            return Err(reasons.join("; "));
         }
         let mut info: ACL_SIZE_INFORMATION = mem::zeroed();
         if GetAclInformation(
@@ -3122,65 +3302,106 @@ mod windows_acl {
                 ACCESS_ALLOWED_ACE_TYPE => {
                     let sid = (&raw mut (*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart).cast();
                     if EqualSid(sid, user.sid()) == 0 {
-                        return Err("its access list lets other accounts in".into());
+                        reasons.push("its access list lets other accounts in".into());
+                        break;
                     }
                 }
-                _ => return Err("its access list has entries this check does not know".into()),
+                _ => {
+                    reasons.push("its access list has entries this check does not know".into());
+                    break;
+                }
             }
         }
-        Ok(())
+        if reasons.is_empty() {
+            Ok(())
+        } else {
+            Err(reasons.join("; "))
+        }
     }
 
     /// The entry `name` in the directory open as `dir`, found by listing the
-    /// handle and opened by file ID as itself (no reparse point followed).
-    /// With `delete`, opened with `DELETE` and listing access, as
-    /// [`delete_tree`] and [`rename_into`] need.
-    pub(super) fn child(
-        dir: &fs::File,
-        name: &std::ffi::OsStr,
-        delete: bool,
-    ) -> io::Result<fs::File> {
+    /// handle and opened by file ID as itself (no reparse point followed),
+    /// for its identity only: without `DELETE`, so it never conflicts with
+    /// another handle's sharing.
+    pub(super) fn child(dir: &fs::File, name: &std::ffi::OsStr) -> io::Result<fs::File> {
         let handle = dir.as_raw_handle() as HANDLE;
         let wanted: Vec<u16> = name.encode_wide().collect();
         let id = children(handle)?
             .into_iter()
-            .find(|(entry, _)| *entry == wanted)
-            .map(|(_, id)| id)
+            .find(|(entry, _, _)| *entry == wanted)
+            .map(|(_, id, _)| id)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("{} is not in the folder", name.to_string_lossy()),
                 )
             })?;
-        let access = if delete {
-            DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | SYNCHRONIZE
-        } else {
-            FILE_READ_ATTRIBUTES | SYNCHRONIZE
-        };
-        open_by_id_with(handle, id, access)
+        open_by_id(handle, id, FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+    }
+
+    /// The names in the directory open as `dir`, listed through the handle.
+    pub(super) fn names(dir: &fs::File) -> io::Result<Vec<String>> {
+        Ok(children(dir.as_raw_handle() as HANDLE)?
+            .into_iter()
+            .map(|(name, _, _)| String::from_utf16_lossy(&name))
+            .collect())
+    }
+
+    /// The entries in the directory open as `dir`, listed through the
+    /// handle: name, file ID, and whether it is a plain folder (a reparse
+    /// point — junction, symlink — is not).
+    pub(super) fn entries(dir: &fs::File) -> io::Result<Vec<(String, i64, bool)>> {
+        Ok(children(dir.as_raw_handle() as HANDLE)?
+            .into_iter()
+            .map(|(name, id, attributes)| {
+                (
+                    String::from_utf16_lossy(&name),
+                    id,
+                    attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+                        && attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+                )
+            })
+            .collect())
+    }
+
+    /// The folder with file ID `id` found in `dir` by [`entries`], opened
+    /// as itself (no reparse point followed) for listing only.
+    pub(super) fn open_folder(dir: &fs::File, id: i64) -> io::Result<fs::File> {
+        open_by_id(
+            dir.as_raw_handle() as HANDLE,
+            id,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        )
     }
 
     /// Rename the object open as `entry` (with `DELETE` access) to `name`
     /// in the directory open as `to`, through the handles only
-    /// (`FILE_RENAME_INFO` with `RootDirectory`): no path is resolved, and
-    /// an existing entry at `name` fails the call and is kept.
+    /// (`NtSetInformationFile(FileRenameInformation)` with
+    /// `RootDirectory`): no path is resolved, and an existing entry at
+    /// `name` fails the call and is kept. Not `SetFileInformationByHandle`:
+    /// it turns a relative name into an absolute path under the current
+    /// directory first, which with a `RootDirectory` is os error 87 (seen
+    /// natively on the CI runner, el-2yxx0).
     pub(super) fn rename_into(
         entry: &fs::File,
         to: &fs::File,
         name: &std::ffi::OsStr,
     ) -> io::Result<()> {
-        use windows_sys::Win32::Storage::FileSystem::{
-            FileRenameInfo, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
+        use windows_sys::Wdk::Storage::FileSystem::{
+            FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
+            FILE_RENAME_INFORMATION_0,
         };
+        use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+        use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
         let wide: Vec<u16> = name.encode_wide().collect();
-        let header = mem::offset_of!(FILE_RENAME_INFO, FileName);
-        let bytes = header + wide.len() * 2 + 2;
+        let header = mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
+        let bytes = (header + wide.len() * 2).max(mem::size_of::<FILE_RENAME_INFORMATION>());
         let mut buf = vec![0u64; bytes.div_ceil(8)];
-        let info = buf.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-        // SAFETY: `buf` is 8-byte aligned and holds the header plus the name
-        // and a terminating NUL; the fields are written in place.
+        let info = buf.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+        // SAFETY: `buf` is 8-byte aligned, zeroed and holds the header plus
+        // the name; the fields are written in place.
         unsafe {
-            (*info).Anonymous = FILE_RENAME_INFO_0 { ReplaceIfExists: 0 };
+            (*info).Anonymous = FILE_RENAME_INFORMATION_0 { ReplaceIfExists: 0 };
             (*info).RootDirectory = to.as_raw_handle() as HANDLE;
             (*info).FileNameLength = (wide.len() * 2) as u32;
             ptr::copy_nonoverlapping(
@@ -3189,17 +3410,23 @@ mod windows_acl {
                 wide.len(),
             );
         }
-        // SAFETY: `entry` is open with DELETE; `buf` lives for the call.
-        let ok = unsafe {
-            SetFileInformationByHandle(
+        // SAFETY: plain data, written by the call.
+        let mut status_block: IO_STATUS_BLOCK = unsafe { mem::zeroed() };
+        // SAFETY: `entry` is open with DELETE, `to` is an open directory;
+        // `buf` and `status_block` live for the call.
+        let status = unsafe {
+            NtSetInformationFile(
                 entry.as_raw_handle() as HANDLE,
-                FileRenameInfo,
+                &mut status_block,
                 buf.as_ptr().cast(),
                 bytes as u32,
+                FileRenameInformation,
             )
         };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
+        if status < 0 {
+            // SAFETY: no preconditions.
+            let code = unsafe { RtlNtStatusToDosError(status) };
+            return Err(io::Error::from_raw_os_error(code as i32));
         }
         Ok(())
     }
@@ -3232,44 +3459,9 @@ mod windows_acl {
         }
     }
 
-    /// Delete the object open as `file` — a file, or (`directory`) a
-    /// directory with everything in it — through handles only, wherever it
-    /// is now: the entries inside are listed through the directory's own
-    /// handle and opened by file ID, never by name, and each is deleted
-    /// through its own handle (review el-5null). A junction or symlink
-    /// inside is opened as itself and deleted, never followed. `file` must
-    /// have been opened with `DELETE` access.
-    pub(super) fn delete_tree(file: &fs::File, directory: bool) -> io::Result<()> {
-        delete_handle(file.as_raw_handle() as HANDLE, directory)
-    }
-
-    fn delete_handle(handle: HANDLE, directory: bool) -> io::Result<()> {
-        if directory {
-            for id in child_ids(handle)? {
-                let child = open_by_id(handle, id)?;
-                let attributes = {
-                    use std::os::windows::fs::MetadataExt;
-                    child.metadata()?.file_attributes()
-                };
-                let is_dir = attributes & FILE_ATTRIBUTE_DIRECTORY != 0
-                    && attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0;
-                delete_handle(child.as_raw_handle() as HANDLE, is_dir)?;
-            }
-        }
-        dispose(handle)
-    }
-
     /// Open the entry with file ID `id` on the volume of `volume`, as
-    /// itself (no reparse point is followed), for deleting.
-    fn open_by_id(volume: HANDLE, id: i64) -> io::Result<fs::File> {
-        open_by_id_with(
-            volume,
-            id,
-            DELETE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | SYNCHRONIZE,
-        )
-    }
-
-    fn open_by_id_with(volume: HANDLE, id: i64, access: u32) -> io::Result<fs::File> {
+    /// itself (no reparse point is followed).
+    fn open_by_id(volume: HANDLE, id: i64, access: u32) -> io::Result<fs::File> {
         use std::os::windows::io::FromRawHandle;
         let descriptor = FILE_ID_DESCRIPTOR {
             dwSize: mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
@@ -3295,61 +3487,9 @@ mod windows_acl {
         Ok(unsafe { fs::File::from_raw_handle(child.cast()) })
     }
 
-    /// Delete the object behind `handle`: POSIX semantics (the name goes at
-    /// once) where the file system has them, otherwise delete-on-close.
-    fn dispose(handle: HANDLE) -> io::Result<()> {
-        let info = FILE_DISPOSITION_INFO_EX {
-            Flags: FILE_DISPOSITION_FLAG_DELETE
-                | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
-                | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
-        };
-        // SAFETY: `handle` is open with DELETE; `info` lives for the call.
-        let ok = unsafe {
-            SetFileInformationByHandle(
-                handle,
-                FileDispositionInfoEx,
-                (&raw const info).cast(),
-                mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
-            )
-        };
-        if ok != 0 {
-            return Ok(());
-        }
-        let e = io::Error::last_os_error();
-        let unsupported = [
-            ERROR_INVALID_PARAMETER,
-            ERROR_NOT_SUPPORTED,
-            ERROR_INVALID_FUNCTION,
-        ]
-        .map(|code| Some(code as i32));
-        if !unsupported.contains(&e.raw_os_error()) {
-            return Err(e);
-        }
-        let info = FILE_DISPOSITION_INFO { DeleteFile: 1 };
-        // SAFETY: as above.
-        let ok = unsafe {
-            SetFileInformationByHandle(
-                handle,
-                FileDispositionInfo,
-                (&raw const info).cast(),
-                mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
-            )
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
-    /// File IDs of the entries in the directory behind `handle`, without
-    /// `.`/`..`. Lists the handle, not a path.
-    fn child_ids(handle: HANDLE) -> io::Result<Vec<i64>> {
-        Ok(children(handle)?.into_iter().map(|(_, id)| id).collect())
-    }
-
-    /// Names and file IDs of the entries in the directory behind `handle`,
-    /// without `.`/`..`. Lists the handle, not a path.
-    fn children(handle: HANDLE) -> io::Result<Vec<(Vec<u16>, i64)>> {
+    /// Names, file IDs and attributes of the entries in the directory
+    /// behind `handle`, without `.`/`..`. Lists the handle, not a path.
+    fn children(handle: HANDLE) -> io::Result<Vec<(Vec<u16>, i64, u32)>> {
         let mut buf = [0u64; 512];
         let mut class = FileIdBothDirectoryRestartInfo;
         let mut ids = Vec::new();
@@ -3376,7 +3516,7 @@ mod windows_acl {
             loop {
                 // SAFETY: the call filled `buf` with a chain of entries;
                 // `NextEntryOffset` stays within it.
-                let (name, id, next) = unsafe {
+                let (name, id, attributes, next) = unsafe {
                     let entry = buf
                         .as_ptr()
                         .cast::<u8>()
@@ -3387,10 +3527,15 @@ mod windows_acl {
                         (&raw const (*entry).FileName).cast::<u16>(),
                         len,
                     );
-                    (name, (*entry).FileId, (*entry).NextEntryOffset)
+                    (
+                        name,
+                        (*entry).FileId,
+                        (*entry).FileAttributes,
+                        (*entry).NextEntryOffset,
+                    )
                 };
                 if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {
-                    ids.push((name.to_vec(), id));
+                    ids.push((name.to_vec(), id, attributes));
                 }
                 if next == 0 {
                     break;
@@ -3471,8 +3616,8 @@ impl EmptyReservation {
     fn claim(path: PathBuf) -> io::Result<Self> {
         let mut options = fs::OpenOptions::new();
         options.read(true).write(true).create_new(true);
-        // Windows deletes a reservation through this handle: see
-        // `remove_owned_with`.
+        // Windows moves a reservation aside through this handle: see
+        // `Leftovers::set_aside`.
         #[cfg(windows)]
         std::os::windows::fs::OpenOptionsExt::access_mode(
             &mut options,
@@ -3485,23 +3630,21 @@ impl EmptyReservation {
         })
     }
 
+    /// Still this run's file at its name, and still empty.
     fn is_ours(&self) -> bool {
-        Owned::EmptyFile.is_ours(&self.path, &self.handle)
-    }
-
-    fn release_with(&self, race: &mut dyn FnMut(Step, &Path)) -> Result<(), String> {
-        remove_owned_with(&self.path, &self.handle, Owned::EmptyFile, race)
+        Owned::File.is_ours(&self.path, &self.handle)
+            && self.handle.as_file().metadata().is_ok_and(|m| m.len() == 0)
     }
 }
 
 /// Zero-length WAL/SHM/journal files carry no transactions. They reserve the
 /// SQLite namespace without a check-then-open race and belong to the new DB
 /// after publication. SQLite may consume them on its first open; relocation
-/// must not delete them on the way to that open, even across a process restart.
+/// never deletes them: after a failure they are moved aside with the rest
+/// of the run ([`Leftovers`]), kept, not unlinked.
 #[derive(Debug, Default)]
 struct SidecarReservations {
     entries: Vec<EmptyReservation>,
-    keep: bool,
 }
 
 impl SidecarReservations {
@@ -3532,27 +3675,25 @@ impl SidecarReservations {
         Ok(())
     }
 
-    /// Remove the reservations; one line per one that could not be.
+    /// Move the reservations out of the way of a retry, into `left`.
+    fn release_into(self, left: &mut Leftovers, race: &mut dyn FnMut(Step, &Path)) {
+        for entry in &self.entries {
+            left.settle(&entry.path, &entry.handle, Owned::File, race);
+        }
+    }
+
+    /// [`SidecarReservations::release_into`] a fresh [`Leftovers`]: one
+    /// line per reservation still on disk, and its folder.
+    #[cfg(test)]
+    fn release_with(self, race: &mut dyn FnMut(Step, &Path)) -> Vec<String> {
+        let mut left = Leftovers::default();
+        self.release_into(&mut left, race);
+        left.finish()
+    }
+
+    #[cfg(test)]
     fn release(self) -> Vec<String> {
         self.release_with(&mut no_race)
-    }
-
-    fn release_with(mut self, race: &mut dyn FnMut(Step, &Path)) -> Vec<String> {
-        self.keep = true;
-        self.entries
-            .iter()
-            .filter_map(|entry| entry.release_with(race).err())
-            .collect()
-    }
-}
-
-impl Drop for SidecarReservations {
-    fn drop(&mut self) {
-        if !self.keep {
-            for entry in &self.entries {
-                let _ = entry.release_with(&mut no_race);
-            }
-        }
     }
 }
 
@@ -3676,82 +3817,14 @@ fn under(a: &Path, b: &Path) -> bool {
 mod ownership_tests {
     use super::*;
 
-    #[test]
-    fn cleanup_preserves_replaced_or_modified_reservations() {
-        let temp = tempfile::tempdir().unwrap();
-        for replace in [false, true] {
-            for suffix in SIDECARS {
-                let dir = temp.path().join(format!("{replace}{suffix}"));
-                fs::create_dir(&dir).unwrap();
-                let db = dir.join(DB_FILE);
-                let mut reservations = SidecarReservations::default();
-                reservations.claim(&db).unwrap();
-                let foreign = sidecar(&db, suffix);
-                let bytes: &[u8] = if replace {
-                    // Even an empty foreign file is not ours to unlink.
-                    fs::remove_file(&foreign).unwrap();
-                    b""
-                } else {
-                    b"foreign write into the reservation"
-                };
-                fs::write(&foreign, bytes).unwrap();
-                drop(reservations);
-                assert_eq!(fs::read(&foreign).unwrap(), bytes);
-                assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cleanup_preserves_symlinks_including_links_to_its_own_old_inode() {
-        use std::os::unix::fs::symlink;
-        let temp = tempfile::tempdir().unwrap();
-        for dangling in [false, true] {
-            for suffix in SIDECARS {
-                let dir = temp.path().join(format!("{dangling}{suffix}"));
-                fs::create_dir(&dir).unwrap();
-                let db = dir.join(DB_FILE);
-                let mut reservations = SidecarReservations::default();
-                reservations.claim(&db).unwrap();
-                let link = sidecar(&db, suffix);
-                let referent = dir.join("moved-reservation");
-                if dangling {
-                    fs::remove_file(&link).unwrap();
-                } else {
-                    fs::rename(&link, &referent).unwrap();
-                }
-                symlink(&referent, &link).unwrap();
-                drop(reservations);
-                assert_eq!(fs::read_link(link).unwrap(), referent);
-                assert_eq!(referent.exists(), !dangling);
-            }
-        }
-    }
-
-    #[test]
-    fn cleanup_does_not_remove_a_replacement_staging_directory() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join(PARTIAL_DB);
-        let owned = OwnedDirectory::create(&path).unwrap();
-        fs::rename(&path, temp.path().join("moved")).unwrap();
-        fs::create_dir(&path).unwrap();
-        fs::write(path.join("foreign"), b"keep").unwrap();
-        drop(owned);
-        assert_eq!(fs::read(path.join("foreign")).unwrap(), b"keep");
-    }
-
     /// Every entry below `dir`: relative path → bytes, `<dir>`, or link target.
-    fn tree(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    pub(super) fn tree(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
         let mut out = std::collections::BTreeMap::new();
         let mut stack = vec![dir.to_path_buf()];
         while let Some(d) = stack.pop() {
             for e in fs::read_dir(&d).unwrap() {
                 let e = e.unwrap();
                 let rel = e.path().strip_prefix(dir).unwrap().display().to_string();
-                if rel.starts_with(ASIDE_PREFIX) {
-                    continue; // checked separately by `no_private_dirs_left`
-                }
                 let ty = e.file_type().unwrap();
                 let v = if ty.is_symlink() {
                     format!("-> {}", fs::read_link(e.path()).unwrap().display()).into_bytes()
@@ -3767,11 +3840,32 @@ mod ownership_tests {
         out
     }
 
-    fn no_private_dirs_left(dir: &Path) {
-        for e in fs::read_dir(dir).unwrap() {
-            let name = e.unwrap().file_name().to_string_lossy().into_owned();
-            assert!(!name.starts_with(ASIDE_PREFIX), "left {name}");
-        }
+    /// The `photo-cleanup-leftover-*` folders in `dir`.
+    pub(super) fn leftover_folders(dir: &Path) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(LEFTOVER_PREFIX))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The one leftover folder in `dir`.
+    pub(super) fn leftover(dir: &Path) -> PathBuf {
+        let found = leftover_folders(dir);
+        assert_eq!(found.len(), 1, "{found:?}");
+        found.into_iter().next().unwrap()
+    }
+
+    /// A canonical temporary folder: messages name canonical paths.
+    fn temp() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        (temp, root)
     }
 
     /// A staging directory with some of the run's own content in it.
@@ -3780,7 +3874,7 @@ mod ownership_tests {
         let owned = OwnedDirectory::create(&path).unwrap();
         fs::create_dir(path.join("sub")).unwrap();
         fs::write(path.join(DB_FILE), b"copy").unwrap();
-        fs::write(path.join("sub/thumb.jpg"), b"thumb").unwrap();
+        fs::write(path.join("sub").join("thumb.jpg"), b"thumb").unwrap();
         (path, owned)
     }
 
@@ -3788,6 +3882,7 @@ mod ownership_tests {
     #[derive(Clone, Copy, Debug)]
     enum Foreign {
         Dir,
+        EmptyDir,
         File,
         EmptyFile,
         #[cfg(unix)]
@@ -3796,6 +3891,7 @@ mod ownership_tests {
 
     const FOREIGN: &[Foreign] = &[
         Foreign::Dir,
+        Foreign::EmptyDir,
         Foreign::File,
         Foreign::EmptyFile,
         #[cfg(unix)]
@@ -3809,6 +3905,7 @@ mod ownership_tests {
                 fs::create_dir(path).unwrap();
                 fs::write(path.join("photo.jpg"), b"\xff\xd8 foreign").unwrap();
             }
+            Foreign::EmptyDir => fs::create_dir(path).unwrap(),
             Foreign::File => fs::write(path, b"foreign payload \x00\xff").unwrap(),
             Foreign::EmptyFile => fs::write(path, b"").unwrap(),
             #[cfg(unix)]
@@ -3821,194 +3918,239 @@ mod ownership_tests {
         let _ = outside;
     }
 
-    /// The reported regression (el-1e5d): the name is swapped after the
-    /// identity check. Before the fix, `remove_dir_all`/`remove_file` of the
-    /// name deleted the replacement (reproduced 0/2 on the old code).
+    /// The succeed path: this run's staging folder, empty after
+    /// publication, goes with `rmdir`, and nothing else is made.
+    #[test]
+    fn an_empty_staging_folder_is_removed_with_rmdir() {
+        let (_t, root) = temp();
+        fs::write(root.join("someone-elses.txt"), b"keep").unwrap();
+        let owned = OwnedDirectory::create(&root.join(PARTIAL_DB)).unwrap();
+        owned.release().unwrap();
+        assert_eq!(
+            tree(&root).into_keys().collect::<Vec<_>>(),
+            ["someone-elses.txt"]
+        );
+    }
+
+    /// Not empty: nothing in it is unlinked. The folder is moved whole,
+    /// without replacing anything, into a new leftover folder; its old name
+    /// is free for a retry, and the error names the new place, what is in
+    /// it and that it may be deleted by hand.
+    #[test]
+    fn a_staging_folder_with_contents_is_moved_aside_whole() {
+        let (_t, root) = temp();
+        let (path, owned) = staged(&root);
+        let before = tree(&path);
+        let error = owned.release().unwrap_err();
+        assert!(!occupied(&path));
+        let folder = leftover(&root);
+        let moved = folder.join(PARTIAL_DB);
+        assert_eq!(tree(&moved), before);
+        assert!(error.contains(&moved.display().to_string()), "{error}");
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(error.contains(DB_FILE) && error.contains("sub"), "{error}");
+        assert!(
+            error.contains("this run's own entries listed above"),
+            "{error}"
+        );
+    }
+
+    /// Prefer keeping (director, el-2yxx0 round 3): the empty reservations
+    /// are not unlinked either; they are moved aside, so the sidecar names
+    /// are free for a retry, and named. Bytes someone wrote into one of
+    /// them travel with it.
+    #[test]
+    fn reservations_are_kept_and_moved_out_of_the_way() {
+        let (_t, root) = temp();
+        let db = root.join(DB_FILE);
+        let mut reservations = SidecarReservations::default();
+        reservations.claim(&db).unwrap();
+        fs::write(sidecar(&db, "-wal"), b"written by someone").unwrap();
+        let left = reservations.release();
+        let folder = leftover(&root);
+        assert_eq!(left.len(), SIDECARS.len() + 1, "{left:?}");
+        for suffix in SIDECARS {
+            assert!(!occupied(&sidecar(&db, suffix)), "{suffix}");
+            let moved = sidecar(&folder.join(DB_FILE), suffix);
+            assert!(
+                left.iter()
+                    .any(|l| l.contains(&moved.display().to_string())),
+                "{suffix}: {left:?}"
+            );
+        }
+        assert_eq!(
+            fs::read(sidecar(&folder.join(DB_FILE), "-wal")).unwrap(),
+            b"written by someone"
+        );
+        assert_eq!(
+            fs::read(sidecar(&folder.join(DB_FILE), "-shm")).unwrap(),
+            b""
+        );
+    }
+
+    /// SQLite may consume an empty reservation; nothing is at the name and
+    /// our file is gone: not an error.
+    #[test]
+    fn a_reservation_consumed_meanwhile_is_not_an_error() {
+        let (_t, root) = temp();
+        let db = root.join(DB_FILE);
+        let mut reservations = SidecarReservations::default();
+        reservations.claim(&db).unwrap();
+        fs::remove_file(sidecar(&db, "-wal")).unwrap();
+        let left = reservations.release();
+        assert!(
+            !left.iter().any(|l| l.contains(&format!("{DB_FILE}-wal"))),
+            "{left:?}"
+        );
+        assert_eq!(left.len(), SIDECARS.len(), "{left:?}");
+    }
+
+    /// Something else at our name before cleanup looks: left exactly where
+    /// and as it is, our own entry left wherever it went, both named.
+    #[test]
+    fn a_replacement_at_the_name_is_left_in_place() {
+        for &kind in FOREIGN {
+            let (_t, root) = temp();
+            let outside = tempfile::tempdir().unwrap();
+            let (path, owned) = staged(&root);
+            let ours = root.join("ours-moved-away");
+            fs::rename(&path, &ours).unwrap();
+            plant(kind, &path, &outside.path().join("o"));
+            let (inside, out) = (tree(&root), tree(outside.path()));
+            let error = owned.release().unwrap_err();
+            assert_eq!(tree(&root), inside, "{kind:?}");
+            assert_eq!(tree(outside.path()), out, "{kind:?}");
+            assert!(error.contains("not this run's entry"), "{kind:?}: {error}");
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+            assert!(error.contains("ours-moved-away"), "{kind:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_replaced_reservation_is_left_in_place() {
+        for &kind in FOREIGN {
+            let (_t, root) = temp();
+            let outside = tempfile::tempdir().unwrap();
+            let db = root.join(DB_FILE);
+            let mut reservations = SidecarReservations::default();
+            reservations.claim(&db).unwrap();
+            let wal = sidecar(&db, "-wal");
+            fs::rename(&wal, root.join("ours-moved-away")).unwrap();
+            plant(kind, &wal, &outside.path().join("o"));
+            let (before, out) = (tree(&root), tree(outside.path()));
+            let left = reservations.release();
+            let mut after = tree(&root);
+            after.retain(|k, _| !k.starts_with(LEFTOVER_PREFIX));
+            assert_eq!(after, {
+                let mut b = before;
+                b.retain(|k, _| !k.ends_with("-shm") && !k.ends_with("-journal"));
+                b
+            });
+            assert_eq!(tree(outside.path()), out, "{kind:?}");
+            assert!(
+                left.iter().any(|l| l.contains(&wal.display().to_string())
+                    && l.contains("not this run's entry")),
+                "{kind:?}: {left:?}"
+            );
+        }
+    }
+
+    /// Swapped in between the check and `rmdir` or the move (el-1e5d).
+    /// Unix re-checks through the parent's descriptor before moving: a
+    /// replacement with anything in it, a file or a link stays exactly
+    /// where it is. The known limit is pinned too: an *empty* foreign
+    /// folder at that instant goes with `rmdir` — it holds nothing — and
+    /// the result is `Ok`, although our own folder, moved away by the same
+    /// swap, stays where it was put *with* the copy still in it and is not
+    /// reported. Interference by the same user exactly between two system
+    /// calls is outside the threat model (user decision 2026-10-05,
+    /// confirmed 2026-10-12 after review el-vuz4b, B1-R3; DESKTOP.md).
     #[cfg(unix)]
     #[test]
-    fn a_staging_directory_swapped_after_the_check_is_not_deleted() {
+    fn a_swap_after_the_check_is_left_in_place_but_an_empty_folder_may_go() {
         for &kind in FOREIGN {
-            let temp = tempfile::tempdir().unwrap();
+            let (_t, root) = temp();
             let outside = tempfile::tempdir().unwrap();
-            let (_, owned) = staged(temp.path());
-            let ours = temp.path().join("ours-moved-away");
+            let (_, owned) = staged(&root);
+            let ours = root.join("ours-moved-away");
             let mut before = None;
             let result = owned.release_with(&mut |step, at| {
                 if step == Step::BeforeMove {
                     fs::rename(at, &ours).unwrap();
                     plant(kind, at, &outside.path().join("o"));
-                    before = Some((tree(temp.path()), tree(outside.path())));
+                    before = Some((tree(&root), tree(outside.path())));
                 }
             });
-            let error = result.expect_err("a replacement must be reported");
-            assert!(error.contains("replaced"), "{kind:?}: {error}");
-            let (inside, out) = before.unwrap();
-            assert_eq!(tree(temp.path()), inside, "{kind:?}");
+            let (mut inside, out) = before.unwrap();
             assert_eq!(tree(outside.path()), out, "{kind:?}");
-            no_private_dirs_left(temp.path());
+            assert_eq!(fs::read(ours.join(DB_FILE)).unwrap(), b"copy");
+            if matches!(kind, Foreign::EmptyDir) {
+                inside.remove(PARTIAL_DB);
+                assert_eq!(result, Ok(()));
+            } else {
+                let error = result.expect_err("a replacement must be reported");
+                assert!(error.contains("not this run's entry"), "{kind:?}: {error}");
+            }
+            assert_eq!(tree(&root), inside, "{kind:?}");
+            assert!(leftover_folders(&root).is_empty(), "{kind:?}");
         }
     }
 
+    /// Swapped in between the move and the check in the leftover folder:
+    /// put back if its name is still free; otherwise kept in the leftover
+    /// folder and named as *not* ours, and the folder is no longer described
+    /// as holding our own entries. Nothing is deleted either way.
     #[cfg(unix)]
     #[test]
-    fn a_reservation_swapped_after_the_check_is_not_deleted() {
-        for &kind in FOREIGN {
-            for suffix in SIDECARS {
-                let temp = tempfile::tempdir().unwrap();
-                let outside = tempfile::tempdir().unwrap();
-                let db = temp.path().join(DB_FILE);
-                let mut reservations = SidecarReservations::default();
-                reservations.claim(&db).unwrap();
-                let target = sidecar(&db, suffix);
-                let ours = temp.path().join("ours-moved-away");
-                let mut before = None;
-                let left = reservations.release_with(&mut |step, at| {
-                    if step == Step::BeforeMove && at == target {
+    fn a_swap_after_the_move_is_put_back_or_named_as_foreign() {
+        for name_taken in [false, true] {
+            let (_t, root) = temp();
+            let (path, owned) = staged(&root);
+            let ours = root.join("ours-moved-away");
+            let mut moved = None;
+            let error = owned
+                .release_with(&mut |step, at| {
+                    if step == Step::Moved {
                         fs::rename(at, &ours).unwrap();
-                        plant(kind, at, &outside.path().join("o"));
-                        before = Some((tree(temp.path()), tree(outside.path())));
+                        plant(Foreign::Dir, at, at);
+                        if name_taken {
+                            fs::write(&path, b"second foreign").unwrap();
+                        }
+                        moved = Some(at.to_path_buf());
                     }
-                });
-                assert_eq!(left.len(), 1, "{kind:?}{suffix}: {left:?}");
-                let (inside, out) = before.unwrap();
-                // Our other two reservations went; the foreign entry stayed.
-                let mut expected = inside;
-                for other in SIDECARS.iter().filter(|s| **s != suffix) {
-                    expected.remove(&format!("{DB_FILE}{other}"));
-                }
-                assert_eq!(tree(temp.path()), expected, "{kind:?}{suffix}");
-                assert_eq!(tree(outside.path()), out, "{kind:?}{suffix}");
-                no_private_dirs_left(temp.path());
+                })
+                .unwrap_err();
+            let moved = moved.unwrap();
+            assert_eq!(fs::read(ours.join(DB_FILE)).unwrap(), b"copy");
+            if name_taken {
+                assert_eq!(fs::read(&path).unwrap(), b"second foreign");
+                assert_eq!(
+                    fs::read(moved.join("photo.jpg")).unwrap(),
+                    b"\xff\xd8 foreign"
+                );
+                assert!(error.contains("is NOT this run's"), "{error}");
+                assert!(error.contains("look at everything"), "{error}");
+                assert!(!error.contains("own entries listed above"), "{error}");
+            } else {
+                assert_eq!(
+                    fs::read(path.join("photo.jpg")).unwrap(),
+                    b"\xff\xd8 foreign"
+                );
+                assert!(!moved.exists());
+                assert!(error.contains("not this run's entry"), "{error}");
             }
         }
     }
 
-    /// Swapped in after the check, and the name taken again before it can be
-    /// put back: both foreign entries survive, and the error says where.
+    /// Cleanup failures are errors that name every entry, not a silent Ok,
+    /// and change nothing.
     #[cfg(unix)]
     #[test]
-    fn a_replacement_that_cannot_be_put_back_stays_aside_and_is_reported() {
-        let temp = tempfile::tempdir().unwrap();
-        let (path, owned) = staged(temp.path());
-        let ours = temp.path().join("ours-moved-away");
-        let mut aside = None;
-        let error = owned
-            .release_with(&mut |step, at| match step {
-                Step::BeforeMove => {
-                    fs::rename(at, &ours).unwrap();
-                    plant(Foreign::Dir, at, at);
-                }
-                Step::Moved => {
-                    aside = Some(at.to_path_buf());
-                    fs::write(&path, b"second foreign").unwrap();
-                }
-                Step::BeforeDelete => panic!("nothing may be deleted"),
-                Step::AsideCreated => {}
-                Step::Created
-                | Step::Registered
-                | Step::Snapshotted
-                | Step::BeforeVerify
-                | Step::Verified
-                | Step::Publish => {
-                    unreachable!("release creates and publishes nothing")
-                }
-            })
-            .unwrap_err();
-        let aside = aside.unwrap();
-        assert!(error.contains(&aside.display().to_string()), "{error}");
-        assert!(error.contains("Nothing was deleted"), "{error}");
-        assert_eq!(fs::read(&path).unwrap(), b"second foreign");
-        assert_eq!(
-            fs::read(aside.join("photo.jpg")).unwrap(),
-            b"\xff\xd8 foreign"
-        );
-        assert_eq!(fs::read(ours.join(DB_FILE)).unwrap(), b"copy");
-    }
-
-    #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
-    fn unchanged_entries_are_removed_without_leftovers() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join("someone-elses.txt"), b"keep").unwrap();
-        let (_, owned) = staged(temp.path());
-        let mut reservations = SidecarReservations::default();
-        reservations.claim(&temp.path().join(DB_FILE)).unwrap();
-        owned.release().unwrap();
-        assert!(reservations.release().is_empty());
-        assert_eq!(
-            tree(temp.path()).into_keys().collect::<Vec<_>>(),
-            ["someone-elses.txt"]
-        );
-    }
-
-    #[test]
-    fn a_reservation_consumed_meanwhile_is_not_an_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join(DB_FILE);
-        let mut reservations = SidecarReservations::default();
-        reservations.claim(&db).unwrap();
-        fs::remove_file(sidecar(&db, "-wal")).unwrap();
-        // Gone between the check and the move, too.
-        let left = reservations.release_with(&mut |step, at| {
-            if step == Step::BeforeMove && at.ends_with(format!("{DB_FILE}-shm")) {
-                fs::remove_file(at).unwrap();
-            }
-        });
-        assert!(left.is_empty(), "{left:?}");
-        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
-    }
-
-    /// Writes into our own reservation after it was claimed make it not ours.
-    #[cfg(unix)]
-    #[test]
-    fn a_reservation_written_after_the_move_is_put_back() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join(DB_FILE);
-        let mut reservations = SidecarReservations::default();
-        reservations.claim(&db).unwrap();
-        let wal = sidecar(&db, "-wal");
-        let left = reservations.release_with(&mut |step, at| {
-            if step == Step::Moved && at.ends_with(format!("{DB_FILE}-wal")) {
-                fs::write(at, b"late write").unwrap();
-            }
-        });
-        assert_eq!(left.len(), 1, "{left:?}");
-        assert_eq!(fs::read(&wal).unwrap(), b"late write");
-        no_private_dirs_left(temp.path());
-    }
-
-    /// The documented limit: whatever someone moves into the private folder
-    /// after the entry was proven ours there is treated as ours. This pins
-    /// the contract (see `remove_owned`), it does not endorse it.
-    #[cfg(unix)]
-    #[test]
-    fn the_private_folder_is_trusted_after_the_proof() {
-        let temp = tempfile::tempdir().unwrap();
-        let (_, owned) = staged(temp.path());
-        let ours = temp.path().join("ours-moved-away");
-        owned
-            .release_with(&mut |step, at| {
-                if step == Step::BeforeDelete {
-                    fs::rename(at, &ours).unwrap();
-                    fs::create_dir(at).unwrap();
-                    fs::write(at.join("x"), b"inside the private folder").unwrap();
-                }
-            })
-            .unwrap();
-        assert_eq!(fs::read(ours.join(DB_FILE)).unwrap(), b"copy");
-        no_private_dirs_left(temp.path());
-    }
-
-    /// Cleanup failures are errors that name the leftover, not a silent Ok.
-    #[cfg(unix)]
-    #[test]
-    fn cleanup_errors_are_reported_and_nothing_else_is_touched() {
+    fn cleanup_errors_are_reported_and_nothing_is_touched() {
         use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().unwrap();
-        let parent = temp.path().join("target");
+        let (_t, root) = temp();
+        let parent = root.join("target");
         fs::create_dir(&parent).unwrap();
         let (path, owned) = staged(&parent);
         let mut reservations = SidecarReservations::default();
@@ -4020,122 +4162,77 @@ mod ownership_tests {
             return;
         }
         let before = tree(&parent);
-        let error = owned.release().unwrap_err();
-        let left = reservations.release();
+        let mut cleanup = Cleanup::new(namespace::admit(&parent).unwrap());
+        cleanup.db = Some(owned);
+        cleanup.sidecars = Some(reservations);
+        let left = cleanup.abort();
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(error.contains(&path.display().to_string()), "{error}");
-        assert_eq!(left.len(), 3, "{left:?}");
+        assert_eq!(left.len(), 1 + SIDECARS.len(), "{left:?}");
+        assert!(left[0].contains(&path.display().to_string()), "{left:?}");
+        for (line, suffix) in left[1..].iter().zip(SIDECARS) {
+            assert!(line.contains(&format!("{DB_FILE}{suffix}")), "{line}");
+            assert!(line.contains("was left in place"), "{line}");
+        }
         assert_eq!(tree(&parent), before);
     }
 
-    /// A delete that fails in the private folder is reported with its path.
+    /// One entry that cannot be settled does not hide the others (B3-R2):
+    /// the replaced staging folder is named and left, the reservations are
+    /// still moved aside and named, and a second abort has nothing to do.
+    /// Unix only: `Cleanup` exists only for an admitted target, and Windows
+    /// refuses the target at admission
+    /// (`windows_refuses_a_target_before_anything_is_staged`).
     #[cfg(unix)]
     #[test]
-    fn a_failed_delete_names_the_private_folder() {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().unwrap();
-        let (_, owned) = staged(temp.path());
-        let mut locked = None;
-        let result = owned.release_with(&mut |step, at| {
-            if step == Step::BeforeDelete {
-                let sub = at.join("sub");
-                fs::set_permissions(&sub, fs::Permissions::from_mode(0o500)).unwrap();
-                locked = Some(sub);
-            }
-        });
-        let sub = locked.unwrap();
-        let writable = fs::write(sub.join("probe"), b"").is_ok();
-        fs::set_permissions(&sub, fs::Permissions::from_mode(0o700)).unwrap();
-        if writable {
-            return; // root
-        }
-        let error = result.unwrap_err();
-        assert!(error.contains(ASIDE_PREFIX), "{error}");
-        assert_eq!(fs::read(sub.join("thumb.jpg")).unwrap(), b"thumb");
-    }
-
-    /// Windows deletes the object behind the handle, not the name (review
-    /// el-5null): an entry of any kind put on the name after the check is
-    /// not touched, and our own staging is deleted where it was moved to.
-    #[cfg(windows)]
-    #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
-    fn windows_deletes_our_object_not_what_is_at_the_name() {
-        for &kind in FOREIGN {
-            let temp = tempfile::tempdir().unwrap();
-            let outside = tempfile::tempdir().unwrap();
-            let (_, owned) = staged(temp.path());
-            let ours = temp.path().join("ours-moved-away");
-            let mut before = None;
-            owned
-                .release_with(&mut |step, at| {
-                    if step == Step::BeforeDelete {
-                        fs::rename(at, &ours).unwrap();
-                        plant(kind, at, &outside.path().join("o"));
-                        before = Some((tree(temp.path()), tree(outside.path())));
-                    }
-                })
-                .unwrap();
-            let (mut inside, out) = before.unwrap();
-            inside.retain(|k, _| !k.starts_with("ours-moved-away"));
-            assert_eq!(tree(temp.path()), inside, "{kind:?}");
-            assert_eq!(tree(outside.path()), out, "{kind:?}");
-            assert!(!ours.exists(), "{kind:?}");
-            no_private_dirs_left(temp.path());
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_deletes_our_reservation_not_what_is_at_the_name() {
-        for &kind in FOREIGN {
-            let temp = tempfile::tempdir().unwrap();
-            let outside = tempfile::tempdir().unwrap();
-            let db = temp.path().join(DB_FILE);
-            let mut reservations = SidecarReservations::default();
-            reservations.claim(&db).unwrap();
-            let target = sidecar(&db, "-wal");
-            let ours = temp.path().join("ours-moved-away");
-            let mut before = None;
-            let left = reservations.release_with(&mut |step, at| {
-                if step == Step::BeforeDelete && at == target {
-                    fs::rename(at, &ours).unwrap();
-                    plant(kind, at, &outside.path().join("o"));
-                    before = Some((tree(temp.path()), tree(outside.path())));
-                }
-            });
-            assert!(left.is_empty(), "{kind:?}: {left:?}");
-            let (mut inside, out) = before.unwrap();
-            inside.retain(|k, _| {
-                k != "ours-moved-away" && !k.ends_with("-shm") && !k.ends_with("-journal")
-            });
-            assert_eq!(tree(temp.path()), inside, "{kind:?}");
-            assert_eq!(tree(outside.path()), out, "{kind:?}");
-        }
-    }
-
-    /// Bytes written into our reservation after the name was checked keep
-    /// it: the length is read again through the handle right before the
-    /// delete.
-    #[cfg(windows)]
-    #[test]
-    fn windows_keeps_a_reservation_written_after_the_check() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join(DB_FILE);
+    fn abort_names_every_entry_even_when_one_is_not_ours() {
+        let (_t, root) = temp();
+        let mut cleanup = Cleanup::new(namespace::admit(&root).unwrap());
+        let (path, owned) = staged(&root);
+        cleanup.db = Some(owned);
         let mut reservations = SidecarReservations::default();
-        reservations.claim(&db).unwrap();
-        let wal = sidecar(&db, "-wal");
-        let left = reservations.release_with(&mut |step, at| {
-            if step == Step::BeforeDelete && at == wal {
-                fs::write(at, b"late write").unwrap();
-            }
-        });
-        assert_eq!(left.len(), 1, "{left:?}");
-        assert!(left[0].contains(&wal.display().to_string()), "{left:?}");
-        assert_eq!(fs::read(&wal).unwrap(), b"late write");
+        reservations.claim(&root.join(DB_FILE)).unwrap();
+        cleanup.sidecars = Some(reservations);
+        fs::rename(&path, root.join("moved")).unwrap();
+        plant(Foreign::Dir, &path, &path);
+        let left = cleanup.abort();
+        assert_eq!(left.len(), 1 + SIDECARS.len() + 1, "{left:?}");
+        assert!(left[0].contains(PARTIAL_DB), "{left:?}");
+        assert_eq!(
+            fs::read(path.join("photo.jpg")).unwrap(),
+            b"\xff\xd8 foreign"
+        );
+        let folder = leftover(&root);
+        for suffix in SIDECARS {
+            assert!(sidecar(&folder.join(DB_FILE), suffix).is_file());
+        }
+        let error = RelocateError::Cleanup {
+            error: Box::new(copy_err("disk full")),
+            left,
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("disk full") && text.contains(PARTIAL_DB),
+            "{text}"
+        );
+        assert!(cleanup.abort().is_empty());
+    }
+
+    /// A retry takes a new leftover folder and never adopts, changes or
+    /// removes an old one.
+    #[test]
+    fn a_retry_never_touches_an_earlier_leftover_folder() {
+        let (_t, root) = temp();
+        let (_, owned) = staged(&root);
+        owned.release().unwrap_err();
+        let first = leftover(&root);
+        let before = tree(&first);
+        let (_, owned) = staged(&root);
+        owned.release().unwrap_err();
+        let both = leftover_folders(&root);
+        assert_eq!(both.len(), 2, "{both:?}");
+        assert!(both.contains(&first));
+        assert_eq!(tree(&first), before);
+        assert!(!occupied(&root.join(PARTIAL_DB)));
     }
 
     /// The thumbnail copy never overwrites: an existing file at a
@@ -4163,35 +4260,54 @@ mod ownership_tests {
         assert_eq!(fs::read(to.join("ab").join("abcd.jpg")).unwrap(), b"thumb");
     }
 
-    /// `copy_data`'s failure path returns what cleanup could not remove.
+    /// Windows cannot yet prove that other users cannot redirect a target
+    /// path, so admission refuses it, and with it every copy, before any
+    /// staging folder is made. Nothing is created in the folder.
+    #[cfg(windows)]
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
-    fn abort_reports_a_replaced_staging_directory_and_keeps_it() {
+    fn windows_refuses_a_target_before_anything_is_staged() {
         let temp = tempfile::tempdir().unwrap();
-        let mut cleanup = Cleanup::new(namespace::admit(temp.path()).unwrap());
-        let (path, owned) = staged(temp.path());
-        cleanup.db = Some(owned);
-        fs::rename(&path, temp.path().join("moved")).unwrap();
-        plant(Foreign::Dir, &path, &path);
-        let left = cleanup.abort();
-        assert_eq!(left.len(), 1, "{left:?}");
-        assert_eq!(
-            fs::read(path.join("photo.jpg")).unwrap(),
-            b"\xff\xd8 foreign"
-        );
-        let error = RelocateError::Cleanup {
-            error: Box::new(copy_err("disk full")),
-            left,
-        };
-        let text = error.to_string();
+        let refusal = namespace::admit(temp.path()).unwrap_err();
         assert!(
-            text.contains("disk full") && text.contains(PARTIAL_DB),
-            "{text}"
+            format!("{refusal:?}").contains("cannot yet prove"),
+            "{refusal:?}"
         );
-        assert!(cleanup.abort().is_empty());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    /// Windows moves the object behind our handle, never what is at the
+    /// name: a replacement put there after the check stays, and our own
+    /// staging goes into the leftover folder from wherever it is.
+    #[cfg(windows)]
+    #[test]
+    fn windows_moves_our_object_not_what_is_at_the_name() {
+        for &kind in &[Foreign::Dir, Foreign::File, Foreign::EmptyFile] {
+            let (_t, root) = temp();
+            let (path, owned) = staged(&root);
+            let ours = root.join("ours-moved-away");
+            let mut before = None;
+            let error = owned
+                .release_with(&mut |step, at| {
+                    if step == Step::BeforeMove {
+                        fs::rename(at, &ours).unwrap();
+                        plant(kind, at, at);
+                        before = Some(tree(at.parent().unwrap()));
+                    }
+                })
+                .unwrap_err();
+            let mut inside = before.unwrap();
+            inside.retain(|k, _| k.starts_with(PARTIAL_DB));
+            let mut after = tree(&root);
+            after.retain(|k, _| k.starts_with(PARTIAL_DB));
+            assert_eq!(after, inside, "{kind:?}: {error}");
+            let copy = if ours.exists() {
+                ours.join(DB_FILE)
+            } else {
+                leftover(&root).join(PARTIAL_DB).join(DB_FILE)
+            };
+            assert_eq!(fs::read(copy).unwrap(), b"copy", "{kind:?}: {error}");
+            assert!(occupied(&path));
+        }
     }
 }
 
@@ -4280,21 +4396,13 @@ mod caller_tests {
             .unwrap()
     }
 
-    pub(super) fn aside_dirs(dir: &Path) -> Vec<PathBuf> {
-        fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|p| {
-                p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with(ASIDE_PREFIX))
-            })
-            .collect()
-    }
+    pub(super) use super::ownership_tests::leftover_folders as aside_dirs;
 
     /// el-2xri through the real caller: a folder with a photo swapped onto
     /// the staging name between `mkdir` and registration fails the move
     /// with a message naming it, keeps it and its contents, leaves the
     /// bootstrap and the source alone, and is not "cleaned up" by the abort.
+    /// The run's own reservations are kept too, moved aside and named.
     #[test]
     fn a_staging_name_swapped_before_registration_fails_the_move_and_keeps_it() {
         // The thumbnails have no staging folder of their own any more: they
@@ -4322,8 +4430,11 @@ mod caller_tests {
                     }
                 },
             );
-            let Err(RelocateError::Copy { reason }) = &result else {
+            let Err(RelocateError::Cleanup { error, left }) = &result else {
                 panic!("{staging}: {result:?}");
+            };
+            let RelocateError::Copy { reason } = &**error else {
+                panic!("{error:?}");
             };
             assert!(reason.contains(&foreign.display().to_string()), "{reason}");
             assert!(reason.contains("nothing was removed"), "{reason}");
@@ -4333,9 +4444,20 @@ mod caller_tests {
                 b"\xff\xd8 foreign"
             );
             assert!(own.is_dir());
-            assert!(aside_dirs(&target).is_empty());
-            // What this run did own is gone: the other staging folder, the
-            // sidecar reservations, and no database was published.
+            // What this run did own is kept, out of the way: the sidecar
+            // reservations, in the leftover folder; no database was
+            // published.
+            let asides = aside_dirs(&target);
+            assert_eq!(asides.len(), 1, "{asides:?}");
+            for suffix in SIDECARS {
+                let moved = sidecar(&asides[0].join(DB_FILE), suffix);
+                assert!(moved.is_file(), "{}", moved.display());
+                assert!(
+                    left.iter()
+                        .any(|l| l.contains(&moved.display().to_string())),
+                    "{left:?}"
+                );
+            }
             assert!(!target.join(DB_FILE).exists());
             let mut names: Vec<_> = fs::read_dir(&target)
                 .unwrap()
@@ -4344,7 +4466,12 @@ mod caller_tests {
                 .filter(|n| !n.ends_with(".writer-lock"))
                 .collect();
             names.sort();
-            assert_eq!(names, [staging], "{staging}");
+            let leftover = asides[0]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            assert_eq!(names, [leftover, staging.to_string()], "{staging}");
             assert_eq!(env.bootstrap(), before);
             assert_eq!(env.chosen(), env.layout.dir);
             assert_eq!(marker(&env.layout.db), "исходная");
@@ -4362,7 +4489,7 @@ mod caller_tests {
         assert_eq!(marker(&target.join(DB_FILE)), "исходная");
     }
 
-    /// Reproduces el-3xm8's P2: the staging folder cannot be moved aside
+    /// Reproduces el-3xm8's P2: the empty staging folder cannot be removed
     /// (the target became unwritable). Before the fix `copy_data` returned
     /// `staging_left`, `commit` dropped it and the shell restarted on `Ok`.
     #[test]
@@ -4395,10 +4522,7 @@ mod caller_tests {
         let partial = target.join(PARTIAL_DB);
         assert!(left.contains(&partial.display().to_string()), "{left}");
         assert!(left.contains("ermission denied"), "{left}");
-        // The empty private folder that could not be removed is named too.
-        let asides = aside_dirs(&target);
-        assert_eq!(asides.len(), 1, "{asides:?}");
-        assert!(left.contains(&asides[0].display().to_string()), "{left}");
+        assert!(aside_dirs(&target).is_empty());
         let text = result.as_ref().unwrap_err().to_string();
         assert!(text.contains(&partial.display().to_string()), "{text}");
         assert!(text.contains(&target.display().to_string()), "{text}");
@@ -4417,53 +4541,55 @@ mod caller_tests {
         // The retained copy stays usable through the explicit action the
         // message names, once the user removed the leftovers.
         fs::remove_dir(&partial).unwrap();
-        fs::remove_dir(&asides[0]).unwrap();
         switch_to_existing(&env.dirs, Source::System, &target).unwrap();
         assert_eq!(env.chosen(), target);
     }
 
-    /// The other place cleanup can fail: after the staging folder was moved
-    /// aside. The original `.partial` name is then gone, and the leftover is
-    /// the private folder — the error must name that, not `.partial`.
+    /// Something dropped into the staging folder while the copy runs (a
+    /// sync client, the user) keeps it from going with `rmdir` after
+    /// publication. It is not unlinked: the folder is moved whole into the
+    /// leftover folder, the move is not switched to, and the error names
+    /// the new place and what is in it (carried forward from el-2yxx0
+    /// round 2; the dropped file is now checked in the leftover folder).
     #[test]
-    fn a_staging_folder_left_in_the_private_folder_stops_the_switch_and_is_named() {
+    fn a_staging_folder_that_is_not_empty_is_moved_aside_and_stops_the_switch() {
         let env = Env::new();
         let target = env.root.join("target");
         let before = env.bootstrap();
-        let mut aside = None;
-        let mut enforced = true;
+        let dropped = target.join(PARTIAL_DB).join("dropped-by-sync.jpg");
         let result = move_data_with(
             &env.dirs,
             &env.layout,
             Source::System,
             &target,
             plenty,
-            &mut |step, at| {
-                if step == Step::BeforeDelete {
-                    let dir = at.parent().unwrap().to_path_buf();
-                    set_mode(&dir, 0o500);
-                    enforced = mode_is_enforced(&dir);
-                    aside = Some(dir);
+            &mut |step, _| {
+                if step == Step::Publish {
+                    fs::write(&dropped, b"synthetic foreign").unwrap();
                 }
             },
         );
-        let aside = aside.expect("cleanup reached the private folder");
-        set_mode(&aside, 0o700);
-        if !enforced {
-            return;
-        }
         let Err(RelocateError::Incomplete { copy, left }) = &result else {
             panic!("the shell would restart on {result:?}");
         };
         assert_eq!(copy, &target);
-        let moved = aside.join(PARTIAL_DB);
+        let asides = aside_dirs(&target);
+        assert_eq!(asides.len(), 1, "{asides:?}");
+        let moved = asides[0].join(PARTIAL_DB);
         assert!(left.contains(&moved.display().to_string()), "{left}");
-        assert!(left.contains("ermission denied"), "{left}");
-        assert!(moved.is_dir());
-        assert!(!target.join(PARTIAL_DB).exists());
+        assert!(left.contains("dropped-by-sync.jpg"), "{left}");
+        assert_eq!(
+            fs::read(moved.join("dropped-by-sync.jpg")).unwrap(),
+            b"synthetic foreign"
+        );
+        assert!(!occupied(&target.join(PARTIAL_DB)));
         assert_eq!(env.bootstrap(), before);
         assert_eq!(env.chosen(), env.layout.dir);
         assert_eq!(marker(&target.join(DB_FILE)), "исходная");
+        // The copy stays usable through the explicit action the message
+        // names, with the leftover folder still there.
+        switch_to_existing(&env.dirs, Source::System, &target).unwrap();
+        assert_eq!(env.chosen(), target);
     }
 
     /// `commit` itself refuses a copy that carries a cleanup failure, so a
@@ -4667,7 +4793,7 @@ mod publication_tests {
             assert_eq!(fs::read_dir(&saved).unwrap().count(), 0);
             assert!(left.contains(&saved.display().to_string()), "{left}");
             assert!(left.contains(&partial.display().to_string()), "{left}");
-            assert!(left.contains("replaced"), "{left}");
+            assert!(left.contains("not this run's entry"), "{left}");
             let text = result.as_ref().unwrap_err().to_string();
             assert!(text.contains(&saved.display().to_string()), "{text}");
             assert!(aside_dirs(&target).is_empty());
@@ -5743,7 +5869,7 @@ mod registration_tests {
     fn no_private_dirs(dir: &Path) {
         for e in fs::read_dir(dir).unwrap() {
             let name = e.unwrap().file_name().to_string_lossy().into_owned();
-            assert!(!name.starts_with(ASIDE_PREFIX), "left {name}");
+            assert!(!name.starts_with(LEFTOVER_PREFIX), "left {name}");
         }
     }
 
@@ -5832,8 +5958,9 @@ mod registration_tests {
     /// Metadata of the swapped-in directory: group/other bits refuse it
     /// even when empty. An empty 0700 directory of the same user cannot be
     /// told from ours — a same-user actor is outside the threat model; this
-    /// pins that limit: it is registered, and only it (with what this run
-    /// puts in it) is removed on release, never a neighbour.
+    /// pins that limit: it is registered, and on release it (with what this
+    /// run put in it) is moved aside and kept — nothing is deleted, and the
+    /// neighbour is never touched.
     #[test]
     fn metadata_decides_for_empty_swaps_and_the_same_user_limit_is_pinned() {
         let temp = tempfile::tempdir().unwrap();
@@ -5857,8 +5984,9 @@ mod registration_tests {
         })
         .unwrap();
         fs::write(path.join(DB_FILE), b"this run's copy").unwrap();
-        owned.release().unwrap();
+        let left = owned.release().unwrap_err();
         assert!(!path.exists());
+        assert!(left.contains(DB_FILE), "{left}");
         assert!(own.is_dir(), "the neighbour was touched");
     }
 
@@ -5887,7 +6015,7 @@ mod registration_tests {
     }
 
     /// Without a race: the directory is made private by `mkdir` itself,
-    /// registered, and removed again with its contents.
+    /// registered, and, still empty, removed again with `rmdir`.
     #[test]
     fn an_undisturbed_directory_is_private_registered_and_released() {
         let temp = tempfile::tempdir().unwrap();
@@ -5896,8 +6024,6 @@ mod registration_tests {
         let meta = fs::symlink_metadata(&path).unwrap();
         assert!(meta.is_dir());
         assert_eq!(meta.mode() & 0o077, 0, "{:o}", meta.mode());
-        fs::create_dir(path.join("sub")).unwrap();
-        fs::write(path.join("sub/thumb.jpg"), b"thumb").unwrap();
         owned.release().unwrap();
         assert!(!path.exists());
         no_private_dirs(temp.path());
@@ -5934,15 +6060,13 @@ mod registration_tests {
 /// macOS extended ACLs at the registration boundary (review el-1wh7b): a
 /// parent with an inheritable `everyone` ACL opened every 0700 folder made
 /// in it to everybody, and such a folder was registered as private.
-/// Review el-5null: the private cleanup folder's *name* lives in the shared
-/// parent. Anyone who may rename entries there (another account with
-/// `delete_child`/`add_subdirectory`, or write on a non-sticky parent) can
-/// move the whole private folder away after our entry was proven ours in
-/// it and put a foreign tree under the old names — without ever looking
-/// inside the private folder. A cleanup that deletes by path then deletes
-/// the foreign tree. These hooks do exactly that between the proof and the
-/// delete (and at the other steps), then check that nothing foreign is
-/// touched and that the caller is told where things are.
+/// Review el-5null: the leftover folder's *name* lives in the shared
+/// parent. Anyone who may rename entries there can move the whole folder
+/// away after our entry was moved into it and put a foreign tree under the
+/// old names. Round 3 deletes nothing, so the foreign tree survives
+/// trivially; these hooks still do exactly that swap, and check that
+/// nothing foreign is touched, our own entries are kept and the caller is
+/// told where they are.
 #[cfg(all(test, unix))]
 mod aside_namespace_tests {
     use super::*;
@@ -5980,100 +6104,89 @@ mod aside_namespace_tests {
         photo
     }
 
-    /// The hook of the review: at `step`, rename the private folder that
-    /// holds `at` to `saved`, recreate its name and plant a foreign entry
-    /// under our entry's name.
-    fn swap_private_folder<'a>(
-        step: Step,
+    /// The hook of the review (el-sr0gt), carried to the leftover folder:
+    /// right after our entry was moved into it, rename that folder to
+    /// `saved`, recreate its name and plant a foreign entry under our
+    /// entry's name in it.
+    fn swap_leftover_folder<'a>(
         directory: bool,
         saved: &'a Path,
         planted: &'a mut Option<(PathBuf, Fingerprint)>,
     ) -> impl FnMut(Step, &Path) + 'a {
         move |now, at| {
-            if now == step && planted.is_none() {
-                let aside = at.parent().unwrap();
-                fs::rename(aside, saved).unwrap();
-                fs::create_dir(aside).unwrap();
+            if now == Step::Moved && planted.is_none() {
+                let folder = at.parent().unwrap();
+                fs::rename(folder, saved).unwrap();
+                fs::create_dir(folder).unwrap();
                 let photo = plant_foreign(at, directory);
                 *planted = Some((photo.clone(), fingerprint(&photo)));
             }
         }
     }
 
-    /// Directory staging, swap right before the delete (the review's case)
-    /// and right after the move (before the proof).
+    /// Directory staging. Round 3 contract: nothing is deleted at all, so
+    /// the review's assertion holds trivially — the foreign tree is intact.
+    /// Adjusted control assertion: our own copy is no longer "gone from the
+    /// renamed folder" but kept there, and the error says where.
     #[test]
-    fn a_renamed_private_folder_never_takes_a_foreign_tree_with_it() {
-        for step in [Step::BeforeDelete, Step::Moved] {
-            let temp = tempfile::tempdir().unwrap();
-            let path = temp.path().join("staging");
-            let owned = OwnedDirectory::create(&path).unwrap();
-            fs::write(path.join("own-copy"), b"ours").unwrap();
-            let saved = temp.path().join("saved-aside");
-            let mut planted = None;
-            let result =
-                owned.release_with(&mut swap_private_folder(step, true, &saved, &mut planted));
-            let (photo, before) = planted.expect("the hook ran");
-            assert_eq!(fingerprint(&photo), before, "{step:?}: {result:?}");
-            let aside = photo.parent().unwrap().parent().unwrap();
-            let error = result.expect_err("a moved private folder is reported");
-            assert!(error.contains(&aside.display().to_string()), "{error}");
-            assert!(error.contains("moved or replaced"), "{error}");
-            // Our own copy is gone from wherever the private folder went;
-            // the folder itself, now empty, is reported where it is.
-            assert_eq!(fs::read_dir(&saved).unwrap().count(), 0, "{step:?}");
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            assert!(
-                error.contains(&saved.canonicalize().unwrap().display().to_string()),
-                "{error}"
-            );
-            assert!(!path.exists());
-        }
+    fn a_renamed_leftover_folder_never_takes_a_foreign_tree_with_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let path = root.join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        fs::write(path.join("own-copy"), b"ours").unwrap();
+        let saved = root.join("saved-leftover");
+        let mut planted = None;
+        let result = owned.release_with(&mut swap_leftover_folder(true, &saved, &mut planted));
+        let (photo, before) = planted.expect("the hook ran");
+        assert_eq!(fingerprint(&photo), before, "{result:?}");
+        let error = result.expect_err("a run that left entries is reported");
+        assert_eq!(fs::read(saved.join("staging/own-copy")).unwrap(), b"ours");
+        assert!(error.contains(&saved.display().to_string()), "{error}");
+        assert!(!path.exists());
     }
 
-    /// The same for the empty sidecar reservations.
+    /// The same for the empty sidecar reservations: kept, not unlinked.
     #[test]
-    fn a_renamed_private_folder_never_takes_a_foreign_sidecar_with_it() {
-        for step in [Step::BeforeDelete, Step::Moved] {
-            let temp = tempfile::tempdir().unwrap();
-            let db = temp.path().join(DB_FILE);
-            let mut reservations = SidecarReservations::default();
-            reservations.claim(&db).unwrap();
-            let saved = temp.path().join("saved-aside");
-            let mut planted = None;
-            let left = reservations.release_with(&mut swap_private_folder(
-                step,
-                false,
-                &saved,
-                &mut planted,
-            ));
-            let (photo, before) = planted.expect("the hook ran");
-            assert_eq!(fingerprint(&photo), before, "{step:?}: {left:?}");
-            assert_eq!(left.len(), 1, "{left:?}");
-            let aside = photo.parent().unwrap();
-            assert!(left[0].contains(&aside.display().to_string()), "{left:?}");
-            assert_eq!(fs::read_dir(&saved).unwrap().count(), 0, "{step:?}");
-            for suffix in SIDECARS {
-                assert!(!sidecar(&db, suffix).exists(), "{suffix}");
-            }
+    fn a_renamed_leftover_folder_never_takes_a_foreign_sidecar_with_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let db = root.join(DB_FILE);
+        let mut reservations = SidecarReservations::default();
+        reservations.claim(&db).unwrap();
+        let saved = root.join("saved-leftover");
+        let mut planted = None;
+        let left =
+            reservations.release_with(&mut swap_leftover_folder(false, &saved, &mut planted));
+        let (photo, before) = planted.expect("the hook ran");
+        assert_eq!(fingerprint(&photo), before, "{left:?}");
+        for suffix in SIDECARS {
+            assert!(!occupied(&sidecar(&db, suffix)), "{suffix}");
+            let kept = sidecar(&saved.join(DB_FILE), suffix);
+            assert_eq!(fs::read(&kept).unwrap(), b"", "{suffix}");
+            assert!(
+                left.iter().any(|l| l.contains(&kept.display().to_string())),
+                "{suffix}: {left:?}"
+            );
         }
     }
 
     /// The parent itself is renamed and replaced by a folder with a foreign
-    /// entry under our name, right before our entry is moved aside: the
-    /// cleanup keeps working in the folder it checked, and the new one is
-    /// not touched.
+    /// entry under our name, right before our entry is settled: nothing is
+    /// done in the new folder (no leftover folder either), our own entry
+    /// stays in the renamed one, and both are named.
     #[test]
     fn a_replaced_parent_is_not_cleaned_in_our_place() {
         let temp = tempfile::tempdir().unwrap();
-        let parent = temp.path().join("target");
+        let root = temp.path().canonicalize().unwrap();
+        let parent = root.join("target");
         fs::create_dir(&parent).unwrap();
         let path = parent.join(PARTIAL_DB);
         let owned = OwnedDirectory::create(&path).unwrap();
         fs::write(path.join(DB_FILE), b"ours").unwrap();
-        let saved = temp.path().join("saved-target");
+        let saved = root.join("saved-target");
         let mut planted = None;
-        owned
+        let error = owned
             .release_with(&mut |step, at| {
                 if step == Step::BeforeMove {
                     fs::rename(&parent, &saved).unwrap();
@@ -6082,15 +6195,23 @@ mod aside_namespace_tests {
                     planted = Some((photo.clone(), fingerprint(&photo)));
                 }
             })
-            .unwrap();
+            .unwrap_err();
         let (photo, before) = planted.unwrap();
         assert_eq!(fingerprint(&photo), before);
-        assert_eq!(fs::read_dir(&saved).unwrap().count(), 0);
+        assert_eq!(
+            fs::read(saved.join(PARTIAL_DB).join(DB_FILE)).unwrap(),
+            b"ours"
+        );
+        assert!(ownership_tests::leftover_folders(&parent).is_empty());
+        assert!(error.contains("not this run's entry"), "{error}");
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(error.contains(&saved.display().to_string()), "{error}");
     }
 
-    /// Through the caller: the swap after the proof ends the move with
-    /// `Incomplete` naming the private folder, the bootstrap is unchanged
-    /// and the foreign tree is intact.
+    /// Through the caller: after publication the (empty) staging folder is
+    /// swapped for a foreign one with a photo right before its `rmdir`. The
+    /// move ends with `Incomplete` naming the staging name and where ours
+    /// went, the bootstrap is unchanged and the foreign tree is intact.
     #[test]
     fn the_caller_is_told_and_the_foreign_tree_survives() {
         let temp = tempfile::tempdir().unwrap();
@@ -6105,7 +6226,7 @@ mod aside_namespace_tests {
         crate::resolve::confirm_started(&dirs, &prepared).unwrap();
         let before = fs::read(dirs.bootstrap_path()).ok();
         let target = root.join("target");
-        let saved = root.join("saved-aside");
+        let saved = root.join("saved-staging");
         let mut planted = None;
         let result = move_data_with(
             &dirs,
@@ -6113,7 +6234,13 @@ mod aside_namespace_tests {
             Source::System,
             &target,
             |_| Ok(1 << 40),
-            &mut swap_private_folder(Step::BeforeDelete, true, &saved, &mut planted),
+            &mut |step, at| {
+                if step == Step::BeforeMove && planted.is_none() {
+                    fs::rename(at, &saved).unwrap();
+                    let photo = plant_foreign(at, true);
+                    planted = Some((photo.clone(), fingerprint(&photo)));
+                }
+            },
         );
         let (photo, fp) = planted.expect("the hook ran");
         assert_eq!(fingerprint(&photo), fp);
@@ -6121,10 +6248,14 @@ mod aside_namespace_tests {
             panic!("the shell would restart on {result:?}");
         };
         assert_eq!(copy, &target);
-        let aside = photo.parent().unwrap().parent().unwrap();
-        assert!(left.contains(&aside.display().to_string()), "{left}");
+        assert!(
+            left.contains(&target.join(PARTIAL_DB).display().to_string()),
+            "{left}"
+        );
+        assert!(left.contains(&saved.display().to_string()), "{left}");
         assert_eq!(fs::read(dirs.bootstrap_path()).ok(), before);
         assert!(target.join(DB_FILE).is_file());
+        assert!(saved.is_dir());
     }
 }
 
@@ -6181,8 +6312,8 @@ mod macos_acl_tests {
     }
 
     /// The reviewer's scenario, end to end: the staging directory and the
-    /// private cleanup folder are both created without the parent's ACL,
-    /// and the run's own content is removed on release.
+    /// leftover folder are both created without the parent's ACL, and the
+    /// run's own content is kept in the leftover folder, not deleted.
     #[test]
     fn folders_made_under_an_inheritable_acl_do_not_inherit_it() {
         let temp = tempfile::tempdir().unwrap();
@@ -6194,17 +6325,21 @@ mod macos_acl_tests {
         assert_eq!(macos_acl::no_extended_acl(&file), Ok(()));
         fs::write(path.join(DB_FILE), b"this run's copy").unwrap();
 
-        let mut asides = Vec::new();
+        let mut folders = Vec::new();
         owned
             .release_with(&mut |step, at| {
-                if step == Step::AsideCreated {
+                if step == Step::LeftoverCreated {
                     assert_eq!(acl_lines(at), Vec::<String>::new());
-                    asides.push(at.to_path_buf());
+                    folders.push(at.to_path_buf());
                 }
             })
-            .unwrap();
-        assert_eq!(asides.len(), 1);
-        assert!(!path.exists() && !asides[0].exists());
+            .unwrap_err();
+        assert_eq!(folders.len(), 1);
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read(folders[0].join(PARTIAL_DB).join(DB_FILE)).unwrap(),
+            b"this run's copy"
+        );
     }
 
     /// A folder of this user, mode 0700, empty — but with the parent's ACL,
@@ -6232,45 +6367,45 @@ mod macos_acl_tests {
         assert!(!acl_lines(&path).is_empty());
     }
 
-    /// An ACL on the private cleanup folder (here: added right after it was
-    /// made) stops the cleanup before anything is moved: the staging
-    /// directory and its content stay at their name, the folder stays too,
-    /// and the error names both.
+    /// An ACL on the leftover folder (here: added right after it was made)
+    /// stops the cleanup before anything is moved: the staging directory
+    /// and its content stay at their name, the leftover folder stays too
+    /// (empty), and the error names the staging directory and the folder.
     #[test]
-    fn a_private_folder_with_an_acl_stops_cleanup_and_nothing_is_deleted() {
+    fn a_leftover_folder_with_an_acl_stops_cleanup_and_nothing_is_moved() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(PARTIAL_DB);
         let owned = OwnedDirectory::create(&path).unwrap();
         fs::write(path.join(DB_FILE), b"this run's copy").unwrap();
-        let mut aside = None;
+        let mut folder = None;
         let e = owned
             .release_with(&mut |step, at| {
-                if step == Step::AsideCreated {
+                if step == Step::LeftoverCreated {
                     add_acl(at, "everyone allow add_file,add_subdirectory,delete_child");
-                    aside = Some(at.to_path_buf());
+                    folder = Some(at.to_path_buf());
                 }
             })
             .unwrap_err();
-        let aside = aside.unwrap();
+        let folder = folder.unwrap();
         assert!(e.contains(&path.display().to_string()), "{e}");
-        assert!(e.contains(&aside.display().to_string()), "{e}");
+        assert!(e.contains(&folder.display().to_string()), "{e}");
         assert!(e.contains("left in place"), "{e}");
         assert_eq!(fs::read(path.join(DB_FILE)).unwrap(), b"this run's copy");
-        assert!(aside.is_dir());
-        assert_eq!(fs::read_dir(&aside).unwrap().count(), 0);
+        assert!(folder.is_dir());
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
     }
 
-    /// Review el-5null, verbatim scenario: a parent open to everyone
-    /// (`delete_child`, `add_subdirectory`), so another account may rename
-    /// the private folder itself. After our entry is proven ours in it, the
-    /// whole private folder is renamed to a sibling and a foreign tree put
-    /// under the old names — nothing inside the private folder is touched.
-    /// Before the fix `remove_dir_all` of the old path deleted
-    /// `foreign-photo.jpg` and returned `Ok` (0/1). Now the foreign tree is
-    /// intact, our own copy is gone from the moved folder, and the error
-    /// names the old name and where the private folder went.
+    /// Review el-5null, verbatim scenario carried to the leftover folder: a
+    /// parent open to everyone (`delete_child`, `add_subdirectory`), so
+    /// another account may rename the leftover folder itself. Right after
+    /// our entry was moved into it, the whole folder is renamed to a
+    /// sibling and a foreign tree put under the old names. Before el-5null
+    /// `remove_dir_all` of the old path deleted `foreign-photo.jpg` and
+    /// returned `Ok`. Now nothing is deleted: the foreign tree is intact,
+    /// and — adjusted control assertion, round 3 — our own copy is kept in
+    /// the renamed folder and the error says where.
     #[test]
-    fn a_private_folder_renamed_in_an_open_parent_keeps_the_foreign_photo() {
+    fn a_leftover_folder_renamed_in_an_open_parent_keeps_the_foreign_photo() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
@@ -6279,13 +6414,13 @@ mod macos_acl_tests {
             let path = parent.join(staging);
             let owned = OwnedDirectory::create(&path).unwrap();
             fs::write(path.join("own-copy"), b"ours").unwrap();
-            let saved = parent.join(format!("saved-aside-{staging}"));
+            let saved = parent.join(format!("saved-leftover-{staging}"));
             let mut foreign = None;
             let result = owned.release_with(&mut |step, at| {
-                if step == Step::BeforeDelete {
-                    let aside = at.parent().unwrap();
-                    fs::rename(aside, &saved).unwrap();
-                    fs::create_dir(aside).unwrap();
+                if step == Step::Moved {
+                    let folder = at.parent().unwrap();
+                    fs::rename(folder, &saved).unwrap();
+                    fs::create_dir(folder).unwrap();
                     fs::create_dir(at).unwrap();
                     let photo = at.join("foreign-photo.jpg");
                     fs::write(&photo, b"unique foreign payload 92741").unwrap();
@@ -6299,13 +6434,12 @@ mod macos_acl_tests {
                 "{result:?}"
             );
             let error = result.unwrap_err();
-            let aside = photo.parent().unwrap().parent().unwrap();
-            assert!(error.contains(&aside.display().to_string()), "{error}");
-            assert!(
-                error.contains(&saved.canonicalize().unwrap().display().to_string()),
-                "{error}"
+            let saved = saved.canonicalize().unwrap();
+            assert!(error.contains(&saved.display().to_string()), "{error}");
+            assert_eq!(
+                fs::read(saved.join(staging).join("own-copy")).unwrap(),
+                b"ours"
             );
-            assert!(!saved.join(staging).exists());
             assert!(!path.exists());
         }
     }
@@ -6360,30 +6494,36 @@ mod windows_registration_tests {
         format!("O:{sid}D:P(A;OICI;FA;;;{sid}){extra}")
     }
 
+    /// Empty: released with `rmdir`, nothing left. With contents: moved
+    /// whole into a leftover folder and named, nothing deleted.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
-    fn a_new_private_directory_passes_and_is_released() {
+    fn a_new_private_directory_passes_and_is_released_or_kept() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(PARTIAL_DB);
         let owned = OwnedDirectory::create(&path).unwrap();
         open_created_dir(&path).unwrap();
+        owned.release().unwrap();
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+
+        let owned = OwnedDirectory::create(&path).unwrap();
         fs::create_dir(path.join("sub")).unwrap();
         fs::write(path.join("sub").join("thumb.jpg"), b"thumb").unwrap();
-        owned.release().unwrap();
+        let error = owned.release().unwrap_err();
         assert!(!path.exists());
-        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+        let folder = ownership_tests::leftover(temp.path());
+        assert_eq!(
+            fs::read(folder.join(PARTIAL_DB).join("sub").join("thumb.jpg")).unwrap(),
+            b"thumb"
+        );
+        assert!(
+            error.contains("this run's own entries listed above"),
+            "{error}"
+        );
     }
 
     /// The el-3xm8 reproducer on Windows: a folder with default (inherited)
     /// permissions, with or without a photo, takes the name.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
     fn a_folder_with_inherited_permissions_is_refused_and_kept() {
         for with_photo in [true, false] {
             let temp = tempfile::tempdir().unwrap();
@@ -6487,10 +6627,6 @@ mod windows_registration_tests {
     /// The owner check on a real folder owned by another account: the
     /// Windows directory (TrustedInstaller). Opened read-only, not changed.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
     fn a_folder_of_another_account_is_refused() {
         let root = std::env::var_os("SystemRoot").expect("SystemRoot");
         let e = open_created_dir(Path::new(&root)).unwrap_err();
@@ -6498,14 +6634,10 @@ mod windows_registration_tests {
     }
 
     /// A tree with a read-only file and a junction to a foreign folder in
-    /// it: deleted through handles, the junction as itself — the folder it
-    /// points to keeps its photo.
+    /// it: moved aside whole through our handle, nothing deleted, the
+    /// junction kept as itself — the folder it points to keeps its photo.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
-    fn a_tree_is_deleted_through_handles_without_following_junctions() {
+    fn a_tree_with_a_junction_is_moved_aside_whole() {
         let temp = tempfile::tempdir().unwrap();
         let foreign = temp.path().join("photos-2015");
         fs::create_dir(&foreign).unwrap();
@@ -6525,11 +6657,292 @@ mod windows_registration_tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "{out:?}");
-        owned.release().unwrap();
+        owned.release().unwrap_err();
         assert!(!path.exists());
+        let moved = ownership_tests::leftover(temp.path()).join(PARTIAL_THUMBS);
+        assert_eq!(
+            fs::read(moved.join("ab").join("cd").join("thumb.jpg")).unwrap(),
+            b"thumb"
+        );
+        assert!(fs::symlink_metadata(moved.join("ab").join("link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(
             fs::read(foreign.join("IMG_0001.JPG")).unwrap(),
             b"only copy"
         );
+    }
+}
+
+/// Reproducers from review el-vuz4b (round 3, reviewer el-67ku), kept as
+/// written. B2-R3 (every retained entry named, including on I/O refusal)
+/// must pass. B1-R3 and B3-R3 are interference by the same user exactly
+/// between two system calls, outside the threat model by the user's
+/// decision (2026-10-05, confirmed 2026-10-12): ignored, so the limit stays
+/// demonstrable with `--ignored` (DESKTOP.md, «Очистка временных файлов»).
+#[cfg(all(test, unix))]
+mod reviewer_el_vuz4b {
+    use super::caller_tests::{plenty, Env};
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    const BYTES: &[u8] = b"synthetic foreign only copy 72819";
+    type Stamp = (u64, u64, u32, u32, i64, i64);
+    fn stamp(p: &Path) -> Stamp {
+        let m = fs::symlink_metadata(p).unwrap();
+        (
+            m.dev(),
+            m.ino(),
+            m.mode(),
+            m.uid(),
+            m.mtime(),
+            m.mtime_nsec(),
+        )
+    }
+    fn plant(p: &Path) -> Stamp {
+        fs::write(p, BYTES).unwrap();
+        fs::set_permissions(p, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_019))
+            .unwrap();
+        stamp(p)
+    }
+    fn preserved(p: &Path, before: Stamp) {
+        assert_eq!(fs::read(p).unwrap(), BYTES);
+        assert_eq!(stamp(p), before);
+    }
+    #[test]
+    #[ignore = "out of threat model (user decision 2026-10-05/2026-10-12), el-vuz4b B1-R3"]
+    fn reviewer_round3_caller_must_not_succeed_with_nonempty_saved_staging() {
+        let env = Env::new();
+        let target = env.root.join("target");
+        let saved = env.root.join("saved-nonempty-staging");
+        let before_bootstrap = env.bootstrap();
+        let mut before = None;
+        let result = move_data_with(
+            &env.dirs,
+            &env.layout,
+            Source::System,
+            &target,
+            plenty,
+            &mut |step, at| {
+                if step == Step::Publish {
+                    before = Some(plant(&target.join(PARTIAL_DB).join("foreign.raw")));
+                }
+                if step == Step::BeforeMove {
+                    fs::rename(at, &saved).unwrap();
+                    fs::create_dir(at).unwrap();
+                }
+            },
+        );
+        preserved(&saved.join("foreign.raw"), before.unwrap());
+        eprintln!(
+            "REVIEW R3 silent success: result={result:?}; saved={}; bootstrap_changed={}",
+            saved.display(),
+            env.bootstrap() != before_bootstrap
+        );
+        assert!(
+            matches!(result, Err(RelocateError::Incomplete { .. })),
+            "caller must refuse switching while a nonempty staging was left: {result:?}"
+        );
+        assert_eq!(env.bootstrap(), before_bootstrap);
+    }
+    #[test]
+    fn reviewer_round3_caller_names_all_twenty_five_foreign_entries() {
+        let env = Env::new();
+        let target = env.root.join("target");
+        let mut stamps = Vec::new();
+        let result = move_data_with(
+            &env.dirs,
+            &env.layout,
+            Source::System,
+            &target,
+            plenty,
+            &mut |step, _| {
+                if step == Step::Publish {
+                    for n in 0..25 {
+                        let name = format!("foreign-{n:02}.raw");
+                        stamps.push((name.clone(), plant(&target.join(PARTIAL_DB).join(name))));
+                    }
+                }
+            },
+        );
+        assert!(
+            matches!(result, Err(RelocateError::Incomplete { .. })),
+            "{result:?}"
+        );
+        let error = result.unwrap_err().to_string();
+        let moved = ownership_tests::leftover(&target).join(PARTIAL_DB);
+        for (name, before) in &stamps {
+            preserved(&moved.join(name), *before);
+        }
+        let missing: Vec<_> = stamps
+            .iter()
+            .filter(|(name, _)| !error.contains(name))
+            .map(|(name, _)| name)
+            .collect();
+        eprintln!("REVIEW R3 full inventory: missing={missing:?}; error={error}");
+        assert!(
+            missing.is_empty(),
+            "caller omitted retained foreign paths: {missing:?}"
+        );
+    }
+    #[test]
+    fn reviewer_round3_caller_names_foreign_entries_on_io_refusal() {
+        let env = Env::new();
+        let target = env.root.join("target");
+        let mut stamps = Vec::new();
+        let result = move_data_with(
+            &env.dirs,
+            &env.layout,
+            Source::System,
+            &target,
+            plenty,
+            &mut |step, _| {
+                if step == Step::Publish {
+                    for name in ["foreign-a.raw", "foreign-b.raw"] {
+                        stamps.push((name, plant(&target.join(PARTIAL_DB).join(name))));
+                    }
+                }
+                if step == Step::BeforeMove {
+                    fs::set_permissions(&target, fs::Permissions::from_mode(0o500)).unwrap();
+                }
+            },
+        );
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            matches!(result, Err(RelocateError::Incomplete { .. })),
+            "{result:?}"
+        );
+        let error = result.unwrap_err().to_string();
+        for (name, before) in stamps {
+            preserved(&target.join(PARTIAL_DB).join(name), before);
+        }
+        eprintln!("REVIEW R3 I/O inventory: {error}");
+        assert!(
+            error.contains("foreign-a.raw") && error.contains("foreign-b.raw"),
+            "caller omits visible retained foreign siblings: {error}"
+        );
+    }
+
+    /// Beyond the reviewer's two: the inventory goes down the whole tree
+    /// and names a subfolder it cannot read instead of dropping it, and a
+    /// link is named, not followed.
+    #[test]
+    fn a_kept_folder_names_its_whole_tree_and_an_unreadable_subfolder() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let outside_file = plant(&outside.join("outside-only.raw"));
+        fs::create_dir_all(path.join("a/b")).unwrap();
+        let deep = plant(&path.join("a/b/deep.raw"));
+        fs::create_dir(path.join("locked")).unwrap();
+        let hidden = plant(&path.join("locked/hidden.raw"));
+        std::os::unix::fs::symlink(&outside, path.join("link")).unwrap();
+        fs::set_permissions(path.join("locked"), fs::Permissions::from_mode(0o300)).unwrap();
+        let error = owned.release().unwrap_err();
+        let moved = ownership_tests::leftover(temp.path()).join("staging");
+        fs::set_permissions(moved.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
+        preserved(&moved.join("a/b/deep.raw"), deep);
+        preserved(&moved.join("locked/hidden.raw"), hidden);
+        preserved(&outside.join("outside-only.raw"), outside_file);
+        for name in ["a/", "a/b/", "a/b/deep.raw", "link"] {
+            assert!(error.contains(name), "{name}: {error}");
+        }
+        assert!(
+            error.contains("locked/ (its contents could not be listed"),
+            "{error}"
+        );
+        assert!(!error.contains("outside-only.raw"), "{error}");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod reviewer_el_vuz4b_windows {
+    use super::*;
+    #[test]
+    #[ignore = "out of threat model (user decision 2026-10-05/2026-10-12), el-vuz4b B3-R3"]
+    fn reviewer_round3_junction_swapped_before_rmdir_must_be_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        fs::write(path.join("own-copy"), b"synthetic owned copy").unwrap();
+        let saved = temp.path().join("saved-staging");
+        let foreign = temp.path().join("foreign-target");
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("foreign.raw"), b"synthetic only foreign copy").unwrap();
+        let result = owned.release_with(&mut |step, at| {
+            if step == Step::BeforeMove {
+                fs::rename(at, &saved).unwrap();
+                let out = std::process::Command::new("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(at)
+                    .arg(&foreign)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{out:?}");
+                assert!(fs::symlink_metadata(at).unwrap().file_type().is_symlink());
+            }
+        });
+        assert_eq!(
+            fs::read(saved.join("own-copy")).unwrap(),
+            b"synthetic owned copy"
+        );
+        assert_eq!(
+            fs::read(foreign.join("foreign.raw")).unwrap(),
+            b"synthetic only foreign copy"
+        );
+        eprintln!(
+            "REVIEW R3 Windows junction: result={result:?}; junction_exists={}",
+            fs::symlink_metadata(&path).is_ok()
+        );
+        assert!(
+            fs::symlink_metadata(&path).is_ok(),
+            "foreign junction namespace object was deleted"
+        );
+        assert!(
+            result.is_err(),
+            "nonempty staging was left without reporting"
+        );
+    }
+
+    /// The inventory on Windows: the whole tree through handles, a
+    /// junction named and not entered.
+    #[test]
+    fn a_kept_folder_names_its_whole_tree_and_not_a_junction_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("staging");
+        let owned = OwnedDirectory::create(&path).unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("outside-only.raw"), b"synthetic outside").unwrap();
+        fs::create_dir_all(path.join("a").join("b")).unwrap();
+        fs::write(path.join("a").join("b").join("deep.raw"), b"synthetic deep").unwrap();
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(path.join("junction"))
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let error = owned.release().unwrap_err();
+        let moved = ownership_tests::leftover(temp.path()).join("staging");
+        assert_eq!(
+            fs::read(moved.join("a").join("b").join("deep.raw")).unwrap(),
+            b"synthetic deep"
+        );
+        assert_eq!(
+            fs::read(outside.join("outside-only.raw")).unwrap(),
+            b"synthetic outside"
+        );
+        for name in ["a/", "a/b/", "a/b/deep.raw", "junction"] {
+            assert!(error.contains(name), "{name}: {error}");
+        }
+        assert!(!error.contains("outside-only.raw"), "{error}");
     }
 }

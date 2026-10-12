@@ -50,11 +50,16 @@ libc.workspace = true
 [target.'cfg(windows)'.dependencies]
 # Private folders for relocation: created with an owner and a protected
 # DACL of this user only, checked through the handle (el-2xri).
+# `Wdk_Storage_FileSystem` and `System_IO`: `NtSetInformationFile`, the
+# only way to rename an object through its handle into a folder given by
+# handle (el-2yxx0).
 windows-sys = { workspace = true, features = [
+    "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     "Win32_System_Threading",
 ] }
 

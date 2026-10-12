@@ -713,7 +713,11 @@ fn symlinks_and_dangling_names_block_copy_even_after_preview() {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
-fn a_snapshot_failure_removes_its_private_namespace_and_reservations() {
+fn a_snapshot_failure_sets_its_staging_and_reservations_aside_and_names_them() {
+    // Round 3 (el-2yxx0): relocation cleanup deletes no file. What the run
+    // made is moved into one new leftover folder next to the target (an
+    // empty staging folder goes with `rmdir`), every entry is named, and
+    // the staging names are free for a retry.
     let env = Env::new();
     let old = prepare(&env.dirs, &resolve(&env.dirs, None).unwrap())
         .unwrap()
@@ -723,13 +727,36 @@ fn a_snapshot_failure_removes_its_private_namespace_and_reservations() {
     let target = env.root.join("dest");
     fs::create_dir(&target).unwrap();
     fs::write(target.join("foreign"), b"keep").unwrap();
-    assert!(matches!(
-        copy_data(&env.dirs, &old, Source::System, &target, plenty),
-        Err(RelocateError::Copy { .. })
-    ));
-    assert_eq!(
-        listing(&target),
-        vec!["foreign".into(), format!("{DB_FILE}.writer-lock")]
+    let result = copy_data(&env.dirs, &old, Source::System, &target, plenty);
+    let Err(RelocateError::Cleanup { error, left }) = &result else {
+        panic!("{:?}", result.err());
+    };
+    assert!(matches!(**error, RelocateError::Copy { .. }), "{error:?}");
+    let names = listing(&target);
+    assert_eq!(names.len(), 3, "{names:?}");
+    assert!(names.contains(&"foreign".to_string()), "{names:?}");
+    assert!(
+        names.contains(&format!("{DB_FILE}.writer-lock")),
+        "{names:?}"
+    );
+    let folder = names
+        .iter()
+        .find(|n| n.starts_with("photo-cleanup-leftover-"))
+        .map(|n| target.join(n))
+        .expect("one leftover folder");
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let kept = folder.join(format!("{DB_FILE}{suffix}"));
+        assert!(kept.is_file(), "{}", kept.display());
+        assert!(
+            left.iter().any(|l| l.contains(&kept.display().to_string())),
+            "{suffix}: {left:?}"
+        );
+    }
+    assert!(
+        left.iter()
+            .any(|l| l.contains(&folder.display().to_string())
+                && l.contains("look at all of it before deleting")),
+        "{left:?}"
     );
     assert_eq!(fs::read(target.join("foreign")).unwrap(), b"keep");
     assert_eq!(env.bootstrap(), boot);

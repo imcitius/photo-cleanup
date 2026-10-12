@@ -556,6 +556,17 @@ fn probe_writable_with(
                 return Ok(());
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            // `CREATE_NEW` on a name held by a directory fails with "access
+            // denied", not "already exists" (seen on the CI runner,
+            // el-2yxx0). Only a name that is taken is skipped; the entry is
+            // looked at, never opened. A refusal on a free name is the
+            // answer: the folder is not writable.
+            Err(e)
+                if e.kind() == io::ErrorKind::PermissionDenied
+                    && fs::symlink_metadata(&path).is_ok() =>
+            {
+                continue
+            }
             Err(e) => return Err(e),
         }
     }
@@ -971,10 +982,6 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "fails natively on Windows: handle delete/ACL defect, task el-2yxx0"
-    )]
     fn a_taken_name_is_skipped_not_truncated_or_removed() {
         let tmp = TempDir::new().unwrap();
         let before = foreign(tmp.path());
