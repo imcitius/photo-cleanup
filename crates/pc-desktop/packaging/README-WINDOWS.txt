@@ -48,9 +48,13 @@ photo-cleanup-desktop.exe.
     thumbs\ — миниатюры.
 Выбор папки данных хранится в
   %LOCALAPPDATA%\io.github.imcitius.photo-cleanup\desktop.json
-Чтобы начать с чистого листа, закройте приложение (см. «Как выйти») и
-удалите папку %LOCALAPPDATA%\io.github.imcitius.photo-cleanup целиком.
-Ваши фотографии там не лежат.
+Чтобы начать с чистого листа, закройте приложение (см. «Как выйти»),
+откройте эти папки и проверьте, что в них лежат только перечисленные
+выше файлы: photo-cleanup.db, photo-cleanup.db-wal, photo-cleanup.db-shm,
+photo-cleanup.db.writer-lock, папка thumbs\ и desktop.json. Тогда
+удалите только эти файлы и папку thumbs\, ничего больше. Если там есть
+что-то ещё или вы не уверены — ничего не удаляйте и спросите того, кто
+прислал сборку.
 
 Копирование данных программы в другую папку (кнопка «Сменить папку…» в
 разделе «Папка данных программы») на Windows намеренно отключено:
@@ -67,10 +71,16 @@ photo-cleanup-desktop.exe.
 
 Что программа делает с фотографиями
 -----------------------------------
-Ничего не удаляется. Файлы, которые вы решили убрать, переносятся в
-скрытую папку .photo-cleanup-quarantine рядом с ними, на том же диске, и
-возвращаются одной кнопкой. Место освобождает только отдельная очистка
-карантина (purge) — для проверки её запускать не нужно и не надо.
+Ничего не удаляется. В этой сборке для Windows перенос файлов в карантин,
+откат (возврат) и сверка после сбоя намеренно отключены: программа
+отказывает заранее, ничего не сдвинув, с сообщением вроде
+  «на Windows перенос, откат и сверка пока не выполняются: проверка
+  личности файлов и безопасного удаления временных файлов на настоящей
+  системе Windows ещё не проведена»
+(или его английский вариант). Такой отказ — ожидаемое поведение, а не
+ошибка. Проверьте, что сообщение понятно и что ни один файл не сдвинулся
+с места. Место освобождает только отдельная очистка карантина (purge) —
+для проверки её запускать не нужно и не надо.
 Для пробы лучше взять копию небольшой папки со снимками, а не весь архив.
 
 Что сообщить
@@ -97,14 +107,22 @@ Windows. Not a release: unsigned, nothing is installed.
 - Data: %LOCALAPPDATA%\io.github.imcitius.photo-cleanup\data\ (database
   photo-cleanup.db, its writer-lock file, thumbs\). The data-folder choice
   is in %LOCALAPPDATA%\io.github.imcitius.photo-cleanup\desktop.json.
-  Deleting that folder after quitting starts from scratch; no photos are
-  kept there.
+  To start from scratch: quit the app, check that those folders hold only
+  photo-cleanup.db, photo-cleanup.db-wal, photo-cleanup.db-shm,
+  photo-cleanup.db.writer-lock, thumbs\ and desktop.json, then delete
+  only those. If anything else is there or you are unsure, delete nothing
+  and ask whoever sent you the build.
 - Copying the app data to another folder ("Change folder...") is refused
   on Windows by design, before anything is written. That is expected.
 - The window's close button only hides it. Quit from the tray icon:
   "Quit" ("Open" brings the window back, "Stop work" stops the current job).
-- Nothing is deleted: files you remove go to a hidden
-  .photo-cleanup-quarantine folder beside them on the same drive and can
-  be restored. Only a separate purge frees space — do not run it for this
-  test. Try it on a copy of a small folder, not your whole archive.
+- Nothing is deleted. In this Windows build, moving files to quarantine,
+  undo and recovery are disabled by design: the app refuses before
+  anything moves, with a message like "on Windows, moves, undo and
+  recovery are not carried out yet: file identity and the safe cleanup of
+  temporary files have not been verified on a real Windows system" (or
+  its Russian version). That refusal is expected; check that it is clear
+  and that no file has moved. Only a separate purge frees space — do not
+  run it for this test. Try it on a copy of a small folder, not your
+  whole archive.
 - photo-cleanup.exe is the command-line tool; not needed for this test.
