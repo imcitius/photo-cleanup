@@ -48,13 +48,7 @@ photo-cleanup-desktop.exe.
     thumbs\ — миниатюры.
 Выбор папки данных хранится в
   %LOCALAPPDATA%\io.github.imcitius.photo-cleanup\desktop.json
-Чтобы начать с чистого листа, закройте приложение (см. «Как выйти»),
-откройте эти папки и проверьте, что в них лежат только перечисленные
-выше файлы: photo-cleanup.db, photo-cleanup.db-wal, photo-cleanup.db-shm,
-photo-cleanup.db.writer-lock, папка thumbs\ и desktop.json. Тогда
-удалите только эти файлы и папку thumbs\, ничего больше. Если там есть
-что-то ещё или вы не уверены — ничего не удаляйте и спросите того, кто
-прислал сборку.
+Чтобы начать заново, спросите того, кто прислал сборку.
 
 Копирование данных программы в другую папку (кнопка «Сменить папку…» в
 разделе «Папка данных программы») на Windows намеренно отключено:
@@ -107,11 +101,7 @@ Windows. Not a release: unsigned, nothing is installed.
 - Data: %LOCALAPPDATA%\io.github.imcitius.photo-cleanup\data\ (database
   photo-cleanup.db, its writer-lock file, thumbs\). The data-folder choice
   is in %LOCALAPPDATA%\io.github.imcitius.photo-cleanup\desktop.json.
-  To start from scratch: quit the app, check that those folders hold only
-  photo-cleanup.db, photo-cleanup.db-wal, photo-cleanup.db-shm,
-  photo-cleanup.db.writer-lock, thumbs\ and desktop.json, then delete
-  only those. If anything else is there or you are unsure, delete nothing
-  and ask whoever sent you the build.
+  To start over, ask whoever sent you the build.
 - Copying the app data to another folder ("Change folder...") is refused
   on Windows by design, before anything is written. That is expected.
 - The window's close button only hides it. Quit from the tray icon:
