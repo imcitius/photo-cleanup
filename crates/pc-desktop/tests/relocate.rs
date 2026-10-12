@@ -754,7 +754,8 @@ fn a_snapshot_failure_sets_its_staging_and_reservations_aside_and_names_them() {
     }
     assert!(
         left.iter()
-            .any(|l| l.contains(&folder.display().to_string()) && l.contains("safe to delete")),
+            .any(|l| l.contains(&folder.display().to_string())
+                && l.contains("look at all of it before deleting")),
         "{left:?}"
     );
     assert_eq!(fs::read(target.join("foreign")).unwrap(), b"keep");

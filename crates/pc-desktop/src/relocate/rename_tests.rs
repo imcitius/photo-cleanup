@@ -124,7 +124,10 @@ fn an_unsupported_rename_at_publication_is_set_aside_and_a_retry_completes() {
         for suffix in SIDECARS {
             assert!(sidecar(&newest.join(DB_FILE), suffix).is_file(), "{suffix}");
         }
-        assert!(text.contains("safe to delete by hand"), "{text}");
+        assert!(
+            text.contains("this run's own entries listed above"),
+            "{text}"
+        );
         assert_eq!(env.bootstrap(), bootstrap);
         assert_eq!(env.chosen(), env.layout.dir);
     }
