@@ -1772,8 +1772,8 @@ Linux — только CLI и Docker, как сейчас.
 | `cargo test --workspace --locked` | есть | есть | **добавить** |
 | web: `npm run build`, сверка `dist`, `check:unused`, `npm test` | есть | — | — |
 | `cargo build --release -p pc-cli` + `--version` | есть | есть | в release |
-| сборка десктопа | — | **добавить**: exe → `photo-cleanup-desktop-windows-x64.zip` | **добавить**: `.app` → `photo-cleanup-desktop-macos-arm64.zip` |
-| smoke десктопа (временный data-dir, старт → HTTP → остановка) | — | **добавить** | **добавить** |
+| сборка десктопа | — | есть, отдельно (workflow `Desktop package`, не в `Checks`): exe → `photo-cleanup-desktop-windows-x64.zip` | **добавить**: `.app` → `photo-cleanup-desktop-macos-arm64.zip` |
+| smoke десктопа (временный data-dir, старт → HTTP → остановка) | — | **добавить** (безголового режима нет; окно в CI не запускается) | **добавить** |
 | Docker/Linux-бинари (release) | без изменений, без webkit2gtk | — | — |
 
 Существующие артефакты релиза (CLI zip для Windows, CLI arm64 для macOS,
@@ -1782,6 +1782,28 @@ Linux-бинари, образ GHCR) сохраняются. Всё, что CI �
 запуск скачанного `.app` под Gatekeeper, отсутствие WebView2), проверяется
 вручную на обеих ОС, и **непроверенное явно отмечается в отчёте как
 непроверенное**, а не как пройденное.
+
+Windows-пакет для ручной проверки (el-5342s) собирает
+`.github/workflows/desktop-package.yml`: запуск вручную
+(`workflow_dispatch`) или pull request, меняющим сам этот файл; на каждый
+push он не идёт, тесты Windows остаются в `Checks`. Тулчейн тот же, что в
+`ci.yml`; `cargo build --release --locked -p pc-desktop -p pc-cli`. До
+сборки `cargo tree` по Windows-цели проверяет, что у `tauri` включён
+`custom-protocol` (страницы окна из exe) и что `test-seams` у `pc-apply`
+в сборку не попадает. В архиве `photo-cleanup-desktop.exe`,
+`photo-cleanup.exe`, `LICENSE` и `README-WINDOWS.txt` (исходник —
+`crates/pc-desktop/packaging/README-WINDOWS.txt`; в архив кладётся с CRLF и
+UTF-8 BOM). Проверяется распакованный архив: состав, PE32+ x86-64,
+подсистема (окно — GUI, CLI — консоль), список DLL (`dumpbin
+/dependents`, только в лог), `photo-cleanup.exe --version`. Кроме
+системных DLL оба exe требуют `VCRUNTIME140.dll` (окно ещё и
+`VCRUNTIME140_1.dll`) — CRT связывается динамически, как и у релизного
+CLI; README пакета говорит, что ставить, если их нет. Загрузчик WebView2
+отдельной DLL не требуется. Окно
+**в CI не запускается** — безголового режима нет; это ручная проверка.
+SHA256 архива — в логе, в summary прогона и файлом `.sha256` рядом с
+архивом в артефакте `photo-cleanup-desktop-windows-x64` (хранится 30 дней).
+Ни тега, ни релиза, ни подписи.
 
 Подпись: MVP не подписан. На macOS arm64 бинарь получает ad-hoc подпись
 линковщика, но скачанный `.app` Gatekeeper не откроет без явного

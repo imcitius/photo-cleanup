@@ -23,6 +23,10 @@ photo-cleanup — настольное приложение для Windows (те
   скорее всего, его нет: установите «Evergreen Runtime» со страницы
   Microsoft WebView2 и запустите снова. Загрузчика WebView2 в архиве нет.
   (Отдельного сообщения на этот случай пока нет — это известный пробел.)
+- Microsoft Visual C++ Redistributable (x64), 2015–2022: обе программы
+  используют его библиотеки VCRUNTIME140.dll и VCRUNTIME140_1.dll. Почти
+  всегда он уже установлен. Если Windows пишет, что такой DLL не найдено,
+  установите «Microsoft Visual C++ Redistributable» x64 с сайта Microsoft.
 
 Запуск
 ------
@@ -86,6 +90,8 @@ Windows. Not a release: unsigned, nothing is installed.
 - Needs 64-bit Windows 10/11 and the Microsoft Edge WebView2 Runtime
   (present on Windows 11 and updated Windows 10). If neither a window nor a
   message appears, install the WebView2 "Evergreen Runtime" from Microsoft.
+- Also needs the Microsoft Visual C++ Redistributable x64 (2015-2022,
+  VCRUNTIME140.dll / VCRUNTIME140_1.dll); usually already installed.
 - Unzip anywhere, double-click photo-cleanup-desktop.exe. SmartScreen will
   warn because the build is unsigned: "More info" -> "Run anyway".
 - Data: %LOCALAPPDATA%\io.github.imcitius.photo-cleanup\data\ (database
