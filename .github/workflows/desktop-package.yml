@@ -1,0 +1,131 @@
+name: Desktop package
+# A Windows build of the desktop window for a person to try by hand
+# (DESKTOP.md, «Платформы и CI»). Not a release: no tag, no GitHub release,
+# no signing — an artifact kept for 30 days.
+#
+# Started by hand, or by a pull request that changes this file, so a change
+# to the packaging is proven before it merges. It does not run on every pull
+# request: the `Checks` workflow already builds and tests Windows, and a
+# release build of the window on each push would only cost runner time.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/desktop-package.yml
+
+concurrency:
+  group: desktop-package-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PACKAGE: photo-cleanup-desktop-windows-x64
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+
+      # What goes into the package is decided by features, and a wrong one
+      # is invisible in the exe. `custom-protocol` makes Tauri serve the
+      # window's own pages from the binary rather than from a development
+      # server; `test-seams` of pc-apply is a test hook at the move boundary
+      # and must never reach a build someone runs on their photos (pc-apply
+      # also refuses to compile it without debug assertions — this states it
+      # before the build instead of after). Both packages are resolved
+      # together, as the build below builds them.
+      - name: Features of the packaged build
+        shell: bash
+        run: |
+          set -euo pipefail
+          tree() {
+            cargo tree --locked -e normal,build,features \
+              -p pc-desktop -p pc-cli --target x86_64-pc-windows-msvc "$@"
+          }
+          tree -i tauri | tee tauri-features.txt
+          grep -q 'tauri feature "custom-protocol"' tauri-features.txt \
+            || { echo "::error::tauri is built without custom-protocol"; exit 1; }
+          tree -i pc-apply | tee pc-apply-features.txt
+          if grep -q 'test-seams' pc-apply-features.txt; then
+            echo "::error::pc-apply test-seams reaches the packaged build"; exit 1
+          fi
+
+      - run: cargo build --release --locked -p pc-desktop -p pc-cli
+
+      - name: Assemble the package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory $env:PACKAGE | Out-Null
+          Copy-Item target\release\photo-cleanup-desktop.exe $env:PACKAGE\
+          Copy-Item target\release\photo-cleanup.exe $env:PACKAGE\
+          Copy-Item LICENSE $env:PACKAGE\
+          # Russian text for Notepad: CRLF and a UTF-8 signature, so an older
+          # Notepad does not read the Cyrillic as ANSI.
+          $text = Get-Content -Raw -Encoding utf8 crates\pc-desktop\packaging\README-WINDOWS.txt
+          $text = $text -replace "`r?`n", "`r`n"
+          [IO.File]::WriteAllText("$PWD\$env:PACKAGE\README-WINDOWS.txt", $text, [Text.UTF8Encoding]::new($true))
+          Compress-Archive -Path "$env:PACKAGE\*" -DestinationPath "$env:PACKAGE.zip"
+
+      # Checks run on what was zipped, unpacked again, not on target\.
+      - name: Check the package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Expand-Archive "$env:PACKAGE.zip" -DestinationPath unpacked
+          Get-ChildItem unpacked | Format-Table Name, Length
+          $expected = @('LICENSE', 'README-WINDOWS.txt', 'photo-cleanup-desktop.exe', 'photo-cleanup.exe')
+          $names = @(Get-ChildItem unpacked -Name | Sort-Object)
+          if (Compare-Object $expected $names) { throw "package holds: $($names -join ', ')" }
+
+          # PE32+ for x86-64, and the subsystem each exe is meant to have:
+          # the window must not open a console behind it, the command line
+          # must have one.
+          function Assert-Pe($path, $subsystem) {
+            $b = [IO.File]::ReadAllBytes($path)
+            $pe = [BitConverter]::ToInt32($b, 0x3C)
+            if ([Text.Encoding]::ASCII.GetString($b, $pe, 4) -ne "PE`0`0") { throw "$path is not PE" }
+            $machine = [BitConverter]::ToUInt16($b, $pe + 4)
+            $magic = [BitConverter]::ToUInt16($b, $pe + 24)
+            $sub = [BitConverter]::ToUInt16($b, $pe + 24 + 68)
+            "{0}: machine 0x{1:X4}, magic 0x{2:X3}, subsystem {3}" -f $path, $machine, $magic, $sub
+            if ($machine -ne 0x8664 -or $magic -ne 0x20B) { throw "$path is not PE32+ x86-64" }
+            if ($sub -ne $subsystem) { throw "$path has subsystem $sub, expected $subsystem" }
+          }
+          Assert-Pe unpacked\photo-cleanup-desktop.exe 2
+          Assert-Pe unpacked\photo-cleanup.exe 3
+
+          # The DLLs each exe needs: anything beyond Windows itself is what
+          # a tester's machine may lack. Informational.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          foreach ($exe in 'photo-cleanup-desktop.exe', 'photo-cleanup.exe') {
+            & $dumpbin.FullName /nologo /dependents "unpacked\$exe"
+          }
+
+          & unpacked\photo-cleanup.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "photo-cleanup.exe --version exited $LASTEXITCODE" }
+          # The window has no headless mode: starting it here would prove
+          # nothing about the window and leave a process the runner cannot
+          # see. It is NOT run in CI — the manual test covers it.
+          Write-Output "photo-cleanup-desktop.exe: not started in CI (no headless mode)"
+
+          $hash = (Get-FileHash "$env:PACKAGE.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $env:PACKAGE.zip" | Tee-Object -FilePath "$env:PACKAGE.zip.sha256"
+          "SHA256 ``$hash`` — ``$env:PACKAGE.zip``" >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: |
+            ${{ env.PACKAGE }}.zip
+            ${{ env.PACKAGE }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
