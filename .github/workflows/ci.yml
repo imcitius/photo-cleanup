@@ -22,7 +22,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      # The Windows branches of `cfg` are compiled only here; without clippy
+      # on this runner nobody lints them (el-543ou, el-61ar8 D13).
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo build --release -p pc-cli --locked
       - run: ./target/release/photo-cleanup.exe --version

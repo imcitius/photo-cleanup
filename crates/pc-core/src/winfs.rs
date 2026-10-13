@@ -334,6 +334,25 @@ pub fn file_system(file: &fs::File) -> io::Result<String> {
     Ok(String::from_utf16_lossy(&name[..len]))
 }
 
+fn unsupported(fs_name: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "the file system {fs_name} is not supported: only on NTFS is a file's identity \
+             known to survive a move"
+        ),
+    )
+}
+
+/// A query that failed on a file system other than NTFS (FAT and exFAT do
+/// not answer some of them) is that file system's refusal, said as such.
+fn unsupported_or(file: &fs::File, e: io::Error) -> io::Error {
+    match file_system(file) {
+        Ok(name) if name != SUPPORTED_FILE_SYSTEM => unsupported(&name),
+        _ => e,
+    }
+}
+
 /// What identifies the object open as `file`: the volume serial number and
 /// the NTFS file ID, both from `FileIdInfo`, which a rename keeps (el-61ar8
 /// P1) and which 300 create/delete cycles never handed out twice (P5).
@@ -345,13 +364,7 @@ pub fn file_system(file: &fs::File) -> io::Result<String> {
 pub fn ident(file: &fs::File) -> io::Result<(u64, u64)> {
     let fs_name = file_system(file)?;
     if fs_name != SUPPORTED_FILE_SYSTEM {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "the file system {fs_name} is not supported: only on NTFS is a file's identity \
-                 known to survive a move"
-            ),
-        ));
+        return Err(unsupported(&fs_name));
     }
     let id: FILE_ID_INFO = info(file, FileIdInfo)?;
     let bytes = id.FileId.Identifier;
@@ -386,7 +399,8 @@ pub fn basic(file: &fs::File) -> io::Result<FILE_BASIC_INFO> {
 /// (OneDrive and other cloud placeholders, deduplicated or WOF-compressed
 /// files) or a file whose data is not here (offline, recalled on access).
 pub fn kind(file: &fs::File) -> io::Result<(Kind, u32)> {
-    let tag: FILE_ATTRIBUTE_TAG_INFO = info(file, FileAttributeTagInfo)?;
+    let tag: FILE_ATTRIBUTE_TAG_INFO =
+        info(file, FileAttributeTagInfo).map_err(|e| unsupported_or(file, e))?;
     let a = tag.FileAttributes;
     let kind = if a & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         if matches!(tag.ReparseTag, TAG_SYMLINK | TAG_MOUNT_POINT) {

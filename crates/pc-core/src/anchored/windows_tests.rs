@@ -451,12 +451,21 @@ fn a_volume_that_is_not_ntfs_gives_no_identity() {
     let root = std::env::var_os("PC_TEST_FAT_DIR").expect("PC_TEST_FAT_DIR");
     let tmp = tempfile::tempdir_in(root).unwrap();
     fs::write(tmp.path().join("a.jpg"), b"frame").unwrap();
-    let dir = Dir::open(tmp.path()).unwrap();
-    let e = dir.ident().unwrap_err();
-    assert_eq!(e.kind(), ErrorKind::Unsupported, "{e}");
-    assert!(e.to_string().contains("not supported"), "{e}");
-    assert!(dir.stat_at("a.jpg").is_err());
-    assert_eq!(Proof::at(&dir, "a.jpg"), None);
+    let refused = |e: std::io::Error| {
+        assert_eq!(e.kind(), ErrorKind::Unsupported, "{e}");
+        assert!(e.to_string().contains("is not supported"), "{e}");
+    };
+    // Holding the folder already asks what it is; FAT and exFAT may not
+    // answer, and that is the same refusal.
+    match Dir::open(tmp.path()) {
+        Err(e) => refused(e),
+        Ok(dir) => {
+            refused(dir.ident().unwrap_err());
+            refused(dir.entry_at("a.jpg").unwrap_err());
+            assert_eq!(Proof::at(&dir, "a.jpg"), None);
+        }
+    }
     let f = fs::File::open(tmp.path().join("a.jpg")).unwrap();
+    refused(ident_of_file(&f).unwrap_err());
     assert_eq!(Proof::of_file(&f), None);
 }
