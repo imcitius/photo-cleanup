@@ -3319,29 +3319,14 @@ mod windows_acl {
         }
     }
 
-    /// The entry `name` in the directory open as `dir`, found by listing the
-    /// handle and opened by file ID as itself (no reparse point followed),
-    /// for its identity only: without `DELETE`, so it never conflicts with
-    /// another handle's sharing.
-    pub(super) fn child(dir: &fs::File, name: &std::ffi::OsStr) -> io::Result<fs::File> {
-        let handle = dir.as_raw_handle() as HANDLE;
-        let wanted: Vec<u16> = name.encode_wide().collect();
-        let id = children(handle)?
-            .into_iter()
-            .find(|(entry, _, _)| *entry == wanted)
-            .map(|(_, id, _)| id)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("{} is not in the folder", name.to_string_lossy()),
-                )
-            })?;
-        open_by_id(handle, id, FILE_READ_ATTRIBUTES | SYNCHRONIZE)
-    }
+    // The handle primitives live in pc-core, shared with the photo moves
+    // (el-543ou); behaviour here is unchanged.
+    pub(super) use pc_core::winfs::{child, final_path, rename_into};
+    use pc_core::winfs::{children, open_by_id};
 
     /// The names in the directory open as `dir`, listed through the handle.
     pub(super) fn names(dir: &fs::File) -> io::Result<Vec<String>> {
-        Ok(children(dir.as_raw_handle() as HANDLE)?
+        Ok(children(dir)?
             .into_iter()
             .map(|(name, _, _)| String::from_utf16_lossy(&name))
             .collect())
@@ -3351,7 +3336,7 @@ mod windows_acl {
     /// handle: name, file ID, and whether it is a plain folder (a reparse
     /// point — junction, symlink — is not).
     pub(super) fn entries(dir: &fs::File) -> io::Result<Vec<(String, i64, bool)>> {
-        Ok(children(dir.as_raw_handle() as HANDLE)?
+        Ok(children(dir)?
             .into_iter()
             .map(|(name, id, attributes)| {
                 (
@@ -3368,181 +3353,10 @@ mod windows_acl {
     /// as itself (no reparse point followed) for listing only.
     pub(super) fn open_folder(dir: &fs::File, id: i64) -> io::Result<fs::File> {
         open_by_id(
-            dir.as_raw_handle() as HANDLE,
+            dir,
             id,
             FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
         )
-    }
-
-    /// Rename the object open as `entry` (with `DELETE` access) to `name`
-    /// in the directory open as `to`, through the handles only
-    /// (`NtSetInformationFile(FileRenameInformation)` with
-    /// `RootDirectory`): no path is resolved, and an existing entry at
-    /// `name` fails the call and is kept. Not `SetFileInformationByHandle`:
-    /// it turns a relative name into an absolute path under the current
-    /// directory first, which with a `RootDirectory` is os error 87 (seen
-    /// natively on the CI runner, el-2yxx0).
-    pub(super) fn rename_into(
-        entry: &fs::File,
-        to: &fs::File,
-        name: &std::ffi::OsStr,
-    ) -> io::Result<()> {
-        use windows_sys::Wdk::Storage::FileSystem::{
-            FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
-            FILE_RENAME_INFORMATION_0,
-        };
-        use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
-        use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
-        let wide: Vec<u16> = name.encode_wide().collect();
-        let header = mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
-        let bytes = (header + wide.len() * 2).max(mem::size_of::<FILE_RENAME_INFORMATION>());
-        let mut buf = vec![0u64; bytes.div_ceil(8)];
-        let info = buf.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
-        // SAFETY: `buf` is 8-byte aligned, zeroed and holds the header plus
-        // the name; the fields are written in place.
-        unsafe {
-            (*info).Anonymous = FILE_RENAME_INFORMATION_0 { ReplaceIfExists: 0 };
-            (*info).RootDirectory = to.as_raw_handle() as HANDLE;
-            (*info).FileNameLength = (wide.len() * 2) as u32;
-            ptr::copy_nonoverlapping(
-                wide.as_ptr(),
-                (&raw mut (*info).FileName).cast::<u16>(),
-                wide.len(),
-            );
-        }
-        // SAFETY: plain data, written by the call.
-        let mut status_block: IO_STATUS_BLOCK = unsafe { mem::zeroed() };
-        // SAFETY: `entry` is open with DELETE, `to` is an open directory;
-        // `buf` and `status_block` live for the call.
-        let status = unsafe {
-            NtSetInformationFile(
-                entry.as_raw_handle() as HANDLE,
-                &mut status_block,
-                buf.as_ptr().cast(),
-                bytes as u32,
-                FileRenameInformation,
-            )
-        };
-        if status < 0 {
-            // SAFETY: no preconditions.
-            let code = unsafe { RtlNtStatusToDosError(status) };
-            return Err(io::Error::from_raw_os_error(code as i32));
-        }
-        Ok(())
-    }
-
-    /// Where the object open as `file` is now.
-    pub(super) fn final_path(file: &fs::File) -> Option<std::path::PathBuf> {
-        use std::os::windows::ffi::OsStringExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, VOLUME_NAME_DOS,
-        };
-        let handle = file.as_raw_handle() as HANDLE;
-        let mut buf = vec![0u16; 1024];
-        loop {
-            // SAFETY: `buf` is writable for its whole length.
-            let n = unsafe {
-                GetFinalPathNameByHandleW(
-                    handle,
-                    buf.as_mut_ptr(),
-                    buf.len() as u32,
-                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
-                )
-            } as usize;
-            if n == 0 {
-                return None;
-            }
-            if n < buf.len() {
-                return Some(std::ffi::OsString::from_wide(&buf[..n]).into());
-            }
-            buf.resize(n + 1, 0);
-        }
-    }
-
-    /// Open the entry with file ID `id` on the volume of `volume`, as
-    /// itself (no reparse point is followed).
-    fn open_by_id(volume: HANDLE, id: i64, access: u32) -> io::Result<fs::File> {
-        use std::os::windows::io::FromRawHandle;
-        let descriptor = FILE_ID_DESCRIPTOR {
-            dwSize: mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
-            Type: FileIdType,
-            Anonymous: FILE_ID_DESCRIPTOR_0 { FileId: id },
-        };
-        // SAFETY: `volume` is an open handle, `descriptor` lives for the
-        // call; a returned handle is new and owned by the `File` below.
-        let child = unsafe {
-            OpenFileById(
-                volume,
-                &descriptor,
-                access,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                ptr::null(),
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            )
-        };
-        if child == INVALID_HANDLE_VALUE || child.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: a fresh handle nobody else owns.
-        Ok(unsafe { fs::File::from_raw_handle(child.cast()) })
-    }
-
-    /// Names, file IDs and attributes of the entries in the directory
-    /// behind `handle`, without `.`/`..`. Lists the handle, not a path.
-    fn children(handle: HANDLE) -> io::Result<Vec<(Vec<u16>, i64, u32)>> {
-        let mut buf = [0u64; 512];
-        let mut class = FileIdBothDirectoryRestartInfo;
-        let mut ids = Vec::new();
-        loop {
-            // SAFETY: `buf` is writable for its whole size.
-            let ok = unsafe {
-                GetFileInformationByHandleEx(
-                    handle,
-                    class,
-                    buf.as_mut_ptr().cast(),
-                    mem::size_of_val(&buf) as u32,
-                )
-            };
-            if ok == 0 {
-                let e = io::Error::last_os_error();
-                return if e.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
-                    Ok(ids)
-                } else {
-                    Err(e)
-                };
-            }
-            class = FileIdBothDirectoryInfo;
-            let mut offset = 0usize;
-            loop {
-                // SAFETY: the call filled `buf` with a chain of entries;
-                // `NextEntryOffset` stays within it.
-                let (name, id, attributes, next) = unsafe {
-                    let entry = buf
-                        .as_ptr()
-                        .cast::<u8>()
-                        .add(offset)
-                        .cast::<FILE_ID_BOTH_DIR_INFO>();
-                    let len = (*entry).FileNameLength as usize / 2;
-                    let name = std::slice::from_raw_parts(
-                        (&raw const (*entry).FileName).cast::<u16>(),
-                        len,
-                    );
-                    (
-                        name,
-                        (*entry).FileId,
-                        (*entry).FileAttributes,
-                        (*entry).NextEntryOffset,
-                    )
-                };
-                if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {
-                    ids.push((name.to_vec(), id, attributes));
-                }
-                if next == 0 {
-                    break;
-                }
-                offset += next as usize;
-            }
-        }
     }
 
     /// Whether the directory behind `handle` has no entries besides

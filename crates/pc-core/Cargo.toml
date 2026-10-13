@@ -16,8 +16,14 @@ blake3.workspace = true
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# `Wdk_*`: `NtCreateFile` relative to a held folder and
+# `NtSetInformationFile(FileRenameInformation)`, the rename of an object
+# through its handle (`winfs`, el-543ou). `Win32_Security`: `OpenFileById`.
 windows-sys = { workspace = true, features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
 ] }

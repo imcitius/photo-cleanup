@@ -1,6 +1,6 @@
 //! Shared types and helpers.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod anchored;
 pub mod bytes;
 pub mod derived;
@@ -13,6 +13,8 @@ pub mod thumbstore;
 pub mod time;
 pub mod volume;
 pub mod whereabouts;
+#[cfg(windows)]
+pub mod winfs;
 
 pub use bytes::fmt_bytes;
 pub use disk::{dev_of_nearest_existing, Disk, DiskMap};
