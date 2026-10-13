@@ -2101,7 +2101,9 @@ enum Listed {
     Folder(ListedKey),
     /// Anything else, links included: named, never entered.
     Other,
-    /// Its type could not be read.
+    /// Its type could not be read. Unix only: Windows reads the type from
+    /// the listing itself.
+    #[cfg_attr(windows, allow(dead_code))]
     Unknown(io::Error),
 }
 
@@ -3066,7 +3068,7 @@ mod windows_acl {
     use std::path::Path;
     use std::{fs, io, iter, mem, ptr};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, LocalFree, ERROR_NO_MORE_FILES, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, LocalFree, ERROR_NO_MORE_FILES, ERROR_SUCCESS, HANDLE,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -3080,12 +3082,8 @@ mod windows_acl {
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateDirectoryW, FileFullDirectoryInfo, FileFullDirectoryRestartInfo,
-        FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdType,
-        GetFileInformationByHandleEx, OpenFileById, FILE_ATTRIBUTE_DIRECTORY,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_FULL_DIR_INFO, FILE_ID_BOTH_DIR_INFO, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0,
-        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, SYNCHRONIZE,
+        GetFileInformationByHandleEx, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FULL_DIR_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, SYNCHRONIZE,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
