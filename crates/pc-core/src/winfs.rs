@@ -81,7 +81,7 @@ fn info<T>(file: &fs::File, class: FILE_INFO_BY_HANDLE_CLASS) -> io::Result<T> {
 /// first: NT itself accepts `sub\x` here and walks through a junction in the
 /// middle of it (el-61ar8 P2g, P6c). No `OBJ_CASE_INSENSITIVE`: in a folder
 /// marked case-sensitive the name means exactly this spelling.
-pub fn open_at(
+pub(crate) fn open_at(
     dir: &fs::File,
     name: &OsStr,
     access: u32,
