@@ -123,7 +123,25 @@ fn lone_file(file: &File) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// The same check through the handle: `NumberOfLinks` is not in the
+/// standard library's `Metadata` on Windows (el-543ou, el-61ar8 D7).
+#[cfg(windows)]
+fn lone_file(file: &File) -> Result<()> {
+    if !file.metadata()?.is_file() {
+        anyhow::bail!(crate::tr!("это не обычный файл", "it is not a plain file"));
+    }
+    let names = crate::winfs::standard(file)?.NumberOfLinks;
+    if names != 1 {
+        anyhow::bail!(crate::tf!(
+            "у этого файла {0} имени: запись изменила бы и другие",
+            "this file has {0} names: writing to it would change the others too",
+            names
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn lone_file(file: &File) -> Result<()> {
     if !file.metadata()?.is_file() {
         anyhow::bail!(crate::tr!("это не обычный файл", "it is not a plain file"));
@@ -267,6 +285,27 @@ mod tests {
                 "left in place"
             );
         }
+    }
+
+    /// el-543ou: a second name of somebody else's file at the lock's name is
+    /// refused on Windows too, counted through the handle.
+    #[cfg(windows)]
+    #[test]
+    fn a_second_name_at_the_lock_name_is_refused_on_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("photo-cleanup.db");
+        let foreign = tmp.path().join("foreign-notes.txt");
+        std::fs::write(&foreign, b"foreign original 97301").unwrap();
+        let before = std::fs::metadata(&foreign).unwrap().modified().unwrap();
+        std::fs::hard_link(&foreign, lock_path(&db)).unwrap();
+        let refused = take_writer(&db, "перенос копий").unwrap_err();
+        assert!(!refused.is::<Busy>(), "{refused:#}");
+        assert!(format!("{refused:#}").contains("2 names"), "{refused:#}");
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign original 97301");
+        assert_eq!(
+            std::fs::metadata(&foreign).unwrap().modified().unwrap(),
+            before
+        );
     }
 
     #[test]
