@@ -38,10 +38,19 @@ fn create_new_never_touches_an_existing_entry() {
     fs::write(tmp.path().join("note"), b"stranger 7719").unwrap();
     fs::create_dir(tmp.path().join("folder")).unwrap();
     let dir = held(&tmp);
-    for name in ["note", "folder"] {
-        let e = dir.create_new(name, 0o600).unwrap_err();
-        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "{name}: {e}");
-    }
+    let e = dir.create_new("note", 0o600).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "{e}");
+    // A folder at the name refuses too; Windows says "is a directory" as
+    // access denied (STATUS_FILE_IS_A_DIRECTORY).
+    let e = dir.create_new("folder", 0o600).unwrap_err();
+    assert!(
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+        ),
+        "{e}"
+    );
+    assert!(dir.entry_at("folder").unwrap().is_dir());
     assert_eq!(fs::read(tmp.path().join("note")).unwrap(), b"stranger 7719");
     use std::io::Write;
     let mut f = dir.create_new("fresh", 0o600).unwrap();
