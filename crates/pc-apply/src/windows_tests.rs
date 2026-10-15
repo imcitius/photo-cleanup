@@ -1,0 +1,771 @@
+//! The move boundary on Windows, natively (el-6s3go, design el-61ar8 §3.2).
+//!
+//! On Unix another program can swap a name or a folder between the check
+//! and the rename, and `binding_tests` prove the move notices. On Windows
+//! the photograph is held with `DELETE` and shared for reading only, and its
+//! folder and the folder it goes to are held without `FILE_SHARE_DELETE`:
+//! the swap itself is refused. These tests stage another program at the
+//! same moments and prove that — and every Windows-only refusal: a file in
+//! use, a junction, a case-only or 8.3 collision, two spellings of one
+//! sidecar, a name Windows cannot spell back, another volume, a bundle
+//! with a file open inside. Synthetic files in temporary folders only.
+
+use crate::race;
+use pc_db::{Db, JournalStatus};
+use pc_family::plan::Candidate;
+use std::cell::Cell;
+use std::fs;
+use std::os::windows::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::rc::Rc;
+
+const FILE_SHARE_READ: u32 = 0x1;
+const FILE_SHARE_WRITE: u32 = 0x2;
+const FILE_SHARE_DELETE: u32 = 0x4;
+const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+const ERROR_SHARING_VIOLATION: i32 = 32;
+
+struct Archive {
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+    dir: PathBuf,
+    quarantine: PathBuf,
+    db: Db,
+    run: i64,
+}
+
+fn archive() -> Archive {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let dir = root.join("archive");
+    fs::create_dir_all(&dir).unwrap();
+    let db = Db::open(&root.join("test.db")).unwrap();
+    let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
+    Archive {
+        quarantine: dir.join(pc_core::QUARANTINE_DIR),
+        root,
+        dir,
+        _tmp: tmp,
+        db,
+        run,
+    }
+}
+
+/// The user's own pick of `path`, indexed.
+fn candidate(db: &Db, run: i64, path: &Path) -> Candidate {
+    let size = fs::symlink_metadata(path).map_or(0, |m| m.len()) as i64;
+    let file_id = db
+        .upsert_file(
+            &pc_db::NewFile {
+                path: path.display().to_string(),
+                name: path.file_name().unwrap().to_string_lossy().into_owned(),
+                size,
+                ..Default::default()
+            },
+            run,
+        )
+        .unwrap();
+    Candidate {
+        file_id,
+        family_id: 0,
+        path: path.display().to_string(),
+        size,
+        role: pc_family::Role::Copy,
+        keeper_id: 0,
+        keeper_path: String::new(),
+        reason: "выбор человека".into(),
+        manual: true,
+        group_keeper: String::new(),
+    }
+}
+
+fn last_row(db: &Db) -> (String, String) {
+    db.conn
+        .query_row(
+            "SELECT status, coalesce(note, '') FROM journal ORDER BY id DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+fn rows(db: &Db) -> i64 {
+    db.conn
+        .query_row("SELECT count(*) FROM journal", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// A junction at `at` leading to `target` (no privilege needed).
+fn junction(at: &Path, target: &Path) {
+    let out = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(at)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "mklink /J: {out:?}");
+}
+
+/// `fsutil`, which fails the test loudly rather than skip it: the CI runner
+/// and the test VM both run elevated.
+fn fsutil(args: &[&std::ffi::OsStr]) {
+    let out = Command::new("fsutil").args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "fsutil {args:?}: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Another program holding `path` open for reading without sharing its
+/// deletion — what Lightroom, an antivirus or Explorer's preview does.
+fn held_by_another_program(path: &Path) -> fs::File {
+    fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(path)
+        .unwrap()
+}
+
+// ------------------------------------------------------------- P3a -------
+
+/// A photograph another program has open is refused as in use, in the
+/// words the command line and the web both show; nothing moves and nothing
+/// is journaled. Once the program lets go, asking again moves it.
+#[test]
+fn a_file_held_by_another_program_is_refused_and_named() {
+    let a = archive();
+    let photo = a.dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    let c = candidate(&a.db, a.run, &photo);
+    let other = held_by_another_program(&photo);
+
+    let report = crate::apply(&a.db, a.run, std::slice::from_ref(&c), None).unwrap();
+
+    assert_eq!(report.done.frames, 0);
+    let (_, why) = &report.refused[0];
+    assert!(why.contains(&crate::in_use_text(&photo)), "{why}");
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+    assert!(!a.quarantine.join("frame.arw").exists());
+    assert_eq!(rows(&a.db), 0);
+
+    drop(other);
+    let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
+    assert_eq!(report.done.frames, 1, "{:?}", report.refused);
+    assert_eq!(
+        fs::read(a.quarantine.join("frame.arw")).unwrap(),
+        b"raw frame 6024"
+    );
+}
+
+/// A sidecar another program has open keeps its frame home: the unit is
+/// refused whole, and the row says which file and why.
+#[test]
+fn a_sidecar_held_by_another_program_keeps_its_frame_home() {
+    let a = archive();
+    let photo = a.dir.join("frame.arw");
+    let side = a.dir.join("frame.xmp");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    fs::write(&side, b"edits 812").unwrap();
+    let c = candidate(&a.db, a.run, &photo);
+    let other = held_by_another_program(&side);
+
+    let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
+    drop(other);
+
+    assert_eq!(report.done.frames, 0);
+    let (_, why) = &report.refused[0];
+    assert!(why.contains(&crate::in_use_text(&side)), "{why}");
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+    assert_eq!(fs::read(&side).unwrap(), b"edits 812");
+    let (status, note) = last_row(&a.db);
+    assert_eq!(status, JournalStatus::Failed.as_str());
+    assert!(note.contains(&side.display().to_string()), "{note}");
+}
+
+// ---------------------------------------------------------- P3c/d/g/h ----
+
+/// While the photograph is held, another program can neither move it aside
+/// nor write to it, nor move its folder or the quarantine folder: what moves
+/// is the object that was checked, unchanged.
+#[test]
+fn a_held_photo_and_its_folders_cannot_be_moved_or_rewritten_meanwhile() {
+    let a = archive();
+    let photo = a.dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    let c = candidate(&a.db, a.run, &photo);
+    let tried = Rc::new(Cell::new(false));
+    let seen = tried.clone();
+    let (dir, quarantine, root) = (a.dir.clone(), a.quarantine.clone(), a.root.clone());
+    let _g = race::before_move(move |src, _| {
+        let aside = src.with_file_name("aside.arw");
+        let e = fs::rename(src, &aside).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(ERROR_SHARING_VIOLATION), "{e}");
+        let e = fs::OpenOptions::new().write(true).open(src).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(ERROR_SHARING_VIOLATION), "{e}");
+        assert!(fs::rename(&dir, root.join("archive-moved")).is_err());
+        assert!(fs::rename(&quarantine, root.join("quarantine-moved")).is_err());
+        seen.set(true);
+        Ok(())
+    });
+
+    let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
+
+    assert!(tried.get());
+    assert_eq!(report.done.frames, 1, "{:?}", report.refused);
+    assert_eq!(
+        fs::read(a.quarantine.join("frame.arw")).unwrap(),
+        b"raw frame 6024"
+    );
+    assert!(!a.dir.join("aside.arw").exists());
+    assert!(!a.root.join("archive-moved").exists());
+}
+
+// ---------------------------------------------------------------- P3f ----
+
+/// What another program can still do to a held file is change its times.
+/// Before the last check that is a refusal with nothing moved; right after
+/// it (the one call no check covers) the arrival check catches it and the
+/// photograph goes back home.
+#[test]
+fn times_changed_while_held_are_caught_before_and_after_the_rename() {
+    for after_the_check in [false, true] {
+        let a = archive();
+        let photo = a.dir.join("frame.arw");
+        fs::write(&photo, b"raw frame 6024").unwrap();
+        let c = candidate(&a.db, a.run, &photo);
+        let touch = |p: &Path| {
+            let f = fs::OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .open(p)
+                .unwrap();
+            f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+                .unwrap();
+        };
+        let _before = (!after_the_check).then(|| {
+            race::before_move(move |src, _| {
+                touch(src);
+                Ok(())
+            })
+        });
+        let _after = after_the_check.then(|| {
+            race::at_rename(move |at, src, _| {
+                if at == race::Syscall::Before {
+                    touch(src);
+                }
+                Ok(())
+            })
+        });
+
+        let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
+
+        assert_eq!(report.done.frames, 0, "after_the_check={after_the_check}");
+        let (_, why) = &report.refused[0];
+        assert!(
+            why.contains("modified"),
+            "after_the_check={after_the_check}: {why}"
+        );
+        assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+        assert!(!a.quarantine.join("frame.arw").exists());
+        assert!(a.db.journal_quarantined(None).unwrap().is_empty());
+    }
+}
+
+// ----------------------------------------------------------------- P4 ----
+
+/// A read-only photograph moves and comes back read-only.
+#[test]
+fn a_readonly_photo_moves_and_comes_back_readonly() {
+    let a = archive();
+    let photo = a.dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    let readonly = |p: &Path, on: bool| {
+        let mut perm = fs::metadata(p).unwrap().permissions();
+        perm.set_readonly(on);
+        fs::set_permissions(p, perm).unwrap();
+    };
+    readonly(&photo, true);
+    let c = candidate(&a.db, a.run, &photo);
+
+    let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
+    assert_eq!(report.done.frames, 1, "{:?}", report.refused);
+    let held = a.quarantine.join("frame.arw");
+    assert!(fs::metadata(&held).unwrap().permissions().readonly());
+
+    let entry = a.db.journal_quarantined(None).unwrap().pop().unwrap();
+    crate::undo(&a.db, entry.id).unwrap();
+    assert!(fs::metadata(&photo).unwrap().permissions().readonly());
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+    readonly(&photo, false);
+}
+
+// ----------------------------------------------------------------- P6 ----
+
+/// A junction at the photograph's name is held as itself and refused as a
+/// link; what it leads to is never touched.
+#[test]
+fn a_junction_at_the_photo_name_is_refused_and_its_target_untouched() {
+    let a = archive();
+    let elsewhere = a.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("inside.jpg"), b"not ours 77").unwrap();
+    let photo = a.dir.join("frame.jpg");
+    junction(&photo, &elsewhere);
+    let c = candidate(&a.db, a.run, &photo);
+
+    let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
+
+    assert_eq!(report.done.frames, 0);
+    let (_, why) = &report.refused[0];
+    assert!(why.contains("link"), "{why}");
+    assert!(fs::symlink_metadata(&photo)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        fs::read(elsewhere.join("inside.jpg")).unwrap(),
+        b"not ours 77"
+    );
+    assert!(!a.quarantine.join("frame.jpg").exists());
+}
+
+/// A junction where the quarantine folder should be: nothing is moved
+/// through it, and the folder it leads to stays empty.
+#[test]
+fn a_junction_planted_as_the_quarantine_folder_is_refused() {
+    let a = archive();
+    let elsewhere = a.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    junction(&a.quarantine, &elsewhere);
+    let photo = a.dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    let c = candidate(&a.db, a.run, &photo);
+
+    let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
+
+    assert_eq!(report.done.frames, 0);
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    let (status, _) = last_row(&a.db);
+    assert_eq!(status, JournalStatus::Failed.as_str());
+}
+
+// ------------------------------------------------------------ P2b / P7 ---
+
+/// A name in quarantine that differs only in case is taken, not replaced.
+#[test]
+fn a_case_only_collision_in_quarantine_is_refused() {
+    let a = archive();
+    fs::create_dir_all(&a.quarantine).unwrap();
+    fs::write(a.quarantine.join("PHOTO.BMP"), b"someone else's 31").unwrap();
+    let photo = a.dir.join("photo.bmp");
+    fs::write(&photo, b"picture 4031").unwrap();
+    let c = candidate(&a.db, a.run, &photo);
+
+    let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
+
+    assert_eq!(report.done.frames, 0);
+    assert!(
+        report.refused[0].1.contains("already exists"),
+        "{:?}",
+        report.refused
+    );
+    assert_eq!(fs::read(&photo).unwrap(), b"picture 4031");
+    assert_eq!(
+        fs::read(a.quarantine.join("PHOTO.BMP")).unwrap(),
+        b"someone else's 31"
+    );
+    let names: Vec<_> = fs::read_dir(&a.quarantine)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["PHOTO.BMP"]);
+}
+
+/// A photograph whose name is the 8.3 alias of another file in quarantine:
+/// the alias is taken, and the other file is not replaced. Setting a short
+/// name needs an elevated token, which the CI runner and the VM have.
+#[test]
+fn a_short_name_alias_in_quarantine_is_refused() {
+    let a = archive();
+    fs::create_dir_all(&a.quarantine).unwrap();
+    let other = a.quarantine.join("longer-photograph-name.jpg");
+    fs::write(&other, b"someone else's 31").unwrap();
+    fsutil(&[
+        "file".as_ref(),
+        "setshortname".as_ref(),
+        other.as_os_str(),
+        "LONGER~1.JPG".as_ref(),
+    ]);
+    let photo = a.dir.join("LONGER~1.JPG");
+    fs::write(&photo, b"picture 4031").unwrap();
+    let c = candidate(&a.db, a.run, &photo);
+
+    let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
+
+    assert_eq!(report.done.frames, 0);
+    assert_eq!(fs::read(&photo).unwrap(), b"picture 4031");
+    assert_eq!(fs::read(&other).unwrap(), b"someone else's 31");
+}
+
+// ----------------------------------------------------------------- T5 ----
+
+/// In a case-sensitive folder `frame.xmp` and `frame.XMP` are two files.
+/// Which is the frame's is not the tool's to guess: the whole unit is
+/// refused before anything is journaled or moved.
+#[test]
+fn a_case_sensitive_folder_with_two_spellings_of_a_sidecar_refuses_the_unit() {
+    let a = archive();
+    let dir = a.dir.join("wsl");
+    fs::create_dir_all(&dir).unwrap();
+    fsutil(&[
+        "file".as_ref(),
+        "setCaseSensitiveInfo".as_ref(),
+        dir.as_os_str(),
+        "enable".as_ref(),
+    ]);
+    let photo = dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    fs::write(dir.join("frame.xmp"), b"edits one").unwrap();
+    fs::write(dir.join("frame.XMP"), b"edits two").unwrap();
+    let c = candidate(&a.db, a.run, &photo);
+
+    let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
+
+    assert_eq!(report.done.frames, 0);
+    let (_, why) = &report.refused[0];
+    assert!(why.contains("differ only in letter case"), "{why}");
+    assert!(
+        why.contains("frame.xmp") && why.contains("frame.XMP"),
+        "{why}"
+    );
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+    assert_eq!(fs::read(dir.join("frame.xmp")).unwrap(), b"edits one");
+    assert_eq!(fs::read(dir.join("frame.XMP")).unwrap(), b"edits two");
+    assert_eq!(rows(&a.db), 0);
+}
+
+/// In an ordinary folder a sidecar spelled `FRAME.XMP` travels and comes
+/// back under exactly that spelling.
+#[test]
+fn a_sidecar_keeps_its_own_spelling_there_and_back() {
+    let a = archive();
+    let photo = a.dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    fs::write(a.dir.join("frame.XMP"), b"edits").unwrap();
+    let c = candidate(&a.db, a.run, &photo);
+
+    let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
+    assert_eq!(report.done.companions, 1, "{:?}", report.refused);
+    let names = |d: &Path| -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names(&a.quarantine), ["frame.XMP", "frame.arw"]);
+
+    let entry = a.db.journal_quarantined(None).unwrap().pop().unwrap();
+    crate::undo(&a.db, entry.id).unwrap();
+    assert!(names(&a.dir).contains(&"frame.XMP".to_string()));
+}
+
+// ----------------------------------------------------------------- P8 ----
+
+/// A photograph deeper than MAX_PATH moves and comes back.
+#[test]
+fn a_photo_deeper_than_max_path_moves_and_returns() {
+    let a = archive();
+    let mut deep = a.dir.clone();
+    while deep.as_os_str().len() < 300 {
+        deep.push("a-folder-of-forty-characters-0123456789");
+    }
+    fs::create_dir_all(&deep).unwrap();
+    let photo = deep.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    assert!(photo.as_os_str().len() > 300);
+    let c = candidate(&a.db, a.run, &photo);
+
+    let report = crate::apply(&a.db, a.run, &[c], None).unwrap();
+    assert_eq!(report.done.frames, 1, "{:?}", report.refused);
+    assert!(!photo.exists());
+
+    let entry = a.db.journal_quarantined(None).unwrap().pop().unwrap();
+    crate::undo(&a.db, entry.id).unwrap();
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+}
+
+// ---------------------------------------------------------------- P11 ----
+
+/// A configured quarantine on another volume is refused before anything is
+/// written there or moved. The CI runner keeps its temporary folder on C:
+/// and the build on D:; elsewhere a folder on a second volume can be named
+/// in `PC_TEST_OTHER_VOLUME`. Without one this skips, except on CI.
+#[test]
+fn a_quarantine_on_another_volume_is_refused_before_anything_moves() {
+    let a = archive();
+    let other_root = std::env::var_os("PC_TEST_OTHER_VOLUME")
+        .map(PathBuf::from)
+        .or_else(|| Some(std::env::current_exe().ok()?.parent()?.to_path_buf()))
+        .unwrap();
+    let other = tempfile::tempdir_in(&other_root).unwrap();
+    let serial = |p: &Path| pc_core::anchored::Dir::open(p).unwrap().ident().unwrap().0;
+    if serial(other.path()) == serial(&a.dir) {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must have a second volume for this test"
+        );
+        eprintln!("skipped: {} is on the same volume", other_root.display());
+        return;
+    }
+    let photo = a.dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    let c = candidate(&a.db, a.run, &photo);
+
+    let e = crate::apply(&a.db, a.run, &[c], Some(other.path())).unwrap_err();
+
+    assert!(format!("{e:#}").contains("different filesystem"), "{e:#}");
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+    assert_eq!(fs::read_dir(other.path()).unwrap().count(), 0);
+    assert_eq!(rows(&a.db), 0);
+}
+
+// ----------------------------------------------------------------- T2 ----
+
+/// A configured quarantine whose path holds a name Windows cannot spell
+/// back (a trailing dot, a device name) is refused: nothing is created.
+#[test]
+fn a_quarantine_named_in_a_way_windows_cannot_spell_back_is_refused() {
+    for bad in ["q.", "CON", "q "] {
+        let a = archive();
+        let photo = a.dir.join("frame.arw");
+        fs::write(&photo, b"raw frame 6024").unwrap();
+        let c = candidate(&a.db, a.run, &photo);
+        let root = a.root.join(bad);
+
+        let r = crate::apply(&a.db, a.run, &[c], Some(&root));
+
+        let refused = match &r {
+            Err(_) => true,
+            Ok(report) => report.done.frames == 0 && !report.refused.is_empty(),
+        };
+        assert!(refused, "{bad:?}: {r:?}");
+        assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024", "{bad:?}");
+        let mut left: Vec<String> = fs::read_dir(&a.root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with("test.db"))
+            .collect();
+        left.sort();
+        assert_eq!(left, ["archive"], "{bad:?}: something was created");
+    }
+}
+
+// ----------------------------------------------------------------- T4b ---
+
+/// A bundle an earlier version put in quarantine, with a file inside it
+/// open in another program: Windows will not rename the folder, the undo
+/// says why in both possible words, and the entry stays open. Asked again
+/// once the file is closed, it comes home.
+#[test]
+fn a_bundle_with_an_open_file_inside_is_refused_and_says_why() {
+    let a = archive();
+    let dir = a.dir.join("Library Previews.lrdata");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("cache"), b"cached 512").unwrap();
+    a.db.upsert_bundle(
+        &pc_db::model::NewBundle {
+            path: dir.display().to_string(),
+            is_dir: true,
+            disk: "root".into(),
+            dev: 0,
+            mount: a.dir.display().to_string(),
+            kind: pc_core::DerivedKind::LrPreviews,
+            owner_ref: None,
+            file_count: 1,
+            size: 10,
+            newest_mtime: 0,
+        },
+        a.run,
+    )
+    .unwrap();
+    let b =
+        a.db.list_bundles(&Default::default())
+            .unwrap()
+            .pop()
+            .unwrap();
+    let id = crate::legacy::moved_by_an_earlier_version(&a.db, a.run, &b).unwrap();
+    let held = a.quarantine.join("Library Previews.lrdata");
+    let inside = fs::File::open(held.join("cache")).unwrap();
+
+    let e = crate::undo(&a.db, id).unwrap_err();
+    drop(inside);
+
+    let shown = format!("{e:#}");
+    assert!(
+        shown.contains("a file inside the folder is open in another program"),
+        "{shown}"
+    );
+    assert!(!dir.exists());
+    assert_eq!(fs::read(held.join("cache")).unwrap(), b"cached 512");
+    assert_eq!(
+        a.db.journal_entry(id).unwrap().unwrap().status,
+        JournalStatus::Done
+    );
+
+    crate::undo(&a.db, id).unwrap();
+    assert_eq!(fs::read(dir.join("cache")).unwrap(), b"cached 512");
+}
+
+// ----------------------------------------------------------------- R3 ----
+
+/// Windows deletes nothing: purge is refused for every entry, and what is
+/// in quarantine stays there and can still be undone.
+#[test]
+fn windows_never_purges() {
+    let a = archive();
+    let photo = a.dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    let c = candidate(&a.db, a.run, &photo);
+    crate::apply(&a.db, a.run, &[c], None).unwrap();
+    let held = a.quarantine.join("frame.arw");
+    let entry = a.db.journal_quarantined(None).unwrap().pop().unwrap();
+
+    // Past the holding period: a cutoff in the future takes every entry.
+    let totals = crate::purge(&a.db, -3600).unwrap();
+    assert_eq!((totals.files, totals.bytes), (0, 0));
+    assert!(
+        totals.skipped[0].contains("on Windows permanent deletion is not carried out"),
+        "{:?}",
+        totals.skipped
+    );
+    let e = crate::purge_entry(&a.db, entry.id).unwrap_err();
+    assert!(format!("{e:#}").contains("on Windows"), "{e:#}");
+    assert_eq!(fs::read(&held).unwrap(), b"raw frame 6024");
+
+    crate::undo(&a.db, entry.id).unwrap();
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+}
+
+// --------------------------------------------------------- el-61ar8 §4.C ---
+
+/// What is not carried out on Windows yet is refused with the reason, and
+/// touches nothing: a reorganisation and its undo, the reconciliation of an
+/// interrupted operation, an orphan's return.
+#[test]
+fn reorganising_reconciling_and_adopting_are_refused_on_windows_for_now() {
+    let a = archive();
+    let not_yet = |e: anyhow::Error, what: &str| {
+        let shown = format!("{e:#}");
+        assert!(
+            shown.contains("on Windows") && shown.contains(what),
+            "{what}: {shown}"
+        );
+    };
+    let planned = pc_organize::Move {
+        file_id: 1,
+        src: a.dir.join("frame.jpg").display().to_string(),
+        dst: a.dir.join("2019").join("frame.jpg").display().to_string(),
+        size: 1,
+        mtime: 0,
+        date: pc_organize::Dated {
+            ts: 1_562_000_000,
+            source: pc_organize::Source::Exif,
+            precision: pc_organize::Precision::Day,
+        },
+        event: "2019".into(),
+        renamed_from: None,
+    };
+    not_yet(
+        crate::check_organize(std::slice::from_ref(&planned)).unwrap_err(),
+        "reorganising",
+    );
+    crate::check_organize(&[]).unwrap();
+    assert!(!a.dir.join("2019").exists());
+    not_yet(
+        crate::organize(&a.db, a.run, &[]).unwrap_err(),
+        "reorganising",
+    );
+    not_yet(crate::undo_run(&a.db, a.run).unwrap_err(), "reorganisation");
+
+    // An interrupted move: the file is held, the row pending.
+    fs::create_dir_all(&a.quarantine).unwrap();
+    let home = a.dir.join("frame.arw");
+    let held = a.quarantine.join("frame.arw");
+    fs::write(&held, b"raw frame 6024").unwrap();
+    let m = pc_db::Moved {
+        src: home.display().to_string(),
+        dst: held.display().to_string(),
+        proof: crate::files::evidence(&held).unwrap(),
+    };
+    assert!(m.proof.is_some(), "NTFS gives evidence");
+    let id =
+        a.db.journal_begin(&pc_db::NewJournalEntry {
+            run_id: a.run,
+            op: "quarantine-file",
+            target_id: None,
+            src: &m.src,
+            dst: Some(&m.dst),
+            size: 14,
+            file_count: 1,
+            manifest: std::slice::from_ref(&m),
+        })
+        .unwrap();
+    not_yet(crate::reconcile_undo(&a.db, id).unwrap_err(), "reconciling");
+    assert_eq!(
+        a.db.journal_entry(id).unwrap().unwrap().status,
+        JournalStatus::Pending
+    );
+    assert!(fs::symlink_metadata(&home).is_err());
+
+    let orphan = a.quarantine.join("orphan.arw");
+    fs::write(&orphan, b"nobody's 9").unwrap();
+    let back = a.dir.join("orphan.arw");
+    not_yet(
+        crate::adopt_orphan(
+            &a.db,
+            a.run,
+            &orphan.display().to_string(),
+            &back.display().to_string(),
+        )
+        .unwrap_err(),
+        "journal never recorded",
+    );
+    assert_eq!(fs::read(&orphan).unwrap(), b"nobody's 9");
+    assert!(fs::symlink_metadata(&back).is_err());
+    assert_eq!(fs::read(&held).unwrap(), b"raw frame 6024");
+}
+
+// ----------------------------------------------------------- gathered ----
+
+/// A gathered quarantine on the same NTFS volume: the layout note is
+/// written through the held folder, the photograph lands under its disk
+/// label, and comes back.
+#[test]
+fn a_gathered_quarantine_is_written_and_walked_back() {
+    let a = archive();
+    let photo = a.dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    let c = candidate(&a.db, a.run, &photo);
+    let root = a.root.join("gathered");
+
+    let report = crate::apply(&a.db, a.run, &[c], Some(&root)).unwrap();
+    assert_eq!(report.done.frames, 1, "{:?}", report.refused);
+    let home = root.join(pc_core::QUARANTINE_DIR);
+    let disks = pc_core::quarantine_layout::read(&home);
+    assert_eq!(disks.len(), 1, "{disks:?}");
+
+    let entry = a.db.journal_quarantined(None).unwrap().pop().unwrap();
+    assert!(entry
+        .dst
+        .as_deref()
+        .unwrap()
+        .starts_with(&*home.to_string_lossy()));
+    crate::undo(&a.db, entry.id).unwrap();
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+}

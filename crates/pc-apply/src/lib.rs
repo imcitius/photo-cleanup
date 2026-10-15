@@ -40,8 +40,9 @@ pub use outcome::{
     Halted, NoExclusiveRename, Placed, Role, Route, Stopped, Tally, Whereabouts,
 };
 pub use purge::{
-    is_lightroom, purge_entry_controlled, purge_keeps, purge_kept, purge_stopped, purged_before,
-    KeptWhy, OrphanKept, OrphanWhy, PurgeKept, PurgeStage, PurgeStopped,
+    is_lightroom, purge_entry_controlled, purge_keeps, purge_kept, purge_refused_here,
+    purge_stopped, purged_before, KeptWhy, OrphanKept, OrphanWhy, PurgeKept, PurgeStage,
+    PurgeStopped,
 };
 pub use recovery::{
     reconcile, reconcile_undo, undo, undo_offered, undo_preview, Item, Reconciled, Standing,
@@ -438,16 +439,20 @@ pub fn check_candidates(
     Ok(())
 }
 
-/// Before a reorganisation: as [`check_candidates`]. Refused on Windows
-/// until reorganising is enabled there (el-61ar8 §4.C).
+/// Before a reorganisation: as [`check_candidates`]. Any move of one is
+/// refused on Windows until reorganising is enabled there (el-61ar8 §4.C);
+/// an empty list — every preview asks — passes.
 pub fn check_organize(moves: &[pc_organize::Move]) -> Result<()> {
-    not_yet_on_windows(("раскладка по папкам", "reorganising into folders"))?;
+    if !moves.is_empty() {
+        not_yet_on_windows(("раскладка по папкам", "reorganising into folders"))?;
+    }
     check_all(moves.iter().map(|m| Path::new(&m.dst)))
 }
 
 /// Tests only: one bound move of one object, outside any operation — the
 /// boundary every unit's member goes through ([`unit::move_unit`]).
-#[cfg(test)]
+// Its only callers, the binding tests, are Unix-only.
+#[cfg(all(test, unix))]
 pub(crate) fn rename_with_parents(
     src: &Path,
     dst: &Path,
@@ -704,19 +709,25 @@ pub mod race {
 }
 
 #[cfg(test)]
-// Most of these tests need a move, which Windows refuses (el-usdqi D4);
-// their helpers are unused there.
-#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
+// Its bundle statistics serve the purge tests, which are Unix-only.
+#[cfg_attr(not(unix), allow(dead_code))]
 mod legacy;
 
 #[cfg(test)]
-// Most of these tests need a move, which Windows refuses (el-usdqi D4);
-// their helpers are unused there.
+// Some helpers serve only the reorganisation tests, which Windows refuses
+// until el-61ar8 §4.C, and the purge tests, which are Unix-only.
 #[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod race_tests;
 
+// Each of these stages another program swapping a name or a folder between
+// the check and the rename. On Windows that swap is itself refused — the
+// object and its folders are held — so the same boundary is proven there by
+// `windows_tests` instead.
 #[cfg(all(test, unix))]
 mod binding_tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 #[cfg(all(test, unix))]
 mod purge_tests;
@@ -1048,8 +1059,6 @@ mod lightroom_tests {
         assert!(db.journal_quarantined(None).unwrap().is_empty());
     }
 
-    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-    #[cfg(unix)]
     #[test]
     fn a_lightroom_bundle_moved_by_an_earlier_version_still_comes_home() {
         // Returning is putting back: the rule that keeps Lightroom where it
@@ -1075,9 +1084,6 @@ mod lightroom_tests {
 }
 
 #[cfg(test)]
-// Most of these tests need a move, which Windows refuses (el-usdqi D4);
-// their helpers are unused there.
-#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod undo_tests {
     use super::*;
     use pc_db::{Db, JournalStatus, Moved, NewJournalEntry};
@@ -1099,16 +1105,18 @@ mod undo_tests {
                 dst: Some(&d),
                 size: 32,
                 file_count: 2,
+                // With the evidence a forward move records: on Windows a row
+                // without it is never walked back by its names.
                 manifest: &[
                     Moved {
                         src: s.clone(),
                         dst: d.clone(),
-                        proof: None,
+                        proof: files::evidence(&dst).unwrap(),
                     },
                     Moved {
                         src: src.with_extension("xmp").display().to_string(),
                         dst: dst.with_extension("xmp").display().to_string(),
-                        proof: None,
+                        proof: files::evidence(&dst.with_extension("xmp")).unwrap(),
                     },
                 ],
             })
@@ -1117,8 +1125,6 @@ mod undo_tests {
         (id, src, dst)
     }
 
-    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-    #[cfg(unix)]
     #[test]
     fn an_undo_that_cannot_finish_moves_nothing_and_can_be_asked_again() {
         // Half an undo is not an undo. The photograph used to come home while

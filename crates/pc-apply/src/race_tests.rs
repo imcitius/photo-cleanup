@@ -22,7 +22,8 @@ mod junk;
 enum Stranger {
     /// A file with someone else's bytes.
     File,
-    /// A symlink that leads nowhere: `exists()` says there is nothing.
+    /// A symlink that leads nowhere: `exists()` says there is nothing. On
+    /// Windows a junction that leads nowhere (no privilege needed).
     Dangling,
     /// An empty directory (what a plain `rename` of a directory replaces).
     // Planted only by Unix-only refusal tests.
@@ -46,19 +47,22 @@ fn link(target: &Path, at: &Path) {
     std::os::unix::fs::symlink(target, at).unwrap();
 }
 
-/// A symlink on Windows needs a privilege CI runners do not have.
-#[cfg(not(unix))]
-fn link(_: &Path, _: &Path) {
-    unreachable!("a dangling symlink is planted on Unix only")
+/// A symlink on Windows needs a privilege CI runners may not have; a
+/// junction does not, and leads nowhere just as well (el-61ar8 P2c).
+#[cfg(windows)]
+fn link(target: &Path, at: &Path) {
+    let out = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(at)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "mklink /J: {out:?}");
 }
 
 /// The strangers a file destination can meet on this system.
 fn strangers() -> Vec<Stranger> {
-    let mut all = vec![Stranger::File];
-    if cfg!(unix) {
-        all.push(Stranger::Dangling);
-    }
-    all
+    vec![Stranger::File, Stranger::Dangling]
 }
 
 /// The stranger is still there, exactly as planted.
@@ -68,7 +72,15 @@ fn intact(at: &Path, what: Stranger) {
         Stranger::File => assert_eq!(fs::read(at).unwrap(), STRANGER, "{}", at.display()),
         Stranger::Dangling => {
             assert!(md.file_type().is_symlink(), "{} заменена", at.display());
-            assert_eq!(fs::read_link(at).unwrap(), at.with_file_name("nowhere"));
+            let to = fs::read_link(at).unwrap();
+            // A junction reads back in the NT spelling (`\??\C:\…`).
+            assert_eq!(to.file_name(), Some(std::ffi::OsStr::new("nowhere")));
+            assert!(
+                to.to_string_lossy()
+                    .ends_with(&*at.with_file_name("nowhere").to_string_lossy()),
+                "{}",
+                to.display()
+            );
         }
         Stranger::EmptyDir => {
             assert!(md.is_dir(), "{} заменён", at.display());
@@ -166,8 +178,6 @@ fn file_state(db: &Db, path: &Path) -> String {
         .unwrap()
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn apply_never_replaces_what_appears_in_quarantine() {
     for what in strangers() {
@@ -192,8 +202,6 @@ fn apply_never_replaces_what_appears_in_quarantine() {
     }
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn a_sidecar_never_replaces_what_appears_beside_its_photograph() {
     let a = archive();
@@ -270,8 +278,6 @@ fn a_companion_is_left_and_named_with_or_without_its_file() {
     assert!(a.db.journal_quarantined(None).unwrap().is_empty());
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn an_undo_never_replaces_what_appears_at_home() {
     for what in strangers() {
@@ -298,8 +304,6 @@ fn an_undo_never_replaces_what_appears_at_home() {
     }
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn an_undo_never_replaces_a_sidecar_that_appears_at_home_and_can_be_retried() {
     let a = archive();

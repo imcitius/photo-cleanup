@@ -13,11 +13,10 @@ use super::*;
 /// One journal row of a quarantined photograph, with the evidence a
 /// forward move records about it.
 fn recorded(src: &Path, dst: &Path) -> pc_db::Moved {
-    let md = fs::symlink_metadata(dst).unwrap();
     pc_db::Moved {
         src: src.display().to_string(),
         dst: dst.display().to_string(),
-        proof: pc_core::proof::Proof::of(&md),
+        proof: crate::files::evidence(dst).unwrap(),
     }
 }
 
@@ -325,8 +324,6 @@ fn retry_after_crash_uses_persisted_object_evidence() {
 /// in place: same device and inode, different object state — what an
 /// inode handed out again looks like to `dev:ino`. The retry does not
 /// accept it as the frame the operation moved.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn identity_reuse_is_not_silently_accepted() {
     let a = archive();
@@ -382,8 +379,6 @@ fn repeated_retry_keeps_the_original_note() {
 
 /// Every attempt is its own event: identical ones, and one whose words are
 /// contained in an earlier one, are all kept, in order.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn repeated_and_distinct_refusals_preserve_all_events() {
     let a = archive();
@@ -463,8 +458,6 @@ fn reconcile_success_preserves_prior_evidence() {
 
 /// The frame's way home is taken, and the journal cannot record that. The
 /// caller hears both: the refusal, and that it is not written down.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn a_note_write_failure_is_reported_with_the_original_refusal() {
     let a = archive();
@@ -497,8 +490,6 @@ fn a_note_write_failure_is_reported_with_the_original_refusal() {
 /// D7. The sidecar's place in quarantine is taken: the frame (9 bytes)
 /// does not move without it (user decision (c)), and nothing is counted as
 /// held.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn a_refused_sidecar_keeps_its_frame_and_nothing_is_counted() {
     let a = archive();

@@ -849,6 +849,11 @@ fn cmd_clean(db: &Db, a: CleanArgs) -> Result<()> {
 }
 
 fn cmd_purge(db: &Db, a: PurgeArgs) -> Result<()> {
+    // Windows deletes nothing (el-6s3go): said before anything is listed as
+    // "to be deleted", in pc-apply's words, which the web shows too.
+    if let Some(why) = pc_apply::purge_refused_here() {
+        bail!("{why}");
+    }
     let pending = db.journal_quarantined(Some(pc_core::time::now_unix() - a.older_than))?;
     if pending.is_empty() {
         println!("Nothing to delete: no quarantine entry is older than that.");

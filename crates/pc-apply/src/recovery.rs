@@ -715,8 +715,27 @@ pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
         "сверка прерванной операции",
         "reconciling an interrupted operation",
     )) {
-        let why = format!("{e:#}");
-        return Err(told(db, journal_id, "reconcile", "refused", &why, e));
+        // Every place the entry knows, so the refusal says what it is about.
+        let places = db
+            .journal_entry(journal_id)?
+            .map(|entry| {
+                list_of(&entry)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|m| format!("{} -> {}", m.src, m.dst))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_default();
+        let why = format!("{e:#}: {places}");
+        return Err(told(
+            db,
+            journal_id,
+            "reconcile",
+            "refused",
+            &why,
+            e.context(why.clone()),
+        ));
     }
     if let Some(entry) = db.journal_entry(journal_id)? {
         if let Err(e) = readable(&entry) {

@@ -768,6 +768,12 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
         "derived-purge" => {
             let cutoff = pc_core::time::now_unix() - num(&r.params, "older_than_secs", 604800);
             for e in db.journal_quarantined(None)? {
+                // Windows deletes nothing (el-6s3go): every entry is a
+                // refusal in pc-apply's words, and nothing is offered.
+                if let Some(why) = pc_apply::purge_refused_here() {
+                    add_refusal(e.dst.clone().unwrap_or_else(|| e.src.clone()), why.into());
+                    continue;
+                }
                 if e.applied_at >= cutoff {
                     add_refusal(
                         e.src.clone(),

@@ -88,6 +88,8 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
     let mut report = OrganizeReport::default();
     let mut source_dirs: BTreeSet<PathBuf> = BTreeSet::new();
     let route = Route::Organize { run_id };
+    // Not on Windows yet (el-61ar8 §4.C), whatever the list.
+    crate::not_yet_on_windows(("раскладка по папкам", "reorganising into folders"))?;
     // A volume that cannot move without replacing stops the run before its
     // first move.
     crate::check_organize(moves)?;
