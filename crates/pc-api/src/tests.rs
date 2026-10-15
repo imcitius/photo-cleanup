@@ -2128,9 +2128,24 @@ async fn the_preview_writes_nothing_into_a_configured_quarantine() {
         .is_file());
 }
 
-/// One rejected photograph, indexed, ready for a `plan-apply` preview.
+/// One photograph, indexed and rejected, ready for a `plan-apply` preview.
 #[cfg(windows)]
 async fn one_rejected_frame(f: &Fixture, name: &str) -> (PathBuf, Vec<u8>) {
+    let (photo, encoded) = one_indexed_frame(f, name).await;
+    let (_, recent) = f.req("GET", "/api/recent?limit=1", Value::Null).await;
+    let file_id = recent[0]["id"].as_i64().unwrap();
+    f.req(
+        "POST",
+        &format!("/api/files/{file_id}/reject"),
+        json!({"rejected":true}),
+    )
+    .await;
+    (photo, encoded)
+}
+
+/// One photograph, indexed.
+#[cfg(windows)]
+async fn one_indexed_frame(f: &Fixture, name: &str) -> (PathBuf, Vec<u8>) {
     let img = image::RgbImage::from_fn(200, 150, |x, y| {
         image::Rgb([(x % 256) as u8, (y % 256) as u8, 40])
     });
@@ -2144,14 +2159,6 @@ async fn one_rejected_frame(f: &Fixture, name: &str) -> (PathBuf, Vec<u8>) {
         .start("index", json!({"roots":[f.archive],"min_size":0}))
         .await;
     assert_eq!(f.wait(id).await["state"], "done");
-    let (_, recent) = f.req("GET", "/api/recent?limit=1", Value::Null).await;
-    let file_id = recent[0]["id"].as_i64().unwrap();
-    f.req(
-        "POST",
-        &format!("/api/files/{file_id}/reject"),
-        json!({"rejected":true}),
-    )
-    .await;
     (photo, encoded)
 }
 
@@ -2247,17 +2254,17 @@ async fn a_file_in_use_is_refused_by_the_web_in_the_words_of_the_command_line() 
 #[tokio::test]
 async fn windows_still_refuses_to_reorganise_and_says_why() {
     let f = Fixture::new();
-    let (photo, encoded) = one_rejected_frame(&f, "DSC9004.JPG").await;
+    let (photo, encoded) = one_indexed_frame(&f, "DSC9004.JPG").await;
     let tree = f.archive.parent().unwrap().join("sorted");
     std::fs::create_dir(&tree).unwrap();
     let (s, v) = f
         .req(
             "POST",
             "/api/preview",
-            json!({"kind":"organize","params":{"root":tree,"allow_duplicates":true}}),
+            json!({"kind":"organize-apply","params":{"root":tree,"allow_duplicates":true}}),
         )
         .await;
-    assert_eq!(s, 400, "{v}");
+    assert_eq!(s, 400, "the preview must plan a move to be refused: {v}");
     assert!(
         v["error"]
             .as_str()
@@ -2281,7 +2288,7 @@ async fn windows_never_purges_through_the_web() {
     assert_eq!(f.apply(&preview).await["state"], "done");
 
     let purge = f
-        .preview("derived-purge", json!({"older_than_secs":-3600}))
+        .preview("derived-purge", json!({"older_than_secs":0}))
         .await;
     assert!(purge["items"].as_array().unwrap().is_empty(), "{purge}");
     let want = pc_apply::purge_refused_here().unwrap();
@@ -2299,6 +2306,8 @@ async fn windows_never_purges_through_the_web() {
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
 
+// Purges, which Windows never does.
+#[cfg(unix)]
 #[tokio::test]
 async fn reviewer_web_finalization_failure_keeps_actual_counts() {
     // Re-mapped from a preview bundle to a photograph's copy: purge deletes
