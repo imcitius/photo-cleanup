@@ -167,10 +167,26 @@ impl Entry {
             .map_err(|e| self.gone(e))
     }
 
+    /// A cloud placeholder, or any reparse point other than a link or a
+    /// junction, is held (opening it as itself recalls nothing) and refused:
+    /// moving it inside a synchronised folder would be carried to the cloud
+    /// (director decision on el-61ar8 §5.2).
     #[cfg(windows)]
     fn open_held(&self) -> Result<(Option<fs::File>, bool)> {
         let f = self.dir.hold(&self.name).map_err(|e| self.gone(e))?;
         let (kind, _) = pc_core::winfs::kind(&f).map_err(|e| self.gone(e))?;
+        if kind == Kind::Other {
+            bail!(
+                "{}",
+                pc_core::tf!(
+                    "{0} — объект, который эта программа не переносит (облачная заглушка или иная \
+                     точка повторного анализа); ничего не перенесено",
+                    "{0} — an object this tool does not move (a cloud placeholder or another \
+                     reparse point); nothing moved",
+                    self.path.display()
+                )
+            );
+        }
         Ok((Some(f), kind == Kind::Link))
     }
 
