@@ -65,17 +65,33 @@ photo-cleanup-desktop.exe.
 
 Что программа делает с фотографиями
 -----------------------------------
-Ничего не удаляется. В этой сборке для Windows перенос файлов в карантин,
-откат (возврат) и сверка после сбоя намеренно отключены: программа
-отказывает заранее, ничего не сдвинув, с сообщением вроде
-  «на Windows перенос, откат и сверка пока не выполняются: проверка
-  личности файлов и безопасного удаления временных файлов на настоящей
-  системе Windows ещё не проведена»
-(или его английский вариант). Такой отказ — ожидаемое поведение, а не
-ошибка. Проверьте, что сообщение понятно и что ни один файл не сдвинулся
-с места. Место освобождает только отдельная очистка карантина (purge) —
-для проверки её запускать не нужно и не надо.
-Для пробы лучше взять копию небольшой папки со снимками, а не весь архив.
+Ничего не удаляется — на Windows программа не удаляет ни одного файла
+никогда. Окончательная очистка карантина (purge) здесь отключена навсегда:
+она отказывает с объяснением, ничего не тронув.
+
+Что работает на дисках NTFS (обычный диск Windows):
+  - перенос выбранных копий в карантин — скрытую папку
+    .photo-cleanup-quarantine рядом с файлом или в заданной папке на том
+    же диске; снимок переезжает вместе со своими .xmp/.aae;
+  - откат (возврат) завершённого переноса на прежнее место.
+Перед каждым переносом файл перепроверяется; если он изменился, перенос
+отказывает, и файл остаётся на месте.
+
+Что пока отказывает с объяснением (это ожидаемо, не ошибка; ни один файл
+при этом не сдвигается):
+  - файл открыт другой программой (Lightroom, антивирус, просмотр в
+    Проводнике) — сообщение «…открыт другой программой… закройте её и
+    повторите»; закройте программу и запустите перенос ещё раз;
+  - диск не NTFS (флешки и карты с exFAT или FAT, ReFS), а также файлы
+    OneDrive «только в облаке»;
+  - карантин на другом диске, чем сами снимки;
+  - сверка после сбоя (прерванная операция), возврат файлов, о которых
+    журнал не знает, и раскладка по папкам.
+Если что-то из этого нужно — сообщите, это будет включено отдельно.
+
+Для пробы возьмите копию небольшой папки со снимками, а не весь архив.
+Проверьте: перенос в карантин и откат возвращают всё на место (вместе с
+.xmp), а каждый отказ понятно объясняет, что не так.
 
 Что сообщить
 ------------
@@ -106,13 +122,17 @@ Windows. Not a release: unsigned, nothing is installed.
   on Windows by design, before anything is written. That is expected.
 - The window's close button only hides it. Quit from the tray icon:
   "Quit" ("Open" brings the window back, "Stop work" stops the current job).
-- Nothing is deleted. In this Windows build, moving files to quarantine,
-  undo and recovery are disabled by design: the app refuses before
-  anything moves, with a message like "on Windows, moves, undo and
-  recovery are not carried out yet: file identity and the safe cleanup of
-  temporary files have not been verified on a real Windows system" (or
-  its Russian version). That refusal is expected; check that it is clear
-  and that no file has moved. Only a separate purge frees space — do not
-  run it for this test. Try it on a copy of a small folder, not your
-  whole archive.
+- Nothing is ever deleted on Windows: purge (emptying the quarantine for
+  good) is disabled there for good and refuses, touching nothing.
+- On NTFS drives, moving the chosen copies into quarantine (a hidden
+  .photo-cleanup-quarantine folder beside them, or a folder you set on the
+  same drive), together with their .xmp/.aae, works, and so does undoing a
+  finished move. Each file is checked again right before it moves.
+- Refused with a reason, nothing moved (expected, not a bug): a file open
+  in another program (Lightroom, an antivirus, Explorer's preview) - close
+  it and try again; drives that are not NTFS (exFAT/FAT cards and sticks,
+  ReFS) and OneDrive online-only files; a quarantine on another drive;
+  recovery after a crash, returning files the journal does not know, and
+  sorting into folders. Try it on a copy of a small folder, not your whole
+  archive, and check that undo brings everything back.
 - photo-cleanup.exe is the command-line tool; not needed for this test.
