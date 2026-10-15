@@ -24,11 +24,18 @@ pub fn companions(path: &Path) -> Vec<PathBuf> {
     let Some(dir) = path.parent() else {
         return Vec::new();
     };
-    let stem = name.rsplit_once('.').map_or(name, |(a, _)| a);
+    #[cfg(windows)]
+    {
+        companions_listed(dir, name)
+    }
+    #[cfg(not(windows))]
+    companions_named(dir, name)
+}
 
-    let mut out = Vec::new();
-    let mut identities = std::collections::HashSet::new();
-    for candidate in [
+/// The names a companion of the photograph `name` can bear.
+fn companion_names(name: &str) -> [String; 7] {
+    let stem = name.rsplit_once('.').map_or(name, |(a, _)| a);
+    [
         format!("{stem}.xmp"),
         format!("{stem}.XMP"),
         format!("{name}.xmp"),
@@ -36,7 +43,43 @@ pub fn companions(path: &Path) -> Vec<PathBuf> {
         format!("{stem}.AAE"),
         format!("{name}.pp3"),
         format!("._{name}"),
-    ] {
+    ]
+}
+
+/// Windows: the companions as the folder lists them, each with the exact
+/// spelling it has there (el-61ar8 §2.6). NTFS folders ignore case by
+/// default, so asking for `a.XMP` would answer with `a.xmp` — and the
+/// sidecar would travel and come back under a spelling it never had. A
+/// folder can be made case-sensitive (`fsutil file setCaseSensitiveInfo`,
+/// WSL), and then `a.xmp` and `a.XMP` are two files: both are listed here,
+/// and [`companion_doubt`] refuses the unit.
+#[cfg(windows)]
+fn companions_listed(dir: &Path, name: &str) -> Vec<PathBuf> {
+    let wanted: Vec<String> = companion_names(name)
+        .iter()
+        .map(|n| n.to_lowercase())
+        .collect();
+    let Ok(listing) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = listing
+        .flatten()
+        .filter_map(|e| {
+            let listed = e.file_name().to_str()?.to_string();
+            let p = dir.join(&listed);
+            (wanted.contains(&listed.to_lowercase()) && fs::metadata(&p).is_ok_and(|m| m.is_file()))
+                .then_some(p)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[cfg(not(windows))]
+fn companions_named(dir: &Path, name: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut identities = std::collections::HashSet::new();
+    for candidate in companion_names(name) {
         let p = dir.join(candidate);
         if let Ok(md) = fs::metadata(&p) {
             // On case-insensitive filesystems .xmp and .XMP can address
@@ -47,6 +90,38 @@ pub fn companions(path: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// Why the companions of `path` cannot go as one unit, if they cannot: two
+/// of them that differ only in case (a case-sensitive folder on Windows).
+/// Which of them belongs to the photograph is not the tool's to guess, so
+/// the whole unit is refused (director decision on el-61ar8 §5.6). The one
+/// answer for the command line and the web.
+pub fn companion_doubt(path: &Path) -> Option<String> {
+    let names: Vec<String> = companions(path)
+        .iter()
+        .filter_map(|p| p.file_name()?.to_str().map(str::to_string))
+        .collect();
+    let twins: Vec<&String> = names
+        .iter()
+        .filter(|a| {
+            names
+                .iter()
+                .any(|b| *a != b && a.to_lowercase() == b.to_lowercase())
+        })
+        .collect();
+    if twins.is_empty() {
+        return None;
+    }
+    Some(pc_core::tf!(
+        "спутники {0} различаются только регистром букв, и неизвестно, какой из них относится к кадру; кадр со спутниками не переносится, ничего не перенесено",
+        "the companions {0} differ only in letter case, and which of them belongs to the frame is not known; the frame and its companions are not moved, nothing moved",
+        twins
+            .iter()
+            .map(|n| n.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 /// One sidecar of a photograph about to move: where it lands, and whether
@@ -228,9 +303,26 @@ impl Filed {
 
 /// Evidence of the file at `path`, taken before it moves.
 pub(crate) fn evidence(path: &Path) -> Result<Option<pc_core::proof::Proof>> {
-    let md = fs::symlink_metadata(path)
-        .with_context(|| pc_core::tf!("не прочитать {0}", "cannot read {0}", path.display()))?;
-    Ok(pc_core::proof::Proof::of(&md))
+    let unreadable = || pc_core::tf!("не прочитать {0}", "cannot read {0}", path.display());
+    #[cfg(not(windows))]
+    {
+        let md = fs::symlink_metadata(path).with_context(unreadable)?;
+        Ok(pc_core::proof::Proof::of(&md))
+    }
+    // On Windows a path's metadata names no object; the entry is read as
+    // itself through its folder's handle.
+    #[cfg(windows)]
+    {
+        let (Some(parent), Some(name)) = (
+            path.parent().filter(|p| !p.as_os_str().is_empty()),
+            path.file_name().and_then(|n| n.to_str()),
+        ) else {
+            anyhow::bail!("{}", unreadable());
+        };
+        let dir = pc_core::anchored::Dir::open_following(parent).with_context(unreadable)?;
+        dir.entry_at(name).with_context(unreadable)?;
+        Ok(pc_core::proof::Proof::at(&dir, name))
+    }
 }
 
 /// Bytes of the moved files, from their evidence: what moved, not what was
@@ -254,7 +346,7 @@ pub fn quarantine_file(
     // The photograph is opened before it is checked and stays open until it
     // moves: the check reads this object, and the move is bound to it — not
     // to whatever bears the name by then (el-3wizg).
-    let held = match crate::bound::Held::open(src) {
+    let held = match crate::bound::Held::open(src, crate::bound::Purpose::Move) {
         Ok(Some(held)) => held,
         Ok(None) => {
             return Ok(Filed::refused(pc_core::tr!(
@@ -271,7 +363,7 @@ pub fn quarantine_file(
     // that they looked at the frame and did not want it.
     let mut kept = None;
     if !c.manual {
-        let keeper_held = match crate::bound::Held::open(keeper) {
+        let keeper_held = match crate::bound::Held::open(keeper, crate::bound::Purpose::Compare) {
             Ok(Some(k)) => k,
             Ok(None) => {
                 return Ok(Filed::refused(pc_core::tf!(
@@ -349,6 +441,9 @@ pub fn quarantine_file(
     // Every companion goes with the frame or none does (user decision (c)):
     // one whose evidence cannot be read, or whose place in quarantine is
     // taken, refuses the frame too, before anything moves.
+    if let Some(why) = companion_doubt(src) {
+        return Ok(Filed::refused(why));
+    }
     for side in companion_plan(src, &dst) {
         let refuse = |why: String| {
             Ok(Filed::refused(pc_core::tf!(

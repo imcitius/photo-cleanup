@@ -102,6 +102,7 @@ enum Spot {
     Unreadable(String),
 }
 
+#[cfg(not(windows))]
 fn spot(path: &str, proof: Option<&Proof>) -> Spot {
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Spot::Absent,
@@ -118,9 +119,50 @@ fn spot(path: &str, proof: Option<&Proof>) -> Spot {
     }
 }
 
+/// Windows (el-61ar8 §2.5): a path's metadata names no object there, so the
+/// entry is read as itself through its folder's handle — the folder
+/// followed as the user named it, the last component not — and compared by
+/// [`Proof::verify`]. A missing folder or name is nothing there; any other
+/// failure says nothing about what is there.
+#[cfg(windows)]
+fn spot(path: &str, proof: Option<&Proof>) -> Spot {
+    let at = Path::new(path);
+    let (Some(parent), Some(name)) = (
+        at.parent().filter(|p| !p.as_os_str().is_empty()),
+        at.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return Spot::Unreadable(pc_core::tf!(
+            "не путь к файлу: {0}",
+            "not a path to a file: {0}",
+            path
+        ));
+    };
+    let dir = match pc_core::anchored::Dir::open_following(parent) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Spot::Absent,
+        Err(e) => return Spot::Unreadable(e.to_string()),
+    };
+    match dir.entry_at(name) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Spot::Absent,
+        Err(e) => return Spot::Unreadable(e.to_string()),
+        Ok(_) => {}
+    }
+    let Some(p) = proof else {
+        return Spot::Unproven;
+    };
+    match pc_core::proof::Proof::at(&dir, name) {
+        Some(now) => match p.verify(&now, None) {
+            Verdict::Same => Spot::Proven,
+            Verdict::Differs(w) | Verdict::Unprovable(w) => Spot::Other(w),
+        },
+        None => Spot::Other("this system cannot name a file system object"),
+    }
+}
+
 /// The evidence against what is at `path`, by [`Proof::verify`]: through
 /// an open descriptor when the evidence records a hash, so the content is
 /// compared too; a hash that cannot be read again is not a match.
+#[cfg(not(windows))]
 fn verdict_at(path: &str, p: &Proof, md: &fs::Metadata) -> Verdict {
     if p.blake3.is_none() || !md.is_file() {
         return p.check(md);
@@ -151,6 +193,19 @@ fn verdict_at(path: &str, p: &Proof, md: &fs::Metadata) -> Verdict {
 
 /// The one classifier.
 pub fn classify(m: &Moved) -> Standing {
+    // Windows (el-usdqi D4, el-6s3go): a row without evidence is never
+    // walked back there by its names. Every row this tool writes on Windows
+    // records evidence; one without it came from elsewhere, and a file at
+    // its recorded quarantine path is not the operation's on its name alone.
+    #[cfg(windows)]
+    if m.proof.is_none() {
+        return Standing::Doubt(pc_core::tf!(
+            "{0} — запись не хранит сведений о том, какой файл перенесён, а на Windows файл по одному имени не возвращается; он остаётся на месте: {1}",
+            "{0} — the entry records no evidence of which file moved, and on Windows a file is not brought back on its name alone; it stays where it is: {1}",
+            m.src,
+            m.dst
+        ));
+    }
     let held = spot(&m.dst, m.proof.as_ref());
     let home = spot(&m.src, m.proof.as_ref());
     match (held, home) {
@@ -495,6 +550,14 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
         "в записи нет пути назначения",
         "the entry has no destination path"
     ))?;
+    if entry.op == "organize" {
+        if let Err(e) =
+            crate::not_yet_on_windows(("откат раскладки по папкам", "undoing a reorganisation"))
+        {
+            let why = format!("{e:#}");
+            return Err(told(db, journal_id, "undo", "refused", &why, e));
+        }
+    }
     let mut list = match list_of(&entry) {
         Ok(list) => list,
         Err(e) => {
@@ -648,6 +711,13 @@ pub struct Reconciled {
 /// this one, or held and free to come back. Anything else leaves the entry
 /// `pending`, which is what it is, with the reason added to its history.
 pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
+    if let Err(e) = crate::not_yet_on_windows((
+        "сверка прерванной операции",
+        "reconciling an interrupted operation",
+    )) {
+        let why = format!("{e:#}");
+        return Err(told(db, journal_id, "reconcile", "refused", &why, e));
+    }
     if let Some(entry) = db.journal_entry(journal_id)? {
         if let Err(e) = readable(&entry) {
             let why = format!("{e:#}");

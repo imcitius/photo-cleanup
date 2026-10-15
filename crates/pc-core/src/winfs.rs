@@ -451,3 +451,107 @@ pub fn without_verbatim(path: PathBuf) -> PathBuf {
     }
     path
 }
+
+/// The SIDs this process gives as "mine": the token's user, and the default
+/// owner it puts on what it creates. They differ under an elevated
+/// administrator token, where new files belong to the Administrators group
+/// (seen on the CI runner and in the test VM, el-2yxx0) — a note this
+/// process wrote is then owned by that group, and it is still ours.
+struct Mine {
+    user: Vec<u64>,
+    owner: Vec<u64>,
+}
+
+impl Mine {
+    fn current() -> io::Result<Mine> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TokenOwner, TokenUser, TOKEN_INFORMATION_CLASS, TOKEN_QUERY,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        let mut token: HANDLE = ptr::null_mut();
+        // SAFETY: the pseudo-handle of this process needs no closing;
+        // `token` is closed below.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let read = |class: TOKEN_INFORMATION_CLASS| -> io::Result<Vec<u64>> {
+            let mut len = 0u32;
+            // SAFETY: a size query with no buffer; fails with the size.
+            unsafe { GetTokenInformation(token, class, ptr::null_mut(), 0, &mut len) };
+            let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
+            // SAFETY: `buf` holds at least `len` bytes, 8-byte aligned.
+            let ok = unsafe {
+                GetTokenInformation(token, class, buf.as_mut_ptr().cast(), len, &mut len)
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(buf)
+        };
+        let mine = read(TokenUser).and_then(|user| {
+            Ok(Mine {
+                user,
+                owner: read(TokenOwner)?,
+            })
+        });
+        // SAFETY: opened above, closed once.
+        unsafe { CloseHandle(token) };
+        mine
+    }
+
+    fn sids(&self) -> [windows_sys::Win32::Security::PSID; 2] {
+        use windows_sys::Win32::Security::{TOKEN_OWNER, TOKEN_USER};
+        // SAFETY: the buffers were filled with a TOKEN_USER and a
+        // TOKEN_OWNER; their SIDs point into the same buffers, which live as
+        // long as `self`.
+        unsafe {
+            [
+                (*self.user.as_ptr().cast::<TOKEN_USER>()).User.Sid,
+                (*self.owner.as_ptr().cast::<TOKEN_OWNER>()).Owner,
+            ]
+        }
+    }
+}
+
+/// Whether the object open as `file` belongs to this process's user: its
+/// owner is the token's user, or the owner this process gives what it
+/// creates (see [`Mine`]). `file` must be open with `READ_CONTROL` (any
+/// `GENERIC_READ` open has it). The Windows counterpart of comparing
+/// `st_uid` with the effective uid.
+pub fn owned_by_this_process(file: &fs::File) -> io::Result<bool> {
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        EqualSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    };
+    let mine = Mine::current()?;
+    let mut owner: PSID = ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: the handle is open; `owner` points into `sd`, freed below.
+    let rc = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle() as HANDLE,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(rc as i32));
+    }
+    // SAFETY: `owner` is valid until `sd` is freed; the SIDs of `mine` live
+    // as long as `mine`.
+    let ours = !owner.is_null()
+        && mine
+            .sids()
+            .iter()
+            .any(|&sid| !sid.is_null() && unsafe { EqualSid(owner, sid) } != 0);
+    // SAFETY: allocated by GetSecurityInfo, freed once.
+    unsafe { LocalFree(sd) };
+    Ok(ours)
+}

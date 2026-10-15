@@ -123,8 +123,7 @@ pub fn locate(
 }
 
 /// Tests only: what another program does at a boundary of this module.
-// Only the Unix layout note publishes through this seam today.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) mod seam {
     use std::cell::RefCell;
     use std::path::Path;

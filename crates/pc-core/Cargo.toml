@@ -19,13 +19,17 @@ libc.workspace = true
 # `Wdk_*`: `NtCreateFile` relative to a held folder and
 # `NtSetInformationFile(FileRenameInformation)`, the rename of an object
 # through its handle (`winfs`, el-543ou). `Win32_Security`: `OpenFileById`.
+# `Win32_Security_Authorization` and `Win32_System_Threading`: the owner of
+# an existing quarantine layout note against this process's user (el-6s3go).
 windows-sys = { workspace = true, features = [
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    "Win32_System_Threading",
 ] }
 
 [dev-dependencies]

@@ -45,23 +45,65 @@
 //! Scope: interleavings by programs of the same user at the system-call
 //! boundary. Another user, root, or a power cut between the rename and the
 //! comparison after it are residuals, stated in DESIGN §11.2.
+//!
+//! Windows (el-6s3go, design el-61ar8 §2.3) takes the same steps through
+//! handles, and two of them get stronger. The object is held from its check
+//! with `DELETE` and shared for reading only, and the rename goes through
+//! *that handle* (`NtSetInformationFile(FileRenameInformation)`, never
+//! replacing): what moves is the object checked, not whatever bears its
+//! name, and while it is held no other program can write to it or rename it.
+//! The folder it is in and the folder it goes to are held without
+//! `FILE_SHARE_DELETE`, so neither can be renamed under the move. A file
+//! another program holds without sharing deletion (Lightroom, an antivirus,
+//! a preview) cannot be held, and is refused as in use before anything
+//! moves ([`crate::in_use`]). What another program can still do to a held
+//! file is change its times (`FILE_WRITE_ATTRIBUTES` is not governed by
+//! sharing): the check right before the rename catches that, but for the
+//! window of one call — the residual stated in DESIGN §11.2.
 
 use anyhow::{anyhow, bail, Result};
-use pc_core::proof::Proof;
-#[cfg(unix)]
-use pc_core::proof::Verdict;
+use pc_core::anchored::{Dir, Ident};
+use pc_core::proof::{Kind, Proof, Verdict};
 pub use pc_core::whereabouts::Whereabouts;
-
-#[cfg(unix)]
-type Ident = pc_core::anchored::Ident;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-use pc_core::anchored::Dir;
+/// What bears `name` in `dir`, as itself: its identity and kind.
+fn kind_at(dir: &Dir, name: &str) -> std::io::Result<(Ident, Kind)> {
+    #[cfg(unix)]
+    {
+        let (id, mode) = dir.stat_at(name)?;
+        // `S_IFMT` and its values: the same on every Unix this builds for.
+        let kind = match mode & 0o170_000 {
+            0o120_000 => Kind::Link,
+            0o040_000 => Kind::Dir,
+            0o100_000 => Kind::File,
+            _ => Kind::Other,
+        };
+        Ok((id, kind))
+    }
+    #[cfg(windows)]
+    {
+        dir.stat_at(name)
+    }
+}
+
+/// The folder an entry is reached through, held from now on. On Windows
+/// held without `FILE_SHARE_DELETE` (director decision on el-61ar8 §5.4):
+/// no other program renames it while the unit is held, and a folder another
+/// program already holds that way is refused as in use.
+fn hold_folder(path: &Path) -> std::io::Result<Dir> {
+    #[cfg(unix)]
+    {
+        Dir::open_following(path)
+    }
+    #[cfg(windows)]
+    {
+        Dir::open_following_locked(path)
+    }
+}
 
 /// An entry reached through its folder, opened once.
-#[cfg(unix)]
 pub(crate) struct Entry {
     dir: Dir,
     name: String,
@@ -70,7 +112,6 @@ pub(crate) struct Entry {
     parent: PathBuf,
 }
 
-#[cfg(unix)]
 impl Entry {
     pub(crate) fn of(path: &Path) -> Result<Entry> {
         let name = path
@@ -90,7 +131,10 @@ impl Entry {
         };
         // An ancestor the user named may be a link (`/var` on macOS); the
         // folder is followed once, here, and held from now on.
-        let dir = Dir::open_following(parent).map_err(|e| {
+        let dir = hold_folder(parent).map_err(|e| {
+            if crate::in_use(&e) {
+                return anyhow!("{}", crate::in_use_text(parent));
+            }
             anyhow::Error::new(e).context(pc_core::tf!(
                 "не открыть папку {0}",
                 "cannot open the folder {0}",
@@ -106,20 +150,32 @@ impl Entry {
     }
 
     /// The object at the name, opened through the held folder and held from
-    /// here on (el-lvtmk R7) — `None` for a link, which is never opened
-    /// (that would follow it) and is checked by its metadata instead.
-    fn open_held(&self) -> Result<Option<fs::File>> {
-        let (_, mode) = self.dir.stat_at(&self.name).map_err(|e| self.gone(e))?;
-        if mode & 0o170_000 == 0o120_000 {
-            return Ok(None);
+    /// here on (el-lvtmk R7), and whether it is a link. On Unix `None` for a
+    /// link, which is never opened (that would follow it) and is checked by
+    /// its metadata instead. On Windows every object — a link or junction
+    /// as itself — is held with `DELETE`, shared for reading only, and it is
+    /// this handle that the move renames.
+    #[cfg(unix)]
+    fn open_held(&self) -> Result<(Option<fs::File>, bool)> {
+        let (_, kind) = kind_at(&self.dir, &self.name).map_err(|e| self.gone(e))?;
+        if kind == Kind::Link {
+            return Ok((None, true));
         }
         self.dir
             .open_file(&self.name, false)
-            .map(Some)
+            .map(|f| (Some(f), false))
             .map_err(|e| self.gone(e))
     }
 
+    #[cfg(windows)]
+    fn open_held(&self) -> Result<(Option<fs::File>, bool)> {
+        let f = self.dir.hold(&self.name).map_err(|e| self.gone(e))?;
+        let (kind, _) = pc_core::winfs::kind(&f).map_err(|e| self.gone(e))?;
+        Ok((Some(f), kind == Kind::Link))
+    }
+
     /// Evidence of what bears the name now, read through the held folder.
+    #[cfg(unix)]
     fn proof_now(&self) -> Result<Proof> {
         let md = self.metadata()?;
         Proof::of(&md).ok_or_else(|| {
@@ -130,10 +186,21 @@ impl Entry {
         })
     }
 
+    #[cfg(windows)]
+    fn proof_now(&self) -> Result<Proof> {
+        kind_at(&self.dir, &self.name).map_err(|e| self.gone(e))?;
+        Proof::at(&self.dir, &self.name).ok_or_else(|| {
+            anyhow!(pc_core::tr!(
+                "эта система не умеет назвать объект файловой системы",
+                "this system cannot name a file system object"
+            ))
+        })
+    }
+
+    #[cfg(unix)]
     fn metadata(&self) -> Result<fs::Metadata> {
-        let (ident, mode) = self.dir.stat_at(&self.name).map_err(|e| self.gone(e))?;
-        // `S_IFMT`/`S_IFLNK`: the same values on every Unix this builds for.
-        if mode & 0o170_000 == 0o120_000 {
+        let (ident, kind) = kind_at(&self.dir, &self.name).map_err(|e| self.gone(e))?;
+        if kind == Kind::Link {
             // A link is never opened (that would follow it); its metadata is
             // read by path, and its identity is compared with what the held
             // folder said a moment ago.
@@ -153,9 +220,10 @@ impl Entry {
     /// The evidence compared with what bears the name now, through the held
     /// folder — by the same question before and after the rename
     /// ([`Proof::check_file`]).
+    #[cfg(unix)]
     fn check(&self, expect: &Proof) -> Result<Verdict> {
-        let (_, mode) = self.dir.stat_at(&self.name).map_err(|e| self.gone(e))?;
-        if mode & 0o170_000 == 0o120_000 {
+        let (_, kind) = kind_at(&self.dir, &self.name).map_err(|e| self.gone(e))?;
+        if kind == Kind::Link {
             return Ok(expect.check(&self.metadata()?));
         }
         let f = self
@@ -165,7 +233,22 @@ impl Entry {
         Ok(expect.check_file(&f))
     }
 
+    /// On Windows what bears the name is read through the held folder's
+    /// handle, as itself ([`Proof::at`]); a recorded content hash cannot be
+    /// read that way and is then not a match.
+    #[cfg(windows)]
+    fn check(&self, expect: &Proof) -> Result<Verdict> {
+        kind_at(&self.dir, &self.name).map_err(|e| self.gone(e))?;
+        Ok(match Proof::at(&self.dir, &self.name) {
+            Some(now) => expect.verify(&now, None),
+            None => Verdict::Unprovable("this system cannot name a file system object"),
+        })
+    }
+
     fn gone(&self, e: std::io::Error) -> anyhow::Error {
+        if crate::in_use(&e) {
+            return anyhow!("{}", crate::in_use_text(&self.path));
+        }
         anyhow!(pc_core::tf!(
             "{0} — не прочитать через удерживаемую папку: {1}; ничего не перенесено",
             "{0} — cannot be read through the held folder: {1}; nothing moved",
@@ -186,15 +269,13 @@ impl Entry {
     /// The name still bears the checked object, and the path still leads
     /// to the folder held — so what the journal says is where it was.
     fn verify(&self, expect: &Proof) -> Result<()> {
-        if let Ok(now) = fs::metadata(self.dir.path()) {
-            if pc_core::anchored::ident_of(&now) == self.dir.ident()? {
-                return match self.check(expect)? {
-                    Verdict::Same => Ok(()),
-                    Verdict::Differs(why) | Verdict::Unprovable(why) => {
-                        bail!("{}", self.differs(why))
-                    }
-                };
-            }
+        if self.dir.is_at(self.dir.path()) {
+            return match self.check(expect)? {
+                Verdict::Same => Ok(()),
+                Verdict::Differs(why) | Verdict::Unprovable(why) => {
+                    bail!("{}", self.differs(why))
+                }
+            };
         }
         bail!(
             "{}",
@@ -210,78 +291,89 @@ impl Entry {
 
 /// A file opened before it is checked and held until it moves: what is read
 /// for the check is the object the move is bound to.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct Held {
-    #[cfg(unix)]
     entry: Entry,
-    /// `None` only for a link, which is never opened (that would follow
-    /// it) and is checked by its metadata instead.
+    /// The object, open. `None` only on Unix for a link, which is never
+    /// opened (that would follow it) and is checked by its metadata
+    /// instead. On Windows always the handle the move renames — for a link
+    /// or junction, the link itself.
     file: Option<fs::File>,
+    /// A link, held (on Windows) or looked at (on Unix) as itself: never
+    /// read through.
+    link: bool,
     proof: Proof,
+}
+
+/// What a photograph is opened for: to be moved, or only to be compared
+/// with (a keeper). The difference is on Windows only: a photograph to be
+/// moved is held with `DELETE` and shared for reading only; a keeper is
+/// opened for reading and shared, so that comparing with it never asks the
+/// right to delete it, nor locks another program out of it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Purpose {
+    Move,
+    Compare,
 }
 
 impl Held {
     /// Open the plain file at `path` without following a link at its name.
     /// `Ok(None)` when nothing bears the name.
-    pub(crate) fn open(path: &Path) -> Result<Option<Held>> {
-        #[cfg(unix)]
-        {
-            let entry = match Entry::of(path) {
-                Ok(e) => e,
-                Err(_) if fs::symlink_metadata(path).is_err() => return Ok(None),
-                Err(e) => return Err(e),
-            };
-            let file = match entry.dir.open_file(&entry.name, false) {
-                Ok(f) => f,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(_)
-                    if entry
-                        .dir
-                        .stat_at(&entry.name)
-                        .is_ok_and(|(_, mode)| mode & 0o170_000 == 0o120_000) =>
-                {
-                    bail!(
-                        "{}",
-                        pc_core::tf!(
-                            "{0} — символическая ссылка, а не файл",
-                            "{0} is a symbolic link, not a file",
-                            path.display()
-                        )
-                    )
-                }
-                Err(e) => return Err(entry.gone(e)),
-            };
-            let md = file.metadata()?;
-            if !md.is_file() {
-                bail!(
-                    "{}",
-                    pc_core::tf!(
-                        "{0} — не обычный файл",
-                        "{0} is not a regular file",
-                        path.display()
-                    )
-                );
-            }
-            let proof = Proof::of(&md).ok_or_else(|| anyhow!("no evidence"))?;
-            Ok(Some(Held {
-                entry,
-                file: Some(file),
-                proof,
-            }))
-        }
-        #[cfg(not(unix))]
-        {
-            // Nothing moves on this system (`check_exclusive_rename`), and
-            // holding a file by its folder is not verified here: refuse.
-            let _ = path;
-            bail!(
+    pub(crate) fn open(path: &Path, purpose: Purpose) -> Result<Option<Held>> {
+        let entry = match Entry::of(path) {
+            Ok(e) => e,
+            Err(_) if fs::symlink_metadata(path).is_err() => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let opened = match purpose {
+            #[cfg(windows)]
+            Purpose::Move => entry.dir.hold(&entry.name),
+            _ => entry.dir.open_file(&entry.name, false),
+        };
+        let link = || kind_at(&entry.dir, &entry.name).is_ok_and(|(_, kind)| kind == Kind::Link);
+        let file = match opened {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) if link() => bail!(
                 "{}",
-                pc_core::tr!(
-                    "на этой системе файл не удерживается от проверки до переноса",
-                    "this system cannot hold a file from its check to its move"
+                pc_core::tf!(
+                    "{0} — символическая ссылка, а не файл",
+                    "{0} is a symbolic link, not a file",
+                    path.display()
                 )
-            )
+            ),
+            Err(e) => return Err(entry.gone(e)),
+        };
+        let proof = Proof::of_file(&file).ok_or_else(|| {
+            anyhow!(pc_core::tr!(
+                "эта система не умеет назвать объект файловой системы",
+                "this system cannot name a file system object"
+            ))
+        })?;
+        match proof.kind {
+            Kind::File => {}
+            Kind::Link => bail!(
+                "{}",
+                pc_core::tf!(
+                    "{0} — символическая ссылка, а не файл",
+                    "{0} is a symbolic link, not a file",
+                    path.display()
+                )
+            ),
+            _ => bail!(
+                "{}",
+                pc_core::tf!(
+                    "{0} — не обычный файл",
+                    "{0} is not a regular file",
+                    path.display()
+                )
+            ),
         }
+        Ok(Some(Held {
+            entry,
+            file: Some(file),
+            link: false,
+            proof,
+        }))
     }
 
     /// Whatever bears the name `path` — a file, a folder of previews — reached
@@ -290,40 +382,31 @@ impl Held {
     /// evidence, the object found now. Every member of a unit is bound this
     /// way before the unit's first rename ([`crate::unit`]).
     pub(crate) fn bind(path: &Path, expect: Option<&Proof>) -> Result<Held> {
-        #[cfg(unix)]
-        {
-            let entry = Entry::of(path)?;
-            let file = entry.open_held()?;
-            let proof = match (expect, &file) {
-                (Some(p), _) => p.clone(),
-                (None, Some(f)) => Proof::of(&f.metadata()?).ok_or_else(|| {
-                    anyhow!(pc_core::tr!(
-                        "эта система не умеет назвать объект файловой системы",
-                        "this system cannot name a file system object"
-                    ))
-                })?,
-                (None, None) => entry.proof_now()?,
-            };
-            let held = Held { entry, file, proof };
-            held.verify()?;
-            Ok(held)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (path, expect);
-            bail!(
-                "{}",
-                pc_core::tr!(
-                    "на этой системе файл не удерживается от проверки до переноса",
-                    "this system cannot hold a file from its check to its move"
-                )
-            )
-        }
+        let entry = Entry::of(path)?;
+        let (file, link) = entry.open_held()?;
+        let proof = match (expect, &file) {
+            (Some(p), _) => p.clone(),
+            (None, Some(f)) => Proof::of_file(f).ok_or_else(|| {
+                anyhow!(pc_core::tr!(
+                    "эта система не умеет назвать объект файловой системы",
+                    "this system cannot name a file system object"
+                ))
+            })?,
+            (None, None) => entry.proof_now()?,
+        };
+        let held = Held {
+            entry,
+            file,
+            link,
+            proof,
+        };
+        held.verify()?;
+        Ok(held)
     }
 
     /// The open file, for reading what is checked.
     pub(crate) fn file(&self) -> Result<&fs::File> {
-        self.file.as_ref().ok_or_else(|| {
+        self.file.as_ref().filter(|_| !self.link).ok_or_else(|| {
             anyhow!(pc_core::tr!(
                 "символическая ссылка не открывается",
                 "a symbolic link is not opened"
@@ -333,18 +416,13 @@ impl Held {
 
     /// Where the held object is now, proven, without moving it.
     pub(crate) fn locate(&self) -> Whereabouts {
-        #[cfg(unix)]
-        {
-            pc_core::anchored::locate(
-                &self.entry.dir,
-                &self.entry.name,
-                (self.proof.dev, self.proof.ino),
-                Some(&self.entry.path),
-                self.file.as_ref(),
-            )
-        }
-        #[cfg(not(unix))]
-        Whereabouts::uncertain(None, "unsupported")
+        pc_core::anchored::locate(
+            &self.entry.dir,
+            &self.entry.name,
+            (self.proof.dev, self.proof.ino),
+            Some(&self.entry.path),
+            self.file.as_ref(),
+        )
     }
 
     pub(crate) fn proof(&self) -> &Proof {
@@ -352,8 +430,6 @@ impl Held {
     }
 
     /// The same object, under the same name, unchanged.
-    // Only Unix binds an object; elsewhere `bind` refuses before this is reachable.
-    #[cfg(unix)]
     pub(crate) fn verify(&self) -> Result<()> {
         if let Some(f) = &self.file {
             match self.proof.check_file(f) {
@@ -414,7 +490,6 @@ impl Object {
 
 /// An object's folder and name, held, and the object itself if open.
 pub(crate) struct Kept {
-    #[cfg(unix)]
     dir: Dir,
     name: String,
     obj: (u64, u64),
@@ -432,7 +507,6 @@ impl std::fmt::Debug for Kept {
 }
 
 impl Kept {
-    #[cfg(unix)]
     fn of(
         dir: &Dir,
         name: &str,
@@ -450,21 +524,13 @@ impl Kept {
     }
 
     pub(crate) fn locate(&self) -> Whereabouts {
-        #[cfg(unix)]
-        {
-            pc_core::anchored::locate(
-                &self.dir,
-                &self.name,
-                self.obj,
-                Some(&self.recorded),
-                self.file.as_ref(),
-            )
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (&self.name, self.obj, &self.recorded, &self.file);
-            Whereabouts::uncertain(None, "unsupported")
-        }
+        pc_core::anchored::locate(
+            &self.dir,
+            &self.name,
+            self.obj,
+            Some(&self.recorded),
+            self.file.as_ref(),
+        )
     }
 }
 
@@ -507,15 +573,11 @@ impl std::error::Error for Unmoved {}
 /// before the move is recorded (el-lvtmk R4), because by then further
 /// renames of the same operation, and other programs, have had their turn.
 pub(crate) struct Arrived {
-    #[cfg(unix)]
     to: Dir,
-    #[cfg(unix)]
     name: String,
-    #[cfg(unix)]
     from: Dir,
-    #[cfg(unix)]
     from_name: String,
-    #[cfg(unix)]
+    /// The object, still open; on Windows the handle a return renames.
     file: Option<fs::File>,
     dst: PathBuf,
     src: PathBuf,
@@ -534,38 +596,23 @@ impl std::fmt::Debug for Arrived {
 impl Arrived {
     /// Where the moved object is now, proven.
     pub(crate) fn locate(&self) -> Whereabouts {
-        #[cfg(unix)]
-        {
-            pc_core::anchored::locate(
-                &self.to,
-                &self.name,
-                (self.proof.dev, self.proof.ino),
-                Some(&self.dst),
-                self.file.as_ref(),
-            )
-        }
-        #[cfg(not(unix))]
-        Whereabouts::uncertain(None, "unsupported")
+        pc_core::anchored::locate(
+            &self.to,
+            &self.name,
+            (self.proof.dev, self.proof.ino),
+            Some(&self.dst),
+            self.file.as_ref(),
+        )
     }
 
     /// The path it came from still leads to the folder it came from.
     pub(crate) fn origin_holds(&self) -> bool {
-        #[cfg(unix)]
-        {
-            self.from.is_at(parent_of(&self.src))
-        }
-        #[cfg(not(unix))]
-        false
+        self.from.is_at(parent_of(&self.src))
     }
 
     /// Where the folder it came from is now, as the system names it.
     pub(crate) fn origin_now(&self) -> Option<PathBuf> {
-        #[cfg(unix)]
-        {
-            self.from.current_path()
-        }
-        #[cfg(not(unix))]
-        None
+        self.from.current_path()
     }
 
     pub(crate) fn proof(&self) -> &Proof {
@@ -578,56 +625,43 @@ impl Arrived {
     /// object this move carried is put back; if the name it arrived under
     /// bears anything else by now, nothing is renamed.
     pub(crate) fn give_back(&self) -> std::result::Result<(), String> {
-        #[cfg(unix)]
-        {
-            let obj = (self.proof.dev, self.proof.ino);
-            match self.to.stat_at(&self.name) {
-                Ok((now, _)) if now == obj => {}
-                Ok(_) => {
-                    return Err(pc_core::tr!(
-                        "под именем, куда он перенесён, уже другой объект",
-                        "another object bears the name it was moved to"
-                    )
-                    .to_string())
-                }
-                Err(e) => return Err(e.to_string()),
+        let obj = (self.proof.dev, self.proof.ino);
+        match self.to.stat_at(&self.name) {
+            Ok((now, _)) if now == obj => {}
+            Ok(_) => {
+                return Err(pc_core::tr!(
+                    "под именем, куда он перенесён, уже другой объект",
+                    "another object bears the name it was moved to"
+                )
+                .to_string())
             }
-            let (a, b) = (
-                cstr(&self.name).map_err(|e| e.to_string())?,
-                cstr(&self.from_name).map_err(|e| e.to_string())?,
-            );
-            let back =
-                pc_core::disk::rename_no_replace_at(self.to.file(), &a, self.from.file(), &b);
-            #[cfg(any(test, feature = "test-seams"))]
-            let _ =
-                crate::race::fire_syscall(crate::race::Syscall::AfterReturn, &self.src, &self.dst);
-            back.map_err(|e| crate::rename_error(e, &self.dst, &self.src).to_string())
+            Err(e) => return Err(e.to_string()),
         }
-        #[cfg(not(unix))]
-        Err("unsupported".into())
+        let back = rename_back(
+            &self.to,
+            &self.name,
+            self.file.as_ref(),
+            &self.from,
+            &self.from_name,
+        );
+        #[cfg(any(test, feature = "test-seams"))]
+        let _ = crate::race::fire_syscall(crate::race::Syscall::AfterReturn, &self.src, &self.dst);
+        back.map_err(|e| crate::rename_error(e, &self.dst, &self.src).to_string())
     }
 
     /// Where it is now, proven: on the side it was last renamed to.
     pub(crate) fn where_now(&self, returned: bool) -> Whereabouts {
-        #[cfg(unix)]
-        {
-            let obj = (self.proof.dev, self.proof.ino);
-            if returned {
-                pc_core::anchored::locate(
-                    &self.from,
-                    &self.from_name,
-                    obj,
-                    Some(&self.src),
-                    self.file.as_ref(),
-                )
-            } else {
-                self.locate()
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = returned;
-            Whereabouts::uncertain(None, "unsupported")
+        let obj = (self.proof.dev, self.proof.ino);
+        if returned {
+            pc_core::anchored::locate(
+                &self.from,
+                &self.from_name,
+                obj,
+                Some(&self.src),
+                self.file.as_ref(),
+            )
+        } else {
+            self.locate()
         }
     }
 
@@ -636,7 +670,6 @@ impl Arrived {
     }
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
 fn parent_of(p: &Path) -> &Path {
     match p.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
@@ -655,7 +688,6 @@ fn parent_of(p: &Path) -> &Path {
 /// object is named where it was proven to be after that.
 pub(crate) fn rename_bound(source: &Held, dst: &Path, keepers: &[&Held]) -> Result<Arrived> {
     crate::check_exclusive_rename(dst)?;
-    #[cfg(unix)]
     {
         let (entry, file, expect): (&Entry, Option<&fs::File>, Proof) =
             (&source.entry, source.file.as_ref(), source.proof.clone());
@@ -700,7 +732,7 @@ pub(crate) fn rename_bound(source: &Held, dst: &Path, keepers: &[&Held]) -> Resu
                         bail!("{}", entry.differs(why))
                     }
                 }
-                let held = pc_core::anchored::ident_of(&f.metadata()?);
+                let held = pc_core::anchored::ident_of_file(f)?;
                 match entry.dir.stat_at(&entry.name) {
                     Ok((now, _)) if now == held => {}
                     Ok(_) => bail!("{}", entry.differs("another object")),
@@ -731,8 +763,7 @@ pub(crate) fn rename_bound(source: &Held, dst: &Path, keepers: &[&Held]) -> Resu
         crate::race::fire_syscall(crate::race::Syscall::Before, src, dst)
             .map_err(|e| crate::rename_error(e, src, dst))?;
 
-        let (a, b) = (cstr(&entry.name)?, cstr(&to.name)?);
-        pc_core::disk::rename_no_replace_at(entry.dir.file(), &a, to.dir.file(), &b)
+        rename_back(&entry.dir, &entry.name, file, &to.dir, &to.name)
             .map_err(|e| crate::rename_error(e, src, dst))?;
 
         #[cfg(any(test, feature = "test-seams"))]
@@ -765,7 +796,7 @@ pub(crate) fn rename_bound(source: &Held, dst: &Path, keepers: &[&Held]) -> Resu
                 why: (*w).to_string(),
             },
         };
-        let back = pc_core::disk::rename_no_replace_at(to.dir.file(), &b, entry.dir.file(), &a);
+        let back = rename_back(&to.dir, &to.name, file, &entry.dir, &entry.name);
 
         #[cfg(any(test, feature = "test-seams"))]
         let _ = crate::race::fire_syscall(crate::race::Syscall::AfterReturn, src, dst);
@@ -898,10 +929,38 @@ pub(crate) fn rename_bound(source: &Held, dst: &Path, keepers: &[&Held]) -> Resu
         }
         .into())
     }
-    #[cfg(not(unix))]
+}
+
+/// One rename of a bound move, never replacing anything: from the name
+/// `from` in the held folder `a` to the name `to` in the held folder `b`.
+///
+/// On Unix by name (`renameat` with no-replace), relative to the folders
+/// held. On Windows the object open as `held` is renamed through its own
+/// handle into `b`: what moves is that object whatever bears its name, and
+/// `from` only names it for the words.
+fn rename_back(
+    a: &Dir,
+    from: &str,
+    held: Option<&fs::File>,
+    b: &Dir,
+    to: &str,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
     {
-        let _ = (source, keepers);
-        bail!("unsupported")
+        let _ = held;
+        let (from, to) = (cstr(from)?, cstr(to)?);
+        pc_core::disk::rename_no_replace_at(a.file(), &from, b.file(), &to)
+    }
+    #[cfg(windows)]
+    {
+        let _ = (a, from);
+        let held = held.ok_or_else(|| {
+            std::io::Error::other(pc_core::tr!(
+                "объект не удерживается",
+                "the object is not held"
+            ))
+        })?;
+        pc_core::anchored::rename_into(held, b, to)
     }
 }
 
@@ -926,7 +985,6 @@ pub(crate) fn rename_bound(source: &Held, dst: &Path, keepers: &[&Held]) -> Resu
 /// Before the rename and after it, the recorded path is asked where it
 /// leads now; if not to the folder held, the move is refused, the file goes
 /// back, and if it cannot, the place it is actually kept is named.
-#[cfg(unix)]
 struct Destination {
     dir: Dir,
     name: String,
@@ -934,7 +992,6 @@ struct Destination {
     parent: PathBuf,
 }
 
-#[cfg(unix)]
 impl Destination {
     fn open(dst: &Path) -> Result<Destination> {
         let name = dst
@@ -980,12 +1037,12 @@ impl Destination {
                 parent.display()
             ))
         };
-        let mut dir = Dir::open_following(at).map_err(cannot_create)?;
         let below = if at == Path::new(".") && parent.is_relative() {
             parent.as_path()
         } else {
             parent.strip_prefix(at).unwrap_or(Path::new(""))
         };
+        let mut names = Vec::new();
         for part in below.components() {
             let std::path::Component::Normal(n) = part else {
                 if part == std::path::Component::CurDir {
@@ -1000,24 +1057,47 @@ impl Destination {
                     )
                 );
             };
-            let n = n.to_str().ok_or_else(|| {
+            names.push(n.to_str().ok_or_else(|| {
                 anyhow!(pc_core::tf!(
                     "не имя папки: {0}",
                     "not a folder name: {0}",
                     parent.display()
                 ))
-            })?;
-            dir = match dir.open_dir(n) {
+            })?);
+        }
+        // The folder the move lands in is held like the one it leaves
+        // ([`hold_folder`]); the folders above it, only as a way there.
+        let in_use = |e: std::io::Error, at: &Path| {
+            if crate::in_use(&e) {
+                anyhow!("{}", crate::in_use_text(at))
+            } else {
+                cannot_create(e)
+            }
+        };
+        let mut dir = if names.is_empty() {
+            hold_folder(at).map_err(|e| in_use(e, at))?
+        } else {
+            Dir::open_following(at).map_err(cannot_create)?
+        };
+        for (i, n) in names.iter().enumerate() {
+            let last = i + 1 == names.len();
+            dir = match sub(&dir, n, last, false) {
                 Ok(d) => d,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => match dir.mkdir(n) {
-                    Ok(d) => d,
-                    // Someone else made it meanwhile: used, but only as a
-                    // real folder — it is opened without following.
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        dir.open_dir(n).map_err(|e| not_ours(&dir, n, e))?
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    match sub(&dir, n, last, true) {
+                        Ok(d) => d,
+                        // Someone else made it meanwhile: used, but only as a
+                        // real folder — it is opened without following.
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                            sub(&dir, n, last, false).map_err(|e| not_ours(&dir, n, e))?
+                        }
+                        Err(e) if crate::in_use(&e) => {
+                            return Err(in_use(e, &dir.join(n)));
+                        }
+                        Err(e) => return Err(cannot_create(e)),
                     }
-                    Err(e) => return Err(cannot_create(e)),
-                },
+                }
+                Err(e) if crate::in_use(&e) => return Err(in_use(e, &dir.join(n))),
                 Err(e) => return Err(not_ours(&dir, n, e)),
             };
         }
@@ -1026,27 +1106,35 @@ impl Destination {
 
     /// The recorded folder path still leads to the folder held.
     fn holds(&self) -> bool {
-        match (fs::metadata(&self.parent), self.dir.ident()) {
-            (Ok(now), Ok(held)) => pc_core::anchored::ident_of(&now) == held,
-            _ => false,
-        }
+        self.dir.is_at(&self.parent)
     }
 
     /// What bears the name in the folder held, compared with the evidence;
     /// and its own evidence, for the record.
     fn arrived(&self, expect: &Proof) -> (Verdict, Option<Proof>) {
-        let Ok((_, mode)) = self.dir.stat_at(&self.name) else {
+        let Ok((_, kind)) = kind_at(&self.dir, &self.name) else {
             return (Verdict::Unprovable("nothing bears the name"), None);
         };
-        if mode & 0o170_000 == 0o120_000 {
-            return (Verdict::Differs("another object"), None);
-        }
-        match self.dir.open_file(&self.name, false) {
-            Ok(f) => {
-                let found = f.metadata().ok().and_then(|m| Proof::of(&m));
-                (expect.check_file(&f), found)
+        #[cfg(unix)]
+        {
+            if kind == Kind::Link {
+                return (Verdict::Differs("another object"), None);
             }
-            Err(_) => (Verdict::Unprovable("it can no longer be opened"), None),
+            match self.dir.open_file(&self.name, false) {
+                Ok(f) => (expect.check_file(&f), Proof::of_file(&f)),
+                Err(_) => (Verdict::Unprovable("it can no longer be opened"), None),
+            }
+        }
+        // Read as itself through the folder's handle: a link or junction
+        // is its own object here, and the comparison says whether it is
+        // the one checked.
+        #[cfg(windows)]
+        {
+            let _ = kind;
+            match Proof::at(&self.dir, &self.name) {
+                Some(found) => (expect.verify(&found, None), Some(found)),
+                None => (Verdict::Unprovable("it can no longer be opened"), None),
+            }
         }
     }
 
@@ -1060,18 +1148,36 @@ impl Destination {
     }
 }
 
+/// One folder below `dir` on the way to a destination: opened, or created
+/// (`create`), without following anything. The last one, the folder the
+/// move lands in, is held on Windows without `FILE_SHARE_DELETE`
+/// ([`hold_folder`]).
+fn sub(dir: &Dir, name: &str, last: bool, create: bool) -> std::io::Result<Dir> {
+    #[cfg(windows)]
+    if last {
+        return if create {
+            dir.mkdir_locked(name)
+        } else {
+            dir.open_dir_locked(name)
+        };
+    }
+    let _ = last;
+    if create {
+        dir.mkdir(name)
+    } else {
+        dir.open_dir(name)
+    }
+}
+
 /// A component of the destination that cannot be opened as a real folder
 /// without following anything: a link or a file in its place is named as
 /// such; any other failure is told as it is.
-#[cfg(unix)]
 fn not_ours(dir: &Dir, name: &str, e: std::io::Error) -> anyhow::Error {
     let at = dir.join(name);
     let at = at.as_path();
-    // `S_IFMT`/`S_IFDIR`, as above.
-    let folder = dir
-        .stat_at(name)
-        .is_ok_and(|(_, mode)| mode & 0o170_000 == 0o040_000);
-    if folder || dir.stat_at(name).is_err() {
+    let found = kind_at(dir, name);
+    let folder = found.as_ref().is_ok_and(|(_, kind)| *kind == Kind::Dir);
+    if folder || found.is_err() {
         return anyhow::Error::new(e).context(pc_core::tf!(
             "не открыть папку {0}; ничего не перенесено",
             "cannot open the folder {0}; nothing moved",
@@ -1087,6 +1193,6 @@ fn not_ours(dir: &Dir, name: &str, e: std::io::Error) -> anyhow::Error {
 }
 
 #[cfg(unix)]
-fn cstr(name: &str) -> Result<std::ffi::CString> {
+fn cstr(name: &str) -> std::io::Result<std::ffi::CString> {
     Ok(std::ffi::CString::new(name)?)
 }

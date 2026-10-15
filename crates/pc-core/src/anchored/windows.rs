@@ -197,6 +197,15 @@ impl Dir {
         )
     }
 
+    /// [`Dir::open_following`], held without `FILE_SHARE_DELETE`: while it
+    /// is open no other program can rename or remove the folder, and one that
+    /// already holds it that way makes this fail (os error 32). The folders
+    /// of a unit being moved are held like this (director decision on
+    /// el-61ar8 §5.4).
+    pub fn open_following_locked(path: &Path) -> io::Result<Dir> {
+        Self::open_with(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE)
+    }
+
     fn open_with(path: &Path, flags: u32, share: u32) -> io::Result<Dir> {
         let fd = std::fs::OpenOptions::new()
             .access_mode(DIR_ACCESS)
@@ -355,6 +364,22 @@ impl Dir {
     }
 
     /// The folder `name` as itself: a link or junction there is refused.
+    /// [`Dir::mkdir`], the new folder held without `FILE_SHARE_DELETE`
+    /// (see [`Dir::open_following_locked`]).
+    pub fn mkdir_locked(&self, name: &str) -> io::Result<Dir> {
+        let fd = self.at(
+            name,
+            DIR_ACCESS,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_CREATE,
+            FILE_DIRECTORY_FILE,
+        )?;
+        Ok(Dir {
+            fd,
+            path: self.path.join(name),
+        })
+    }
+
     pub fn open_dir(&self, name: &str) -> io::Result<Dir> {
         self.open_dir_with(name, SHARE_ALL)
     }

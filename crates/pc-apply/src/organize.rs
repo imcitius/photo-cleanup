@@ -484,6 +484,7 @@ fn sweep_litter(
 /// back is counted from what each undo actually did — entries walked back
 /// whole, entries walked back in part, and files.
 pub fn undo_run(db: &Db, run_id: i64) -> Result<(Tally, Vec<String>)> {
+    crate::not_yet_on_windows(("откат раскладки по папкам", "undoing a reorganisation"))?;
     let entries = db.journal_by_run_op(run_id, "organize")?;
     if entries.is_empty() {
         bail!(

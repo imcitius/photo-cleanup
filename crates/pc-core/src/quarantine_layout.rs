@@ -136,8 +136,7 @@ impl std::error::Error for Refusal {
     }
 }
 
-// Only the Unix layout writer checks entries; on Windows the layout is refused.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn foreign(path: &Path, (ru, en): (&str, &str)) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
@@ -156,19 +155,26 @@ fn foreign(path: &Path, (ru, en): (&str, &str)) -> std::io::Error {
 /// so the note is there for anything that arrives later — and so a reader
 /// finds it whatever order the moves happened in. Call this only once the
 /// move it serves has been admitted: it writes.
+///
+/// The same steps on Windows (el-6s3go, design el-61ar8 §2.4), through the
+/// held folder's handle: the new note is created `FILE_CREATE` and shared
+/// for reading only, and published by renaming *that handle* — so the
+/// temporary name cannot be substituted there at all; an existing note is
+/// extended only if it is a plain NTFS file with one name, owned by this
+/// process's user ([`crate::winfs::owned_by_this_process`]).
 pub fn note(root: &Path, label: &str, mount: &Path) -> Result<(), Refusal> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        unix::note(root, label, &mount.display().to_string())
+        held::note(root, label, &mount.display().to_string())
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (label, mount);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             crate::tf!(
-                "раскладка карантина {0} не пишется: на Windows создание и проверка файлов через удерживаемый каталог ещё не проверены на настоящей системе",
-                "the quarantine layout in {0} is not written: on Windows, creating and checking files through a held folder has not been verified on a real system yet",
+                "раскладка карантина {0} не пишется на этой системе",
+                "the quarantine layout in {0} is not written on this system",
                 root.display()
             ),
         )
@@ -176,12 +182,12 @@ pub fn note(root: &Path, label: &str, mount: &Path) -> Result<(), Refusal> {
     }
 }
 
-#[cfg(unix)]
-mod unix {
+#[cfg(any(unix, windows))]
+mod held {
     use super::*;
     #[cfg(test)]
     use crate::anchored::seam::{self, Stage};
-    use crate::anchored::{ident_of, Dir, Ident};
+    use crate::anchored::{ident_of_file, Dir, Ident};
     use std::io::{self, Read, Seek, Write};
 
     /// Bigger than any note this tool writes by orders of magnitude.
@@ -201,17 +207,8 @@ mod unix {
     fn open_or_create(root: &Path, retained: &mut Vec<Retained>) -> io::Result<Dir> {
         match Dir::open(root) {
             Ok(d) => return Ok(d),
-            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
-                return Err(foreign(root, ("символическая ссылка", "a symbolic link")))
-            }
-            Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => {
-                if std::fs::symlink_metadata(root).is_ok_and(|m| m.file_type().is_symlink()) {
-                    return Err(foreign(root, ("символическая ссылка", "a symbolic link")));
-                }
-                return Err(foreign(root, ("не каталог", "not a folder")));
-            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(not_a_folder(root, e)),
         }
         // Up to the nearest folder that exists; that one may be reached
         // through the system's own links (`/var` on macOS). Everything below
@@ -257,6 +254,39 @@ mod unix {
         Ok(dir)
     }
 
+    /// Why the quarantine folder named by the user cannot be opened as one:
+    /// a link, or not a folder, is said as such; anything else as it is.
+    #[cfg(unix)]
+    fn not_a_folder(root: &Path, e: io::Error) -> io::Error {
+        if e.raw_os_error() == Some(libc::ELOOP)
+            || (e.raw_os_error() == Some(libc::ENOTDIR)
+                && std::fs::symlink_metadata(root).is_ok_and(|m| m.file_type().is_symlink()))
+        {
+            return foreign(root, ("символическая ссылка", "a symbolic link"));
+        }
+        if e.raw_os_error() == Some(libc::ENOTDIR) {
+            return foreign(root, ("не каталог", "not a folder"));
+        }
+        e
+    }
+
+    /// As on Unix: [`Dir::open`] refuses a junction or link as
+    /// `InvalidInput`, a file as `NotADirectory`.
+    #[cfg(windows)]
+    fn not_a_folder(root: &Path, e: io::Error) -> io::Error {
+        match e.kind() {
+            io::ErrorKind::InvalidInput => foreign(
+                root,
+                (
+                    "символическая ссылка или junction",
+                    "a symbolic link or a junction",
+                ),
+            ),
+            io::ErrorKind::NotADirectory => foreign(root, ("не каталог", "not a folder")),
+            _ => e,
+        }
+    }
+
     /// The nearest existing ancestor may be reached through the system's
     /// own links (`/var` on macOS): it is followed on purpose. Everything
     /// below it is created and opened without following.
@@ -278,16 +308,10 @@ mod unix {
                 let disks = Disks::from([(label.to_string(), mount.to_string())]);
                 return create(dir, &disks, retained);
             }
-            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
-                return Err(foreign(&path, ("символическая ссылка", "a symbolic link")))
-            }
-            Err(e) if e.raw_os_error() == Some(libc::EISDIR) => {
-                return Err(foreign(&path, ("не обычный файл", "not a plain file")))
-            }
-            Err(e) => return Err(e),
+            Err(e) => return Err(not_a_note(dir, name, &path, e)),
         };
-        let md = current.metadata()?;
-        admit_existing(&path, &md)?;
+        let own = ident_of_file(&current)?;
+        admit_existing(&path, &current)?;
         let mut raw = String::new();
         current.read_to_string(&mut raw)?;
         let (mut disks, versioned) = match parse(&raw) {
@@ -325,22 +349,49 @@ mod unix {
         disks.insert(label.to_string(), mount.to_string());
         let body = body(&disks)?;
         // Still the object at the name: the one read is the one written.
-        if dir.stat_at(name)?.0 != ident_of(&md) {
+        if dir.stat_at(name)?.0 != own {
             return Err(foreign(
                 &path,
                 ("заменён во время записи", "replaced while being read"),
             ));
         }
-        admit_existing(&path, &current.metadata()?)?;
+        admit_existing(&path, &current)?;
         current.seek(io::SeekFrom::Start(0))?;
         current.write_all(body.as_bytes())?;
         current.set_len(body.len() as u64)?;
         current.sync_all()
     }
 
+    /// Why an existing note cannot be opened for writing: a link, or not a
+    /// plain file, is said as such; anything else as it is.
+    #[cfg(unix)]
+    fn not_a_note(_: &Dir, _: &str, path: &Path, e: io::Error) -> io::Error {
+        match e.raw_os_error() {
+            Some(libc::ELOOP) => foreign(path, ("символическая ссылка", "a symbolic link")),
+            Some(libc::EISDIR) => foreign(path, ("не обычный файл", "not a plain file")),
+            _ => e,
+        }
+    }
+
+    /// On Windows the open refuses a folder, and a link opened as itself is
+    /// "not a plain file"; what bears the name is asked to say which. A note
+    /// another program holds open is refused as it is (os error 32).
+    #[cfg(windows)]
+    fn not_a_note(dir: &Dir, name: &str, path: &Path, e: io::Error) -> io::Error {
+        match dir.entry_at(name) {
+            Ok(entry) if entry.is_link() => {
+                foreign(path, ("символическая ссылка", "a symbolic link"))
+            }
+            Ok(entry) if !entry.is_file() => foreign(path, ("не обычный файл", "not a plain file")),
+            _ => e,
+        }
+    }
+
     /// Provenance of an existing note: a plain file, one name, this user's.
-    fn admit_existing(path: &Path, md: &std::fs::Metadata) -> io::Result<()> {
+    #[cfg(unix)]
+    fn admit_existing(path: &Path, file: &std::fs::File) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
+        let md = file.metadata()?;
         if !md.is_file() {
             return Err(foreign(path, ("не обычный файл", "not a plain file")));
         }
@@ -364,6 +415,43 @@ mod unix {
             ));
         }
         if md.len() > MAX_NOTE {
+            return Err(foreign(
+                path,
+                ("не раскладка карантина", "not a quarantine layout"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The same provenance on Windows, read from the handle: a plain file
+    /// (no link, no cloud placeholder), one name (`NumberOfLinks`), owned by
+    /// this process's user.
+    #[cfg(windows)]
+    fn admit_existing(path: &Path, file: &std::fs::File) -> io::Result<()> {
+        use crate::winfs;
+        if winfs::kind(file)?.0 != winfs::Kind::File {
+            return Err(foreign(path, ("не обычный файл", "not a plain file")));
+        }
+        let standard = winfs::standard(file)?;
+        if standard.NumberOfLinks != 1 {
+            return Err(foreign(
+                path,
+                (
+                    "у файла есть другое имя (жёсткая ссылка)",
+                    "the file has another name (a hard link)",
+                ),
+            ));
+        }
+        if !winfs::owned_by_this_process(file)? {
+            return Err(foreign(
+                path,
+                (
+                    "принадлежит другому пользователю",
+                    "belongs to another user",
+                ),
+            ));
+        }
+        if standard.EndOfFile < 0 || standard.EndOfFile as u64 > MAX_NOTE {
             return Err(foreign(
                 path,
                 ("не раскладка карантина", "not a quarantine layout"),
@@ -396,7 +484,22 @@ mod unix {
         // Failing here grants no ownership of anything: whatever is at the
         // name is not ours, and nothing is cleaned up.
         let mut f = dir.create_new(&tmp, 0o644)?;
-        let own = ident_of(&f.metadata()?);
+        let own = match ident_of_file(&f) {
+            Ok(own) => own,
+            // Created, but this system cannot say which object it is: left
+            // in place, named, and nothing is published.
+            Err(e) => {
+                retained.push(Retained {
+                    path: dir.join(&tmp),
+                    why: crate::tr!(
+                        "временный файл этой операции не опубликован и оставлен на месте: ничего не удаляется",
+                        "this operation's temporary file was not published and is left in place: nothing is removed"
+                    )
+                    .into(),
+                });
+                return Err(e);
+            }
+        };
         let written = (|| {
             f.write_all(body.as_bytes())?;
             #[cfg(test)]
@@ -409,9 +512,9 @@ mod unix {
         }
         #[cfg(test)]
         let published = seam::fire_result(Stage::Publish, &dir.join(&tmp))
-            .and_then(|()| dir.rename_no_replace(&tmp, name));
+            .and_then(|()| publish_new(dir, &f, &tmp, name));
         #[cfg(not(test))]
-        let published = dir.rename_no_replace(&tmp, name);
+        let published = publish_new(dir, &f, &tmp, name);
         if let Err(e) = published {
             retain(dir, &tmp, own, retained);
             return Err(if e.kind() == io::ErrorKind::AlreadyExists {
@@ -431,6 +534,8 @@ mod unix {
         match dir.stat_at(name) {
             Ok((id, _)) if id == own => {
                 // Durability of the name, best effort: the note is in place.
+                // (NTFS journals its metadata; there is no folder flush.)
+                #[cfg(unix)]
                 let _ = dir.sync();
                 Ok(())
             }
@@ -460,6 +565,20 @@ mod unix {
                 ))
             }
         }
+    }
+
+    /// Publish the temporary under `name` without replacing anything. On
+    /// Unix by name (`renameat` with no-replace); on Windows the object this
+    /// call created is renamed through its own handle, which holds it shared
+    /// for reading only — nothing else can take the temporary's place.
+    #[cfg(unix)]
+    fn publish_new(dir: &Dir, _: &std::fs::File, tmp: &str, name: &str) -> io::Result<()> {
+        dir.rename_no_replace(tmp, name)
+    }
+
+    #[cfg(windows)]
+    fn publish_new(dir: &Dir, created: &std::fs::File, _: &str, name: &str) -> io::Result<()> {
+        crate::anchored::rename_into(created, dir, name)
     }
 
     /// The temporary is never removed (user decision 2026-10-04, el-1y8uo
@@ -512,7 +631,7 @@ pub fn origin(disks: &Disks, rest: &Path) -> Option<PathBuf> {
     Some(Path::new(mount).join(tail))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "quarantine_layout_tests.rs"]
 mod tests;
 
