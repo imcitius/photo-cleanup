@@ -98,6 +98,10 @@ fn companions_named(dir: &Path, name: &str) -> Vec<PathBuf> {
 /// the whole unit is refused (director decision on el-61ar8 §5.6). The one
 /// answer for the command line and the web.
 pub fn companion_doubt(path: &Path) -> Option<String> {
+    #[cfg(windows)]
+    if let Some(why) = listing_doubt(path) {
+        return Some(why);
+    }
     let names: Vec<String> = companions(path)
         .iter()
         .filter_map(|p| p.file_name()?.to_str().map(str::to_string))
@@ -122,6 +126,26 @@ pub fn companion_doubt(path: &Path) -> Option<String> {
             .collect::<Vec<_>>()
             .join(", ")
     ))
+}
+
+/// Windows: the companions are found by listing the folder, so a listing
+/// that fails — the folder, or any one entry in it — means a sidecar may
+/// be missed and left behind as an orphan. The unit is refused rather than
+/// moved without it.
+#[cfg(windows)]
+fn listing_doubt(path: &Path) -> Option<String> {
+    let dir = path.parent()?;
+    let unreadable = match fs::read_dir(dir) {
+        Ok(listing) => listing.into_iter().any(|e| e.is_err()),
+        Err(_) => true,
+    };
+    unreadable.then(|| {
+        pc_core::tf!(
+            "папку {0} не удалось прочитать целиком, и неизвестно, все ли спутники кадра найдены; кадр со спутниками не переносится, ничего не перенесено",
+            "the folder {0} could not be listed in full, and whether every companion of the frame was found is not known; the frame and its companions are not moved, nothing moved",
+            dir.display()
+        )
+    })
 }
 
 /// One sidecar of a photograph about to move: where it lands, and whether

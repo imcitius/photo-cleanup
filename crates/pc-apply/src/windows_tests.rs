@@ -448,6 +448,79 @@ fn a_case_sensitive_folder_with_two_spellings_of_a_sidecar_refuses_the_unit() {
     assert_eq!(rows(&a.db), 0);
 }
 
+/// `icacls`, failing the test loudly like [`fsutil`].
+fn icacls(args: &[&std::ffi::OsStr]) {
+    let out = Command::new("icacls").args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "icacls {args:?}: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A folder the current user may not list, given back on drop so the
+/// temporary folder can be cleaned up.
+struct Unlistable {
+    dir: PathBuf,
+    user: String,
+}
+
+impl Unlistable {
+    fn deny(dir: &Path) -> Unlistable {
+        let out = Command::new("whoami").output().unwrap();
+        assert!(out.status.success());
+        let user = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        icacls(&[
+            dir.as_os_str(),
+            "/deny".as_ref(),
+            format!("{user}:(RD)").as_ref(),
+        ]);
+        Unlistable {
+            dir: dir.to_path_buf(),
+            user,
+        }
+    }
+}
+
+impl Drop for Unlistable {
+    fn drop(&mut self) {
+        let _ = Command::new("icacls")
+            .arg(&self.dir)
+            .args(["/remove:d", &self.user])
+            .output();
+    }
+}
+
+/// Companions are found by listing the folder. A folder that cannot be
+/// listed may hide a sidecar, so the frame is refused rather than moved
+/// without it — and nothing is journaled or moved.
+#[test]
+fn a_folder_that_cannot_be_listed_keeps_the_frame_and_its_sidecars_home() {
+    let a = archive();
+    let dir = a.dir.join("locked");
+    fs::create_dir_all(&dir).unwrap();
+    let photo = dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 7311").unwrap();
+    fs::write(dir.join("frame.xmp"), b"edits 7311").unwrap();
+    let c = candidate(&a.db, a.run, &photo);
+    let denied = Unlistable::deny(&dir);
+    assert!(fs::read_dir(&dir).is_err(), "the folder is still listable");
+
+    let why = crate::files::companion_doubt(&photo).expect("refused");
+    assert!(why.contains("could not be listed in full"), "{why}");
+    // Whether the refusal comes from the listing or from holding the
+    // folder first, nothing may move.
+    if let Ok(report) = crate::apply(&a.db, a.run, &[c], None) {
+        assert_eq!(report.done.frames, 0);
+        assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
+    }
+    drop(denied);
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 7311");
+    assert_eq!(fs::read(dir.join("frame.xmp")).unwrap(), b"edits 7311");
+    assert_eq!(rows(&a.db), 0);
+}
+
 /// In an ordinary folder a sidecar spelled `FRAME.XMP` travels and comes
 /// back under exactly that spelling.
 #[test]

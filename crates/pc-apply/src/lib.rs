@@ -311,8 +311,18 @@ fn same_volume(src: &Path, dst: &Path) -> Result<()> {
         serial(src.parent().unwrap_or(src)),
         serial(dst.parent().unwrap_or(dst)),
     ) else {
-        // Unreadable: the move itself reads it again, and refuses.
-        return Ok(());
+        // Unreadable: which volume either side is on is not known, so the
+        // move is refused before anything moves rather than left to the
+        // rename to discover.
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "не удалось узнать, на одном ли томе {0} и карантин {1}; ничего не перенесено",
+                "whether {0} and the quarantine {1} are on one volume could not be read; nothing moved",
+                src.display(),
+                dst.display()
+            )
+        );
     };
     if a != b {
         bail!(
