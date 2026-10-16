@@ -451,6 +451,7 @@ fn listing(items: &[Item]) -> String {
 fn walk_back(
     db: &Db,
     id: i64,
+    op: &str,
     phase: &str,
     pairs: &[Pair],
 ) -> Result<(Vec<crate::bound::Arrived>, Vec<Moved>)> {
@@ -481,6 +482,34 @@ fn walk_back(
         .collect();
     if moving.is_empty() {
         return Ok((Vec::new(), Vec::new()));
+    }
+    // A photograph and its sidecars come back as plain files only, the rule
+    // they left by ([`files::not_a_plain_file`]): evidence that names a link,
+    // a folder or another object in a file entry is not walked back, and
+    // nothing of the unit moves. A gathered folder of previews (`quarantine`)
+    // is a folder by its nature. A row from before evidence was recorded is
+    // bound to what it finds and, through it, to the same arrival check.
+    if op != "quarantine" {
+        if let Some(p) = moving
+            .iter()
+            .find(|p| p.look.proof.is_some() && !files::plain_proof(p.look.proof.as_ref()))
+        {
+            let why = pc_core::tf!(
+                "{0}: ничего не перенесено — {1} записан не как обычный файл, а возвращаются только обычные файлы; всё остаётся на месте: {2}",
+                "{0}: nothing was moved — {1} was recorded as something other than a plain file, and only plain files come back; everything stays where it is: {2}",
+                phase,
+                p.look.dst,
+                listing(&items)
+            );
+            return Err(told(
+                db,
+                id,
+                phase,
+                "refused",
+                &why,
+                anyhow::anyhow!("{why}"),
+            ));
+        }
     }
     // The folder each member comes back to has to be the folder it left.
     // Recorded at the move, its identity decides (director decision after
@@ -733,7 +762,7 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
         adopt_held_evidence(db, journal_id, &mut list)?;
     }
     let pairs: Vec<Pair> = list.into_iter().map(|m| pair_of(&entry, m)).collect();
-    let (arrived, came) = walk_back(db, journal_id, "undo", &pairs)?;
+    let (arrived, came) = walk_back(db, journal_id, &entry.op, "undo", &pairs)?;
     let mut done = Tally {
         files_back: came.len() as u64,
         ..Default::default()
@@ -903,7 +932,7 @@ pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
         let pairs: Vec<Pair> = list.into_iter().map(|m| pair_of(&entry, m)).collect();
         (entry, pairs)
     };
-    let (arrived, returned) = walk_back(db, journal_id, "reconcile", &pairs)?;
+    let (arrived, returned) = walk_back(db, journal_id, &entry.op, "reconcile", &pairs)?;
     let mut done = Tally {
         files_back: returned.len() as u64,
         ..Default::default()

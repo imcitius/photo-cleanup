@@ -1272,12 +1272,15 @@ impl Destination {
                 Err(_) => (Verdict::Unprovable("it can no longer be opened"), None),
             }
         }
-        // Read as itself through the folder's handle: a link or junction
-        // is its own object here, and the comparison says whether it is
-        // the one checked.
+        // Read as itself through the folder's handle. A link or junction
+        // that arrives is never what a move is proven by, as on Unix: every
+        // route moves plain files and real folders only (el-4hyy6 B1), and
+        // a link with the identity it had at its check would otherwise pass.
         #[cfg(windows)]
         {
-            let _ = kind;
+            if kind == Kind::Link {
+                return (Verdict::Differs("another object"), None);
+            }
             match Proof::at(&self.dir, &self.name) {
                 Some(found) => (expect.verify(&found, None), Some(found)),
                 None => (Verdict::Unprovable("it can no longer be opened"), None),

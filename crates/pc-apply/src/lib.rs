@@ -849,7 +849,7 @@ pub fn adopt_orphan(db: &Db, run_id: i64, src: &str, dst: &str) -> Result<Tally>
     // el-1nx1u B1 for any member that is not a plain file. It stays where it
     // is, and nothing is written. The move is bound to this evidence, so a
     // file replaced by anything else after this look is refused there.
-    if proof.as_ref().map(|p| p.kind) != Some(pc_core::proof::Kind::File) {
+    if !files::plain_proof(proof.as_ref()) {
         bail!(
             "{}",
             pc_core::tf!(
