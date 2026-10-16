@@ -73,7 +73,18 @@ photo-cleanup-desktop.exe.
   - перенос выбранных копий в карантин — скрытую папку
     .photo-cleanup-quarantine рядом с файлом или в заданной папке на том
     же диске; снимок переезжает вместе со своими .xmp/.aae;
-  - откат (возврат) завершённого переноса на прежнее место.
+  - откат (возврат) завершённого переноса на прежнее место;
+  - раскладка по папкам (по датам и событиям) вместе с .xmp/.aae и её
+    откат. Служебные файлы (.DS_Store, ._*), оставшиеся одни в опустевшей
+    папке, переносятся в карантин рядом, а не удаляются; сама папка
+    остаётся;
+  - сверка после сбоя: если программу закрыли или она упала посреди
+    переноса, запись остаётся незавершённой, и сверка возвращает файл на
+    место — только если это тот самый файл (программа узнаёт его по
+    номеру файла NTFS, записанному до переноса; копия с теми же байтами и
+    временем на его месте не возвращается);
+  - возврат из карантина файлов, о которых журнал не знает (сирот); такой
+    возврат тоже записывается в журнал и откатывается.
 Перед каждым переносом файл перепроверяется; если он изменился, перенос
 отказывает, и файл остаётся на месте.
 
@@ -95,14 +106,15 @@ photo-cleanup-desktop.exe.
     месте;
   - диск не NTFS (флешки и карты с exFAT или FAT, ReFS), а также файлы
     OneDrive «только в облаке»;
-  - карантин на другом диске, чем сами снимки;
-  - сверка после сбоя (прерванная операция), возврат файлов, о которых
-    журнал не знает, и раскладка по папкам.
-Если что-то из этого нужно — сообщите, это будет включено отдельно.
+  - карантин или новая папка раскладки на другом диске, чем сами снимки;
+  - сверка после сбоя, если на месте файла лежит не тот самый файл (его
+    подменили или переложили): ничего не возвращается, запись остаётся
+    незавершённой и называет место; верните тот файл на это место и
+    повторите сверку.
 
 Для пробы возьмите копию небольшой папки со снимками, а не весь архив.
-Проверьте: перенос в карантин и откат возвращают всё на место (вместе с
-.xmp), а каждый отказ понятно объясняет, что не так.
+Проверьте: перенос в карантин, раскладка и их откат возвращают всё на
+место (вместе с .xmp), а каждый отказ понятно объясняет, что не так.
 
 Что сообщить
 ------------
@@ -138,11 +150,19 @@ Windows. Not a release: unsigned, nothing is installed.
 - On NTFS drives, moving the chosen copies into quarantine (a hidden
   .photo-cleanup-quarantine folder beside them, or a folder you set on the
   same drive), together with their .xmp/.aae, works, and so does undoing a
-  finished move. Each file is checked again right before it moves.
+  finished move. So do sorting into folders and its undo (service files
+  such as .DS_Store left alone in an emptied folder are moved into
+  quarantine beside it, never deleted; the folder stays), recovery after a
+  crash (a file comes back only if it is the very file that moved, known by
+  its NTFS file number recorded before the move; a copy with the same bytes
+  and times in its place is not taken), and returning files the journal
+  does not know (orphans), which is journaled and can be undone. Each file
+  is checked again right before it moves.
 - Refused with a reason, nothing moved (expected, not a bug): a file open
   in another program (Lightroom, an antivirus, Explorer's preview) - close
   it and try again; drives that are not NTFS (exFAT/FAT cards and sticks,
-  ReFS) and OneDrive online-only files; a quarantine on another drive;
+  ReFS) and OneDrive online-only files; a quarantine, or a folder to sort
+  into, on another drive;
   a link, junction or folder bearing the name of a photo's .xmp/.aae (the
   photo and its companions stay; replace the link with the file itself);
   an undo whose original folder is no longer the very folder the files
@@ -151,7 +171,9 @@ Windows. Not a release: unsigned, nothing is installed.
   records which folder it was at the move and returns files only to that
   folder; everything stays in quarantine and can be undone once that
   folder is back in its place);
-  recovery after a crash, returning files the journal does not know, and
-  sorting into folders. Try it on a copy of a small folder, not your whole
-  archive, and check that undo brings everything back.
+  recovery after a crash when what lies in the file's place is not that
+  very file (nothing comes back; the entry stays open and names the place;
+  put that file back there and recover again). Try it on a copy of a small
+  folder, not your whole archive, and check that undo brings everything
+  back.
 - photo-cleanup.exe is the command-line tool; not needed for this test.

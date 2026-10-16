@@ -202,9 +202,12 @@ On NTFS, moving copies into quarantine and undoing a finished move work as
 everywhere else: each file is held from its last check to its move and renamed
 through that handle, never over anything. A file another program has open
 (Lightroom, an antivirus, a preview) is refused until it is closed; FAT, exFAT
-and ReFS volumes are refused. Recovering an interrupted run, returning orphans
-and reorganising into folders are refused on Windows for now, with the reason.
-Nothing is ever deleted there: `purge` refuses.
+and ReFS volumes are refused. Reorganising into folders and its undo,
+recovering an interrupted run, and returning orphans work there too, through
+the same move: an interrupted run's file comes back only if its NTFS file ID is
+the one recorded before it moved. Nothing is ever deleted there: `purge`
+refuses, and the service files a reorganisation sweeps are moved into
+quarantine, as everywhere.
 
 A note on what Windows cannot tell us cheaply. Unix names a filesystem with a
 device number; while indexing, Windows uses the drive letter instead. That is
