@@ -402,8 +402,25 @@ fn reviewer_missing_purge_confirmation_leaves_the_fixture_intact() {
     cli.run(&["scan", "--root", cli.archive.to_str().unwrap()]);
     let at = moved_by_an_earlier_version(&cli, "Cat Previews.lrdata").join("cache.lrprev");
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    let out = cli.said(&["derived", "purge", "--older-than", "0d"]);
-    assert!(out.contains("cannot be undone"), "{out}");
+    // Windows deletes nothing: the command refuses before listing anything
+    // (`windows_never_purges_from_the_command_line`).
+    #[cfg(unix)]
+    {
+        let out = cli.said(&["derived", "purge", "--older-than", "0d"]);
+        assert!(out.contains("cannot be undone"), "{out}");
+    }
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup"))
+            .arg("--db")
+            .arg(&cli.db)
+            .args(["derived", "purge", "--older-than", "0d"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(said.contains("deletes nothing"), "{said}");
+    }
     assert_eq!(std::fs::read(at).unwrap(), b"synthetic cache");
 }
 

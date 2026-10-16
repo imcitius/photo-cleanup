@@ -712,6 +712,22 @@ pub(crate) fn rename_bound(source: &Held, dst: &Path, keepers: &[&Held]) -> Resu
         // The destination folder is opened — created where missing — once,
         // here, and held to the end; see [`Destination`].
         let to = Destination::open(dst)?;
+        // Never onto its own name: Windows accepts renaming an object onto
+        // the name it already bears as done, and the journal would record a
+        // move that never happened (el-6s3go). Names compare without regard
+        // to case — as the folder may.
+        if to.dir.ident().ok() == entry.dir.ident().ok()
+            && to.name.to_lowercase() == entry.name.to_lowercase()
+        {
+            bail!(
+                "{}",
+                pc_core::tf!(
+                    "{0} — место назначения и есть сам файл; ничего не перенесено",
+                    "{0} — the destination is the file itself; nothing moved",
+                    src.display()
+                )
+            );
+        }
 
         #[cfg(any(test, feature = "test-seams"))]
         crate::race::fire(src, dst).map_err(|e| crate::rename_error(e, src, dst))?;

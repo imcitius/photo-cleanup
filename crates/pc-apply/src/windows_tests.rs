@@ -756,16 +756,43 @@ fn a_gathered_quarantine_is_written_and_walked_back() {
 
     let report = crate::apply(&a.db, a.run, &[c], Some(&root)).unwrap();
     assert_eq!(report.done.frames, 1, "{:?}", report.refused);
+    // It really left: once the destination was built from the whole source
+    // path, and the photograph was "moved" onto its own name.
+    assert!(!photo.exists(), "{}", photo.display());
     let home = root.join(pc_core::QUARANTINE_DIR);
     let disks = pc_core::quarantine_layout::read(&home);
     assert_eq!(disks.len(), 1, "{disks:?}");
 
     let entry = a.db.journal_quarantined(None).unwrap().pop().unwrap();
-    assert!(entry
-        .dst
-        .as_deref()
-        .unwrap()
-        .starts_with(&*home.to_string_lossy()));
+    let dst = PathBuf::from(entry.dst.as_deref().unwrap());
+    assert!(dst.starts_with(&home), "{}", dst.display());
+    assert_eq!(fs::read(&dst).unwrap(), b"raw frame 6024");
     crate::undo(&a.db, entry.id).unwrap();
     assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+}
+
+/// The paths of the index and of the mount differ in spelling on Windows —
+/// verbatim `\\?\C:\` from `canonicalize`, `c:` in lower case — and the
+/// gathered quarantine still mirrors the path below the drive, never the
+/// whole source path (el-6s3go: that once made the destination the source
+/// itself).
+#[test]
+fn a_gathered_destination_mirrors_the_path_below_the_drive_however_spelled() {
+    let a = archive();
+    let photo = a.dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    let root = a.root.join("gathered");
+    let canonical = photo.canonicalize().unwrap();
+    let spelled = photo.display().to_string();
+    let lower = format!("{}{}", spelled[..1].to_lowercase(), &spelled[1..]);
+    for src in [spelled.clone(), canonical.display().to_string(), lower] {
+        let dst = crate::quarantine_dest_for(&src, 0, &a.db, Some(&root)).unwrap();
+        assert!(
+            dst.starts_with(root.join(pc_core::QUARANTINE_DIR)),
+            "{src}: {}",
+            dst.display()
+        );
+        assert_ne!(dst, PathBuf::from(&src));
+        assert!(dst.ends_with(r"archive\frame.arw"), "{}", dst.display());
+    }
 }

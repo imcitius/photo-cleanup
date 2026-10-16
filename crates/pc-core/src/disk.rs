@@ -29,9 +29,62 @@ pub struct Disk {
 impl Disk {
     /// Path of `src` relative to this disk's mount point, used to mirror the
     /// original layout inside the quarantine tree.
+    ///
+    /// `src` itself, unchanged, when it is not below the mount point — a
+    /// caller that joins it onto a quarantine root must refuse an absolute
+    /// answer, or the join yields `src` again.
     pub fn relative<'a>(&self, src: &'a Path) -> &'a Path {
+        #[cfg(windows)]
+        if let Some(rel) = windows_relative(&self.mount, src) {
+            return rel;
+        }
         src.strip_prefix(&self.mount).unwrap_or(src)
     }
+}
+
+/// Windows: `src` below `mount`, whatever their spellings. The mount comes
+/// from `canonicalize`, which hands back the verbatim `\\?\C:\`; the index
+/// holds `C:\…`, or a verbatim path where a root was named that way, with
+/// the drive letter in either case. A plain `strip_prefix` then fails, and a
+/// gathered quarantine's destination was built from the whole absolute
+/// source path — `join` replaced the quarantine root with it, and the "move"
+/// renamed the photograph onto itself (el-6s3go, seen on the CI runner).
+/// The prefix (drive or share, verbatim or not) is compared without regard
+/// to case, and so are the folder names of the mount (NTFS ignores case).
+#[cfg(windows)]
+fn windows_relative<'a>(mount: &Path, src: &'a Path) -> Option<&'a Path> {
+    use std::path::{Component, Prefix};
+    fn prefix(c: Option<Component<'_>>) -> Option<String> {
+        let Some(Component::Prefix(p)) = c else {
+            return None;
+        };
+        Some(match p.kind() {
+            Prefix::Disk(d) | Prefix::VerbatimDisk(d) => {
+                format!("{}:", (d as char).to_string().to_lowercase())
+            }
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => format!(
+                r"\\{}\{}",
+                server.to_string_lossy().to_lowercase(),
+                share.to_string_lossy().to_lowercase()
+            ),
+            _ => return None,
+        })
+    }
+    let (mut m, mut s) = (mount.components(), src.components());
+    if prefix(m.next())? != prefix(s.next())? {
+        return None;
+    }
+    if m.next() != Some(Component::RootDir) || s.next() != Some(Component::RootDir) {
+        return None;
+    }
+    for part in m {
+        match (part, s.next()) {
+            (Component::Normal(a), Some(Component::Normal(b)))
+                if a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase() => {}
+            _ => return None,
+        }
+    }
+    Some(s.as_path())
 }
 
 /// Highest ancestor of `path` that still lives on the same filesystem.

@@ -383,7 +383,9 @@ fn every_forward_outcome_has_a_structured_event() {
         .find(|e| e.phase == "forward" && e.kind == "done")
         .unwrap_or_else(|| panic!("no forward/done event: {ev:?}"));
     let data = done.data.as_deref().expect("structured data");
-    assert!(data.contains(&src.display().to_string()), "{data}");
+    // As JSON spells it: a Windows path's backslashes come doubled.
+    let spelled = src.display().to_string().replace('\\', "\\\\");
+    assert!(data.contains(&spelled), "{data}");
     assert!(!ev.iter().any(|e| e.kind == "note"), "{ev:?}");
 
     // Refusal: the destination is taken at the move.

@@ -211,27 +211,32 @@ fn layout_failure_does_not_remove_a_substituted_directory() {
 fn an_existing_layout_is_admitted_by_its_schema_and_never_silently_rewritten() {
     let (_t, root) = fresh();
     let layout = root.join(crate::QUARANTINE_LAYOUT);
-    let old = br#"{"disk1": "/mnt/disk1"}"#;
+    // A mount point is an absolute path of this system: the earlier format
+    // is only believed when it says one.
+    let (disk1, disk2) = if cfg!(windows) {
+        (r"D:\", r"E:\")
+    } else {
+        ("/mnt/disk1", "/mnt/disk2")
+    };
+    let old = format!(r#"{{"disk1": {}}}"#, serde_json::to_string(disk1).unwrap());
+    let old = old.as_bytes();
     fs::write(&layout, old).unwrap();
-    note(&root, "disk1", Path::new("/mnt/disk1")).unwrap();
+    note(&root, "disk1", Path::new(disk1)).unwrap();
     assert_eq!(fs::read(&layout).unwrap(), old);
-    assert_eq!(
-        read(&root).get("disk1").map(String::as_str),
-        Some("/mnt/disk1")
-    );
-    assert!(note(&root, "disk2", Path::new("/mnt/disk2")).is_err());
+    assert_eq!(read(&root).get("disk1").map(String::as_str), Some(disk1));
+    assert!(note(&root, "disk2", Path::new(disk2)).is_err());
     assert_eq!(fs::read(&layout).unwrap(), old, "an old note was rewritten");
 
     for stranger in [&br#"{"notes": "my own json"}"#[..], br#"{"a": 1}"#, b"[]"] {
         fs::write(&layout, stranger).unwrap();
-        assert!(note(&root, "disk1", Path::new("/mnt/disk1")).is_err());
+        assert!(note(&root, "disk1", Path::new(disk1)).is_err());
         assert_eq!(fs::read(&layout).unwrap(), stranger);
     }
 
     // The versioned note grows, and keeps what it had.
     fs::remove_file(&layout).unwrap();
-    note(&root, "disk1", Path::new("/mnt/disk1")).unwrap();
-    note(&root, "disk2", Path::new("/mnt/disk2")).unwrap();
+    note(&root, "disk1", Path::new(disk1)).unwrap();
+    note(&root, "disk2", Path::new(disk2)).unwrap();
     let disks = read(&root);
     assert_eq!(disks.len(), 2);
     let raw = fs::read_to_string(&layout).unwrap();

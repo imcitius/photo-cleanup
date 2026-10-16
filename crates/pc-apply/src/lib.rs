@@ -198,6 +198,21 @@ fn file_target(path: &str, override_root: Option<&Path>) -> Result<Target> {
     let mut map = pc_core::DiskMap::new();
     let disk = map.resolve(&src)?;
     let rel = disk.relative(&src);
+    // A path not below its disk's mount point comes back whole, and joining
+    // an absolute path onto the quarantine root yields that path itself: the
+    // "move" would rename the photograph onto its own name, which Windows
+    // accepts as done (el-6s3go). Refused before anything is written.
+    if rel.has_root() || rel.is_absolute() || rel.as_os_str().is_empty() {
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "{0} — не вычислить путь от точки монтирования его диска ({1}); в заданный карантин он не переносится",
+                "{0} — its path below its disk's mount point ({1}) cannot be worked out; it is not moved into the configured quarantine",
+                path,
+                disk.mount.display()
+            )
+        );
+    }
     let dev = pc_core::dev_of_nearest_existing(root)?;
     if dev != disk.dev {
         bail!(
