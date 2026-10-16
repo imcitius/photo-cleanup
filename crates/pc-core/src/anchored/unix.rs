@@ -159,6 +159,18 @@ impl Dir {
         Ok(((st.st_dev as u64, st.st_ino as u64), st.st_mode as u32))
     }
 
+    /// The identity of the folder above this one (`..` of the folder held,
+    /// not of its path): equal to its own at the root of the tree. Tells
+    /// whether this folder is where a volume is entered (el-53l7h).
+    pub fn parent_ident(&self) -> io::Result<Ident> {
+        // SAFETY: zero is valid for `stat`; the call fills it.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: valid descriptor, NUL-terminated literal, writable buffer.
+        cvt(unsafe { libc::fstatat(self.fd.as_raw_fd(), c"..".as_ptr(), &mut st, 0) })?;
+        #[allow(clippy::unnecessary_cast)]
+        Ok((st.st_dev as u64, st.st_ino as u64))
+    }
+
     /// A new file at `name`: fails if anything — a file, a link, a dangling
     /// link — already bears the name.
     pub fn create_new(&self, name: &str, mode: u32) -> io::Result<File> {

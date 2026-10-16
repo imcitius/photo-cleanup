@@ -487,13 +487,18 @@ fn walk_back(
     // el-4r8yf B3-R2): the folder is opened once, compared with the record
     // before any rename, and that handle is where the rename goes. A row
     // from before identities were recorded is judged by its path, checked
-    // up to its own run's root and no other (el-1nx1u B3). Refused, nothing
-    // moves, every member stays where it is proven, and the entry stays
-    // open to be undone again.
+    // up to its own run's root and no other (el-1nx1u B3). A row whose run
+    // recorded no roots at all (older web runs) is bounded by the volume
+    // itself and comes back into a folder held from its mount point down
+    // (el-53l7h, `crate::mount_bound`); folders it needs are made only after
+    // every member's way is checked. Refused, nothing moves, every member
+    // stays where it is proven, and the entry stays open to be undone again.
     let mut homes: Vec<Option<pc_core::anchored::Dir>> = Vec::with_capacity(moving.len());
     let mut own_roots: Option<Option<Vec<String>>> = None;
     let mut unsafe_at = None;
-    for p in &moving {
+    #[cfg(unix)]
+    let mut chains: Vec<(usize, crate::mount_bound::Chain)> = Vec::new();
+    for (i, p) in moving.iter().enumerate() {
         let src = Path::new(&p.look.src);
         match &p.rec.home {
             Some(home) => match crate::bound::origin_folder(src, home) {
@@ -508,11 +513,48 @@ fn walk_back(
                     own_roots = Some(db.journal_run_roots(id)?);
                 }
                 let roots = own_roots.as_ref().and_then(|r| r.as_deref());
+                #[cfg(unix)]
+                if roots.is_some_and(no_roots) {
+                    let checked = match (src.parent(), p.look.proof.as_ref()) {
+                        (Some(folder), Some(proof)) => {
+                            crate::mount_bound::check(folder, proof.dev)
+                        }
+                        _ => Err(pc_core::tf!(
+                            "{0} — запись не хранит, с какого тома ушёл файл, и прогон не записал своих папок; программа ничего туда не возвращает",
+                            "{0} — the entry does not record which volume the file left, and its run recorded no folders; the tool returns nothing there",
+                            src.display()
+                        )),
+                    };
+                    match checked {
+                        Ok(chain) => {
+                            chains.push((i, chain));
+                            homes.push(None);
+                            continue;
+                        }
+                        Err(why) => {
+                            unsafe_at = Some(why);
+                            break;
+                        }
+                    }
+                }
+                let _ = i;
                 if let Some(why) = src.parent().and_then(|f| origin_doubt(roots, f)) {
                     unsafe_at = Some(why);
                     break;
                 }
                 homes.push(None);
+            }
+        }
+    }
+    #[cfg(unix)]
+    if unsafe_at.is_none() {
+        for (i, chain) in chains {
+            match chain.hold() {
+                Ok(dir) => homes[i] = Some(dir),
+                Err(why) => {
+                    unsafe_at = Some(why);
+                    break;
+                }
             }
         }
     }
@@ -582,6 +624,12 @@ fn walk_back(
     })
 }
 
+/// The run recorded no folder at all: an older web run (`roots = []`).
+#[cfg(unix)]
+fn no_roots(roots: &[String]) -> bool {
+    roots.iter().all(|r| r.is_empty())
+}
+
 /// Why the folder `folder`, which a member of an entry that recorded no
 /// folder identity comes back to, is not to be trusted, if it is not.
 ///
@@ -596,7 +644,9 @@ fn walk_back(
 /// (el-4r8yf B3-R2). Above the root, the path is the user's own as they
 /// named it (`/var` on macOS is a link) and is followed. A path under none
 /// of its run's roots, or a run whose roots cannot be read, has no bound
-/// and is refused. A folder that is not there is not a doubt: it is
+/// and is refused. A run that recorded no roots at all (`roots = []`, older
+/// web runs) does not come here on Unix: it is bounded by the volume's
+/// mount point instead ([`crate::mount_bound`], el-53l7h). A folder that is not there is not a doubt: it is
 /// created on the way back, through the folder above it, without following
 /// anything.
 fn origin_doubt(roots: Option<&[String]>, folder: &Path) -> Option<String> {

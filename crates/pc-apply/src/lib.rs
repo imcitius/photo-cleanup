@@ -24,6 +24,8 @@ compile_error!(
 mod bound;
 pub mod files;
 mod located;
+#[cfg(unix)]
+mod mount_bound;
 pub mod organize;
 pub mod outcome;
 mod purge;
@@ -770,6 +772,9 @@ mod windows_tests;
 
 #[cfg(test)]
 mod link_unit_tests;
+
+#[cfg(all(test, unix))]
+mod mount_bound_tests;
 
 #[cfg(all(test, unix))]
 mod purge_tests;
