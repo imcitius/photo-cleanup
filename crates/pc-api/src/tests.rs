@@ -1811,7 +1811,12 @@ async fn an_interrupted_move_can_be_read_against_the_disk_and_undone() {
     let (s, d) = (src.display().to_string(), dst.display().to_string());
     let id = {
         let db = f.state.db.lock().unwrap();
-        let run = db.start_run(&[], "test").unwrap();
+        // A row without the folder's identity, as versions before el-6s3go
+        // wrote: its way back is checked up to its own run's root, so the
+        // run has one (a run without roots has no bound and is refused).
+        let run = db
+            .start_run(&[f.archive.display().to_string()], "test")
+            .unwrap();
         db.journal_begin(&pc_db::NewJournalEntry {
             run_id: run,
             op: "quarantine-file",
@@ -1824,6 +1829,7 @@ async fn an_interrupted_move_can_be_read_against_the_disk_and_undone() {
                 src: s.clone(),
                 dst: d.clone(),
                 proof: None,
+                home: None,
             }],
         })
         .unwrap()
@@ -1875,6 +1881,7 @@ async fn an_interrupted_move_whose_file_is_in_two_places_is_left_to_a_person() {
                 src: s.clone(),
                 dst: d.clone(),
                 proof: None,
+                home: None,
             }],
         })
         .unwrap()

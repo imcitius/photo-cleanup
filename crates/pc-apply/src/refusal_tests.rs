@@ -99,6 +99,7 @@ fn pair(src: &Path, dst: &Path) -> pc_db::Moved {
         src: src.display().to_string(),
         dst: dst.display().to_string(),
         proof: None,
+        home: None,
     }
 }
 
@@ -824,6 +825,7 @@ fn every_rename_consumer_preserves_an_occupied_destination() {
                 src: home.display().to_string(),
                 dst: held.display().to_string(),
                 proof: pc_core::proof::Proof::of(&fs::symlink_metadata(&held).unwrap()),
+                home: None,
             }];
             let id = entry(&a, &home, &held, &manifest, JournalStatus::Pending);
             let (hook, foreign) = occupy_at(home.clone(), what);

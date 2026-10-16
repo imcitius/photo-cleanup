@@ -497,7 +497,7 @@ pub(crate) fn rename_with_parents(
     dst: &Path,
     expect: Option<&pc_core::proof::Proof>,
 ) -> Result<bound::Arrived> {
-    bound::rename_bound(&bound::Held::bind(src, expect)?, dst, &[])
+    bound::rename_bound(&bound::Held::bind(src, expect)?, dst, &[], None)
 }
 
 /// Tests only: the moment after an operation's last rename and before its
@@ -850,6 +850,7 @@ pub fn adopt_orphan(db: &Db, run_id: i64, src: &str, dst: &str) -> Result<Tally>
         src: src.to_string(),
         dst: dst.to_string(),
         proof,
+        home: Some(bound::folder_of(Path::new(src))?),
     }];
     let jid = db.journal_begin(&pc_db::NewJournalEntry {
         run_id,
@@ -1147,18 +1148,21 @@ mod undo_tests {
                 dst: Some(&d),
                 size: 32,
                 file_count: 2,
-                // With the evidence a forward move records: on Windows a row
-                // without it is never walked back by its names.
+                // With the evidence a forward move records — of each file and
+                // of the folder it left: on Windows a row without it is never
+                // walked back by its names.
                 manifest: &[
                     Moved {
                         src: s.clone(),
                         dst: d.clone(),
                         proof: files::evidence(&dst).unwrap(),
+                        home: Some(bound::folder_of(&src).unwrap()),
                     },
                     Moved {
                         src: src.with_extension("xmp").display().to_string(),
                         dst: dst.with_extension("xmp").display().to_string(),
                         proof: files::evidence(&dst.with_extension("xmp")).unwrap(),
+                        home: Some(bound::folder_of(&src).unwrap()),
                     },
                 ],
             })

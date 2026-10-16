@@ -417,3 +417,244 @@ fn an_in_use_refusal_is_written_down_and_claims_nothing() {
     assert!(f.db.journal_quarantined(None).unwrap().is_empty());
     assert_eq!(snapshot(&f.photo), before);
 }
+
+// ---- the folder the files left, by identity (director decision after
+// el-4r8yf B3-R2) -----------------------------------------------------------
+
+/// A frame and its sidecar in `archive/2024`, quarantined into a gathered
+/// quarantine outside the archive; the finished entry.
+fn quarantined_below(f: &Fixture) -> pc_db::JournalEntry {
+    fs::write(f.dir.join("frame.xmp"), b"synthetic edits 291").unwrap();
+    let gathered = f.tmp.path().join("gathered");
+    let report = crate::apply(&f.db, f.run, &[f.candidate()], Some(&gathered)).unwrap();
+    assert_eq!(
+        (report.done.frames, report.done.companions),
+        (1, 1),
+        "{report:?}"
+    );
+    f.db.journal_quarantined(None).unwrap().pop().unwrap()
+}
+
+/// Both members still in quarantine, the entry still done and undoable,
+/// nothing in `place`.
+fn assert_kept(f: &Fixture, entry: &pc_db::JournalEntry, place: &Path) {
+    let now = f.db.journal_entry(entry.id).unwrap().unwrap();
+    assert_eq!(now.status, JournalStatus::Done);
+    assert!(crate::undo_offered(&now));
+    for m in &entry.manifest {
+        assert!(Path::new(&m.dst).exists(), "{} left quarantine", m.dst);
+    }
+    assert!(!place.join("frame.arw").exists());
+    assert!(!place.join("frame.xmp").exists());
+}
+
+fn later_nested_scan(f: &Fixture) {
+    f.db.start_run(&[f.dir.display().to_string()], "later ordinary scan")
+        .unwrap();
+}
+
+/// Each member records the folder it left — the folder held for its move.
+#[test]
+fn a_move_records_the_folder_each_member_left() {
+    let f = Fixture::at("2024");
+    let entry = quarantined_below(&f);
+    let held = pc_core::anchored::Dir::open(&f.dir).unwrap();
+    let id = pc_db::FolderId::of(held.ident().unwrap());
+    assert_eq!(entry.manifest.len(), 2);
+    for m in &entry.manifest {
+        assert_eq!(m.home, Some(id), "{m:?}");
+    }
+}
+
+/// el-4r8yf B3-R2: a later scan of the folder the files left, then the
+/// original root replaced by a link (a junction on Windows) to a look-alike
+/// tree. The undo refuses, names the folder, sends nothing into the foreign
+/// tree, and both members stay in quarantine with the entry done.
+#[test]
+fn a_later_nested_scan_does_not_let_a_replaced_ancestor_link_redirect_the_undo() {
+    let f = Fixture::at("2024");
+    let entry = quarantined_below(&f);
+    later_nested_scan(&f);
+    let root = f.dir.parent().unwrap().to_path_buf();
+    let aside = f.tmp.path().join("old-archive");
+    fs::rename(&root, &aside).unwrap();
+    let foreign = f.tmp.path().join("foreign");
+    fs::create_dir_all(foreign.join("2024")).unwrap();
+    let sentinel = foreign.join("2024/sentinel");
+    fs::write(&sentinel, b"foreign namespace 8173").unwrap();
+    let before = snapshot(&sentinel);
+    directory_link(&root, &foreign);
+
+    let err = crate::undo(&f.db, entry.id).unwrap_err();
+    let shown = format!("{err:#}");
+    assert!(shown.contains("is not the one the files left"), "{shown}");
+    assert!(shown.contains(&f.dir.display().to_string()), "{shown}");
+    assert_eq!(snapshot(&sentinel), before);
+    assert_eq!(fs::read_dir(foreign.join("2024")).unwrap().count(), 1);
+    assert_kept(&f, &entry, &foreign.join("2024"));
+
+    // The archive back in its place: the same entry comes home.
+    remove_link(&root);
+    fs::rename(&aside, &root).unwrap();
+    let done = crate::undo(&f.db, entry.id).unwrap();
+    assert_eq!(done.files_back, 2);
+    assert_eq!(fs::read(&f.photo).unwrap(), b"synthetic frame 6173");
+}
+
+/// The control of the pair above: the same later scan, no link. The undo
+/// brings both members home and closes the entry.
+#[test]
+fn a_later_nested_scan_alone_does_not_stop_an_ordinary_undo() {
+    let f = Fixture::at("2024");
+    let entry = quarantined_below(&f);
+    later_nested_scan(&f);
+
+    let done = crate::undo(&f.db, entry.id).unwrap();
+    assert_eq!((done.entries_back, done.files_back), (1, 2));
+    assert_eq!(fs::read(&f.photo).unwrap(), b"synthetic frame 6173");
+    assert_eq!(
+        fs::read(f.dir.join("frame.xmp")).unwrap(),
+        b"synthetic edits 291"
+    );
+    assert_eq!(
+        f.db.journal_entry(entry.id).unwrap().unwrap().status,
+        JournalStatus::Undone
+    );
+    for m in &entry.manifest {
+        assert!(!Path::new(&m.dst).exists(), "{} still in quarantine", m.dst);
+    }
+}
+
+/// The folder renamed aside: missing at its path, the undo refuses; made
+/// again, empty, at the same path, it is another folder and the undo still
+/// refuses — a path that looks right is not the folder the files left.
+/// The folder back in place, the entry is undone.
+#[test]
+fn a_folder_renamed_aside_and_made_again_is_not_home() {
+    let f = Fixture::at("2024");
+    let entry = quarantined_below(&f);
+    let aside = f.dir.with_file_name("2024-aside");
+    fs::rename(&f.dir, &aside).unwrap();
+
+    let err = crate::undo(&f.db, entry.id).unwrap_err();
+    let shown = format!("{err:#}");
+    assert!(shown.contains("is not the one the files left"), "{shown}");
+    assert!(shown.contains(&f.dir.display().to_string()), "{shown}");
+    assert!(!f.dir.exists(), "the undo made the folder: {shown}");
+    assert_kept(&f, &entry, &aside);
+
+    fs::create_dir(&f.dir).unwrap();
+    let err = crate::undo(&f.db, entry.id).unwrap_err();
+    let shown = format!("{err:#}");
+    assert!(shown.contains("is not the one the files left"), "{shown}");
+    assert_eq!(fs::read_dir(&f.dir).unwrap().count(), 0, "{shown}");
+    assert_kept(&f, &entry, &aside);
+
+    fs::remove_dir(&f.dir).unwrap();
+    fs::rename(&aside, &f.dir).unwrap();
+    let done = crate::undo(&f.db, entry.id).unwrap();
+    assert_eq!(done.files_back, 2);
+    assert_eq!(fs::read(&f.photo).unwrap(), b"synthetic frame 6173");
+    assert_eq!(
+        f.db.journal_entry(entry.id).unwrap().unwrap().status,
+        JournalStatus::Undone
+    );
+}
+
+/// A row written before folder identities were recorded: the frame and its
+/// sidecar from `archive/2024`, quarantined in `gathered`, by a run rooted
+/// at `archive`.
+fn legacy_row(f: &Fixture) -> i64 {
+    let held = f.tmp.path().join("gathered");
+    fs::create_dir_all(&held).unwrap();
+    let side = f.dir.join("frame.xmp");
+    fs::write(&side, b"synthetic edits 291").unwrap();
+    fs::rename(&f.photo, held.join("frame.arw")).unwrap();
+    fs::rename(&side, held.join("frame.xmp")).unwrap();
+    let manifest: Vec<pc_db::Moved> = ["frame.arw", "frame.xmp"]
+        .iter()
+        .map(|n| pc_db::Moved {
+            src: f.dir.join(n).display().to_string(),
+            dst: held.join(n).display().to_string(),
+            proof: crate::files::evidence(&held.join(n)).unwrap(),
+            home: None,
+        })
+        .collect();
+    let id =
+        f.db.journal_begin(&pc_db::NewJournalEntry {
+            run_id: f.run,
+            op: "quarantine-file",
+            target_id: None,
+            src: &manifest[0].src,
+            dst: Some(&manifest[0].dst),
+            size: 39,
+            file_count: 2,
+            manifest: &manifest,
+        })
+        .unwrap();
+    f.db.journal_finish(id, JournalStatus::Done, None).unwrap();
+    id
+}
+
+/// An old row is checked up to its own run's root and no other: another
+/// run's root deep inside does not shorten the check, and the replaced
+/// root is refused.
+#[test]
+fn an_old_row_is_bounded_by_its_own_run_root_not_by_another_runs() {
+    let f = Fixture::at("2024");
+    let id = legacy_row(&f);
+    later_nested_scan(&f);
+    let root = f.dir.parent().unwrap().to_path_buf();
+    let aside = f.tmp.path().join("old-archive");
+    fs::rename(&root, &aside).unwrap();
+    let foreign = f.tmp.path().join("foreign");
+    fs::create_dir_all(foreign.join("2024")).unwrap();
+    directory_link(&root, &foreign);
+
+    let err = crate::undo(&f.db, id).unwrap_err();
+    let shown = format!("{err:#}");
+    assert!(shown.contains("a symbolic link or a junction"), "{shown}");
+    assert!(shown.contains(&root.display().to_string()), "{shown}");
+    assert_eq!(fs::read_dir(foreign.join("2024")).unwrap().count(), 0);
+    let entry = f.db.journal_entry(id).unwrap().unwrap();
+    assert_kept(&f, &entry, &foreign.join("2024"));
+
+    // The root back: the old row is still undone by its path.
+    remove_link(&root);
+    fs::rename(&aside, &root).unwrap();
+    let done = crate::undo(&f.db, id).unwrap();
+    assert_eq!(done.files_back, 2);
+    assert_eq!(fs::read(&f.photo).unwrap(), b"synthetic frame 6173");
+}
+
+/// An old row whose files' folder is under none of its own run's roots —
+/// only under another run's — has no bound, and is refused.
+#[test]
+fn an_old_row_outside_its_own_run_roots_is_refused() {
+    let f = Fixture::at("2024");
+    let id = legacy_row(&f);
+    // The entry's run is re-pointed at a root that does not hold the files:
+    // a fixture of a run rooted elsewhere.
+    f.db.conn
+        .execute(
+            "UPDATE runs SET roots = ?1 WHERE id = ?2",
+            rusqlite::params![
+                format!(
+                    "[{:?}]",
+                    f.tmp.path().join("elsewhere").display().to_string()
+                ),
+                f.run
+            ],
+        )
+        .unwrap();
+    later_nested_scan(&f);
+
+    let err = crate::undo(&f.db, id).unwrap_err();
+    let shown = format!("{err:#}");
+    assert!(
+        shown.contains("is under none of the folders this entry's run scanned"),
+        "{shown}"
+    );
+    let entry = f.db.journal_entry(id).unwrap().unwrap();
+    assert_kept(&f, &entry, &f.dir);
+}

@@ -154,10 +154,21 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
                 continue;
             }
         };
+        // Which folder each member leaves, for a completed undo to return
+        // to that folder and no other (el-4r8yf B3-R2); the move checks it
+        // against the folder it holds.
+        let home = match crate::bound::folder_of(src) {
+            Ok(h) => h,
+            Err(e) => {
+                report.refused.push((m.src.clone(), format!("{e:#}")));
+                continue;
+            }
+        };
         let mut planned = vec![pc_db::Moved {
             src: m.src.clone(),
             dst: m.dst.clone(),
             proof: frame_proof,
+            home: Some(home),
         }];
         // Every sidecar goes with the photograph or none does (user decision
         // (c)): one that cannot be proven, or whose new name is taken,
@@ -200,10 +211,23 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
                     break;
                 }
             };
+            let home = match crate::bound::folder_of(&side.src) {
+                Ok(h) => h,
+                Err(e) => {
+                    refusal = Some(pc_core::tf!(
+                        "спутник {0}: {1}",
+                        "companion {0}: {1}",
+                        side.src.display(),
+                        format!("{e:#}")
+                    ));
+                    break;
+                }
+            };
             planned.push(pc_db::Moved {
                 src: side.src.to_string_lossy().into_owned(),
                 dst: side.dst.to_string_lossy().into_owned(),
                 proof: Some(proof),
+                home: Some(home),
             });
         }
         if let Some(why) = refusal {
@@ -418,10 +442,18 @@ fn sweep_litter(
                 }
             };
             let size = proof.as_ref().and_then(|p| p.size).unwrap_or(0);
+            let home = match crate::bound::folder_of(&src) {
+                Ok(h) => h,
+                Err(err) => {
+                    report.refused.push((src_s, format!("{err:#}")));
+                    continue;
+                }
+            };
             let manifest = [pc_db::Moved {
                 src: src_s.clone(),
                 dst: dst_s.clone(),
                 proof,
+                home: Some(home),
             }];
             let jid = db.journal_begin(&pc_db::NewJournalEntry {
                 run_id,

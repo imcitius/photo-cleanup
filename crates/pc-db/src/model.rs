@@ -216,6 +216,17 @@ pub struct Moved {
     /// any other (el-1y8uo B2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof: Option<pc_core::proof::Proof>,
+    /// Which folder the object left: the identity of the folder handle the
+    /// operation held for the move, written before the first rename and
+    /// checked against that handle right before it (el-6s3go, director
+    /// decision after el-4r8yf B3-R2). A completed undo opens the folder at
+    /// the recorded path and sends nothing back unless it is this folder —
+    /// a path, however it is walked, says where a folder is supposed to be,
+    /// not which folder is there. Absent in rows written before; those are
+    /// judged by the path under their own run's root ([`crate`] users:
+    /// `pc_apply::undo`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<FolderId>,
 }
 
 impl Moved {
@@ -224,7 +235,33 @@ impl Moved {
             src: src.into(),
             dst: dst.into(),
             proof: None,
+            home: None,
         }
+    }
+}
+
+/// The identity of a folder, read from an open handle: device and inode on
+/// Unix, volume serial number and NTFS file ID on Windows (the 128-bit
+/// `FILE_ID_INFO` identifier, accepted only when its upper half is zero,
+/// see `pc_core::winfs::ident`). Read strictly, like the rest of the
+/// manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FolderId {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+impl FolderId {
+    pub fn of(ident: (u64, u64)) -> Self {
+        Self {
+            dev: ident.0,
+            ino: ident.1,
+        }
+    }
+
+    pub fn ident(&self) -> (u64, u64) {
+        (self.dev, self.ino)
     }
 }
 

@@ -613,10 +613,17 @@ pub fn quarantine_file(
     // moves, and so is the evidence of which file each one is: the journal
     // holds both before the first rename, so an interrupted run can be
     // recovered on that evidence and not on names.
+    // Which folder the frame leaves, from the folder held for its move: a
+    // completed undo returns nothing to any other folder (el-4r8yf B3-R2).
+    let home = match held.folder() {
+        Ok(h) => h,
+        Err(e) => return Ok(Filed::refused(format!("{e:#}"))),
+    };
     let mut planned = vec![pc_db::Moved {
         src: c.path.clone(),
         dst: dst_str.clone(),
         proof: Some(held.proof().clone()),
+        home: Some(home),
     }];
     // Every companion goes with the frame or none does (user decision (c)):
     // one whose evidence cannot be read, or whose place in quarantine is
@@ -667,10 +674,15 @@ pub fn quarantine_file(
                 },
             )));
         }
+        let home = match crate::bound::folder_of(&side.src) {
+            Ok(h) => h,
+            Err(e) => return refuse(format!("{e:#}")),
+        };
         planned.push(pc_db::Moved {
             src: side.src.to_string_lossy().into_owned(),
             dst: side.dst.to_string_lossy().into_owned(),
             proof: Some(proof),
+            home: Some(home),
         });
     }
 

@@ -482,20 +482,45 @@ fn walk_back(
     if moving.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
-    // The folder each member comes back to has to be the folder it left —
-    // a real folder, reached without following anything the run did not
-    // start from (el-1nx1u B3). Refused, nothing moves, every member stays
-    // where it is proven, and the entry stays open to be undone again once
-    // the folder is a folder again.
-    let roots = db.all_run_roots()?;
-    if let Some(unsafe_at) = moving.iter().find_map(|p| {
-        Path::new(&p.look.src)
-            .parent()
-            .and_then(|f| origin_doubt(&roots, f))
-    }) {
+    // The folder each member comes back to has to be the folder it left.
+    // Recorded at the move, its identity decides (director decision after
+    // el-4r8yf B3-R2): the folder is opened once, compared with the record
+    // before any rename, and that handle is where the rename goes. A row
+    // from before identities were recorded is judged by its path, checked
+    // up to its own run's root and no other (el-1nx1u B3). Refused, nothing
+    // moves, every member stays where it is proven, and the entry stays
+    // open to be undone again.
+    let mut homes: Vec<Option<pc_core::anchored::Dir>> = Vec::with_capacity(moving.len());
+    let mut own_roots: Option<Option<Vec<String>>> = None;
+    let mut unsafe_at = None;
+    for p in &moving {
+        let src = Path::new(&p.look.src);
+        match &p.rec.home {
+            Some(home) => match crate::bound::origin_folder(src, home) {
+                Ok(dir) => homes.push(Some(dir)),
+                Err(e) => {
+                    unsafe_at = Some(format!("{e:#}"));
+                    break;
+                }
+            },
+            None => {
+                if own_roots.is_none() {
+                    own_roots = Some(db.journal_run_roots(id)?);
+                }
+                let roots = own_roots.as_ref().and_then(|r| r.as_deref());
+                if let Some(why) = src.parent().and_then(|f| origin_doubt(roots, f)) {
+                    unsafe_at = Some(why);
+                    break;
+                }
+                homes.push(None);
+            }
+        }
+    }
+    if let Some(unsafe_at) = unsafe_at {
+        drop(homes);
         let why = pc_core::tf!(
-            "{0}: ничего не перенесено — {1}; всё остаётся в карантине, и запись можно откатить, когда на этом месте снова будет обычная папка; где что: {2}",
-            "{0}: nothing was moved — {1}; everything stays in quarantine, and the entry can be undone once a plain folder is in that place again; where things are: {2}",
+            "{0}: ничего не перенесено — {1}; всё остаётся в карантине, и запись можно откатить, когда на этом месте снова будет та папка; где что: {2}",
+            "{0}: nothing was moved — {1}; everything stays in quarantine, and the entry can be undone once that folder is in that place again; where things are: {2}",
             phase,
             unsafe_at,
             listing(&items)
@@ -511,7 +536,8 @@ fn walk_back(
     }
     let members: Vec<Member> = moving
         .iter()
-        .map(|p| Member::back(&p.rec, &p.look))
+        .zip(&homes)
+        .map(|(p, h)| Member::back(&p.rec, &p.look, h.as_ref()))
         .collect();
     let pb = match move_unit(&members, Way::Back, None, &[]) {
         Unit::Moved(arrived) => {
@@ -556,25 +582,37 @@ fn walk_back(
     })
 }
 
-/// Why the folder `folder`, which a member of an entry comes back to, is
-/// not to be trusted, if it is not.
+/// Why the folder `folder`, which a member of an entry that recorded no
+/// folder identity comes back to, is not to be trusted, if it is not.
 ///
-/// What is asked is every component from `folder` up to the run's root that
-/// holds it (the deepest one), each as itself, never followed: a link or a
-/// junction there — one that replaced the folder after the move, or was
-/// planted between two runs — would carry the photograph into someone
-/// else's folder while the journal recorded it home (el-1nx1u B3). Above
-/// the root, the path is the user's own as they named it (`/var` on macOS
-/// is a link) and is followed. A path under no recorded root has only its
-/// own folder asked. A folder that is not there is not a doubt: it is
+/// Only rows written before identities were recorded come here (on Unix;
+/// Windows never had a quarantine before). What is asked is every component
+/// from `folder` up to the root of the entry's *own* run that holds it
+/// (`roots`; the deepest one), each as itself, never followed: a link or a
+/// junction there — one that replaced the folder after the move — would
+/// carry the photograph into someone else's folder while the journal
+/// recorded it home (el-1nx1u B3). Roots of other runs are never asked: a
+/// later scan of a folder deep inside would shorten the check
+/// (el-4r8yf B3-R2). Above the root, the path is the user's own as they
+/// named it (`/var` on macOS is a link) and is followed. A path under none
+/// of its run's roots, or a run whose roots cannot be read, has no bound
+/// and is refused. A folder that is not there is not a doubt: it is
 /// created on the way back, through the folder above it, without following
 /// anything.
-fn origin_doubt(roots: &[String], folder: &Path) -> Option<String> {
-    let root = roots
-        .iter()
-        .map(Path::new)
-        .filter(|r| folder.starts_with(r))
-        .max_by_key(|r| r.components().count());
+fn origin_doubt(roots: Option<&[String]>, folder: &Path) -> Option<String> {
+    let Some(root) = roots.and_then(|roots| {
+        roots
+            .iter()
+            .map(Path::new)
+            .filter(|r| !r.as_os_str().is_empty() && folder.starts_with(r))
+            .max_by_key(|r| r.components().count())
+    }) else {
+        return Some(pc_core::tf!(
+            "место возврата {0} не лежит ни под одной из папок, которые просматривал прогон этой записи, и запись не знает, какая папка была там при переносе; программа ничего туда не возвращает",
+            "the place to return to, {0}, is under none of the folders this entry's run scanned, and the entry does not record which folder was there at the move; the tool returns nothing there",
+            folder.display()
+        ));
+    };
     let mut at = Some(folder);
     while let Some(p) = at.filter(|p| !p.as_os_str().is_empty()) {
         let what = match files::found_at(p) {
@@ -604,7 +642,7 @@ fn origin_doubt(roots: &[String], folder: &Path) -> Option<String> {
                 what
             ));
         }
-        if root.is_none_or(|r| p == r) {
+        if p == root {
             break;
         }
         at = p.parent();

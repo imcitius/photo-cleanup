@@ -103,6 +103,77 @@ fn hold_folder(path: &Path) -> std::io::Result<Dir> {
     }
 }
 
+/// The identity of the folder that holds `path`, read from a handle to it:
+/// what the journal records as the folder a member leaves, before the first
+/// rename ([`pc_db::Moved::home`]). The move itself checks the folder it
+/// holds against this record ([`crate::unit::move_unit`]), so what was
+/// recorded is the folder the object left through.
+pub(crate) fn folder_of(path: &Path) -> Result<pc_db::FolderId> {
+    let parent = parent_of(path);
+    let dir = Dir::open_following(parent).map_err(|e| {
+        anyhow::Error::new(e).context(pc_core::tf!(
+            "не открыть папку {0}",
+            "cannot open the folder {0}",
+            parent.display()
+        ))
+    })?;
+    folder_id(&dir, parent)
+}
+
+/// The identity of the folder open as `dir`; unreadable is an error naming
+/// `path`, never a weaker answer.
+fn folder_id(dir: &Dir, path: &Path) -> Result<pc_db::FolderId> {
+    dir.ident().map(pc_db::FolderId::of).map_err(|e| {
+        anyhow::Error::new(e).context(pc_core::tf!(
+            "не прочитать, какая это папка: {0}",
+            "cannot read which folder this is: {0}",
+            path.display()
+        ))
+    })
+}
+
+/// The folder `path` comes back to in a completed undo, opened and held —
+/// only if it is the folder the files left (`home`, recorded at the move).
+///
+/// The path is resolved once, here, as the user's own path is anywhere
+/// (an ancestor may be a link: `/var` on macOS); what decides is not how it
+/// was reached but which folder it reached. A folder renamed aside and
+/// another made in its place, an ancestor replaced by a link or a junction
+/// to a look-alike tree, a folder that is not there: each is refused, and
+/// the handle returned is the one the rename goes into — the path is not
+/// looked up again (director decision after el-4r8yf B3-R2).
+pub(crate) fn origin_folder(path: &Path, home: &pc_db::FolderId) -> Result<Dir> {
+    let parent = parent_of(path);
+    let not_the_one = |why: String| {
+        anyhow!(pc_core::tf!(
+            "папка {0} — не та, из которой ушли файлы ({1})",
+            "the folder {0} is not the one the files left ({1})",
+            parent.display(),
+            why
+        ))
+    };
+    let dir = hold_folder(parent).map_err(|e| {
+        if crate::in_use(&e) {
+            return anyhow!("{}", crate::in_use_text(parent));
+        }
+        if e.kind() == std::io::ErrorKind::NotFound {
+            return not_the_one(pc_core::tr!("её нет на месте", "it is not there").to_string());
+        }
+        not_the_one(e.to_string())
+    })?;
+    match dir.ident() {
+        Ok(id) if id == home.ident() => Ok(dir),
+        Ok(_) => Err(not_the_one(
+            pc_core::tr!("на её месте другая папка", "another folder is in its place").to_string(),
+        )),
+        Err(e) => Err(not_the_one(pc_core::tf!(
+            "не прочитать, какая это папка: {0}",
+            "cannot read which folder this is: {0}",
+            e
+        ))),
+    }
+}
+
 /// An entry reached through its folder, opened once.
 pub(crate) struct Entry {
     dir: Dir,
@@ -445,6 +516,17 @@ impl Held {
         &self.proof
     }
 
+    /// The identity of the folder held for the move — the folder the object
+    /// leaves through.
+    pub(crate) fn folder(&self) -> Result<pc_db::FolderId> {
+        folder_id(&self.entry.dir, &self.entry.parent)
+    }
+
+    /// The folder held for the move, as the path names it.
+    pub(crate) fn folder_path(&self) -> &Path {
+        &self.entry.parent
+    }
+
     /// The same object, under the same name, unchanged.
     pub(crate) fn verify(&self) -> Result<()> {
         if let Some(f) = &self.file {
@@ -702,7 +784,16 @@ fn parent_of(p: &Path) -> &Path {
 /// folder it left (el-lvtmk R2). Anything else is an [`Unmoved`]: nothing
 /// moved, or what moved was put back — never over anything — and every
 /// object is named where it was proven to be after that.
-pub(crate) fn rename_bound(source: &Held, dst: &Path, keepers: &[&Held]) -> Result<Arrived> {
+///
+/// `into`, when given, is the folder `dst` lands in, already opened and
+/// proven ([`origin_folder`]): the rename goes into that handle and the
+/// path is not resolved again.
+pub(crate) fn rename_bound(
+    source: &Held,
+    dst: &Path,
+    keepers: &[&Held],
+    into: Option<&Dir>,
+) -> Result<Arrived> {
     crate::check_exclusive_rename(dst)?;
     {
         let (entry, file, expect): (&Entry, Option<&fs::File>, Proof) =
@@ -711,7 +802,10 @@ pub(crate) fn rename_bound(source: &Held, dst: &Path, keepers: &[&Held]) -> Resu
         let src = entry.path.as_path();
         // The destination folder is opened — created where missing — once,
         // here, and held to the end; see [`Destination`].
-        let to = Destination::open(dst)?;
+        let to = match into {
+            Some(dir) => Destination::into(dir, dst)?,
+            None => Destination::open(dst)?,
+        };
         // Never onto its own name: Windows accepts renaming an object onto
         // the name it already bears as done, and the journal would record a
         // move that never happened (el-6s3go). Names compare without regard
@@ -1025,6 +1119,27 @@ struct Destination {
 }
 
 impl Destination {
+    /// Into the folder `dir`, held and proven by the caller: the same
+    /// object, through a second handle to it.
+    fn into(dir: &Dir, dst: &Path) -> Result<Destination> {
+        let name = dst
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                anyhow!(pc_core::tf!(
+                    "не имя файла: {0}",
+                    "not a file name: {0}",
+                    dst.display()
+                ))
+            })?
+            .to_string();
+        Ok(Destination {
+            dir: dir.try_clone()?,
+            name,
+            parent: parent_of(dst).to_path_buf(),
+        })
+    }
+
     fn open(dst: &Path) -> Result<Destination> {
         let name = dst
             .file_name()

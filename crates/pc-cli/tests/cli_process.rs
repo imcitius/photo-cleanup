@@ -94,6 +94,7 @@ fn moved_by_an_earlier_version(cli: &Cli, rel: &str) -> PathBuf {
         src: src_s.clone(),
         dst: dst.display().to_string(),
         proof: pc_core::proof::Proof::of(&std::fs::symlink_metadata(&src).unwrap()),
+        home: None,
     }];
     let run = db.latest_run().unwrap().unwrap();
     let jid = db

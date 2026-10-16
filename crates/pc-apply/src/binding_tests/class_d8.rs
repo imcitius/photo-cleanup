@@ -735,7 +735,8 @@ fn a_folder_moved_right_before_the_record_is_recorded_where_the_photo_is() {
 // ---- #18, #19: the other directions ---------------------------------------
 
 #[test]
-fn undo_whose_home_is_relocated_after_rename_records_where_the_photo_is_and_retry_restores_it() {
+fn undo_whose_home_is_relocated_after_rename_records_where_the_photo_is_and_retry_refuses_the_new_folder(
+) {
     let (a, photo, obj, sig) = setup();
     let c = manual(&a.db, a.run, &photo);
     assert_eq!(
@@ -758,8 +759,25 @@ fn undo_whose_home_is_relocated_after_rename_records_where_the_photo_is_and_retr
     let entry = a.db.journal_entry(id).unwrap().unwrap();
     assert_eq!(entry.status, JournalStatus::Done);
     assert_eq!(standing_of(&entry, &photo), crate::Standing::Moved);
-    crate::undo(&a.db, id).unwrap();
-    assert_eq!(signature(&photo), sig);
+
+    // The folder at the photograph's path now is the empty one made in its
+    // place, not the one it left: asked again, the undo sends nothing there
+    // (director decision after el-4r8yf B3-R2). The photograph stays in the
+    // operation's keeping, unchanged, and the entry stays open.
+    let e = crate::undo(&a.db, id).unwrap_err();
+    assert!(
+        format!("{e:#}").contains("is not the one the files left"),
+        "{e:#}"
+    );
+    assert!(!photo.exists());
+    assert_eq!(
+        fs::read_dir(&a.dir).unwrap().count(),
+        0,
+        "the new folder got something"
+    );
+    assert_eq!(signature(&find(&a, obj)), sig);
+    let entry = a.db.journal_entry(id).unwrap().unwrap();
+    assert_eq!(entry.status, JournalStatus::Done);
 }
 
 #[test]

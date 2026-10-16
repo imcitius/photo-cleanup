@@ -785,6 +785,7 @@ fn reorganising_reconciling_and_adopting_are_refused_on_windows_for_now() {
         src: home.display().to_string(),
         dst: held.display().to_string(),
         proof: crate::files::evidence(&held).unwrap(),
+        home: None,
     };
     assert!(m.proof.is_some(), "NTFS gives evidence");
     let id =

@@ -263,6 +263,7 @@ fn undo_persistence_failure_keeps_returned_file_in_typed_result() {
         src: home.display().to_string(),
         dst: held.display().to_string(),
         proof: crate::files::evidence(&held).unwrap(),
+        home: None,
     };
     let id =
         a.db.journal_begin(&pc_db::NewJournalEntry {

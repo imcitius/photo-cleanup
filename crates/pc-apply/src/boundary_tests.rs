@@ -17,6 +17,7 @@ fn recorded(src: &Path, dst: &Path) -> pc_db::Moved {
         src: src.display().to_string(),
         dst: dst.display().to_string(),
         proof: crate::files::evidence(dst).unwrap(),
+        home: None,
     }
 }
 
@@ -631,6 +632,7 @@ fn windows_recovery_uses_file_identity_not_a_path_key() {
             src: home.display().to_string(),
             dst: held.display().to_string(),
             proof: None,
+            home: None,
         }];
         let id = row(&a, &home, &held, &manifest, status);
 

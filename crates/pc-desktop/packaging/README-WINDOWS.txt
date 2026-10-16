@@ -86,9 +86,13 @@ photo-cleanup-desktop.exe.
   - рядом со снимком под именем его .xmp/.aae лежит не обычный файл, а
     ярлык-ссылка, junction или папка — снимок не переносится вместе со
     всеми спутниками; замените ссылку самим файлом или уберите её;
-  - откат, если на месте прежней папки снимка теперь ссылка или junction —
-    всё остаётся в карантине, откат можно повторить, когда там снова
-    обычная папка;
+  - откат, если папка, из которой ушли снимок и его спутники, теперь не
+    та самая папка: её переименовали или переместили, на её месте создана
+    новая (пусть с тем же именем), или путь к ней ведёт через ссылку или
+    junction в другое место. Программа запоминает при переносе, какая
+    именно это была папка, и возвращает файлы только в неё. Всё остаётся
+    в карантине, откат можно повторить, когда та папка снова на своём
+    месте;
   - диск не NTFS (флешки и карты с exFAT или FAT, ReFS), а также файлы
     OneDrive «только в облаке»;
   - карантин на другом диске, чем сами снимки;
@@ -141,8 +145,12 @@ Windows. Not a release: unsigned, nothing is installed.
   ReFS) and OneDrive online-only files; a quarantine on another drive;
   a link, junction or folder bearing the name of a photo's .xmp/.aae (the
   photo and its companions stay; replace the link with the file itself);
-  an undo whose original folder is now a link or junction (everything
-  stays in quarantine and can be undone once it is a plain folder again);
+  an undo whose original folder is no longer the very folder the files
+  left - renamed or moved away, a new folder made under the same name, or
+  a path that now leads elsewhere through a link or junction (the tool
+  records which folder it was at the move and returns files only to that
+  folder; everything stays in quarantine and can be undone once that
+  folder is back in its place);
   recovery after a crash, returning files the journal does not know, and
   sorting into folders. Try it on a copy of a small folder, not your whole
   archive, and check that undo brings everything back.

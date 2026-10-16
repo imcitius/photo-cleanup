@@ -589,6 +589,7 @@ mod exfat {
                     src: s.clone(),
                     dst: d.clone(),
                     proof: None,
+                    home: None,
                 }],
             })
             .unwrap();
