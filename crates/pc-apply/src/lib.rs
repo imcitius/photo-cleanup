@@ -381,28 +381,6 @@ impl std::fmt::Display for InUse {
 
 impl std::error::Error for InUse {}
 
-/// Windows (el-6s3go): what is not carried out there yet, and why. A move
-/// into quarantine and the undo of a finished one are; the reconciliation
-/// of an interrupted operation, an orphan's return and a reorganisation are
-/// the next step (el-61ar8 §4.C) and are refused until then, before anything
-/// is touched.
-pub(crate) fn not_yet_on_windows(what: (&str, &str)) -> Result<()> {
-    #[cfg(windows)]
-    bail!(
-        "{}",
-        pc_core::tf!(
-            "на Windows {0} пока не выполняется: перенос в карантин и откат завершённой записи работают, остальное будет включено отдельно; ничего не перенесено",
-            "on Windows, {0} is not carried out yet: moving into quarantine and undoing a finished entry work, the rest comes separately; nothing moved",
-            pc_core::tr!(what.0, what.1)
-        )
-    );
-    #[cfg(not(windows))]
-    {
-        let _ = what;
-        Ok(())
-    }
-}
-
 #[cfg(not(windows))]
 fn check_exclusive_rename_here(dst: &Path) -> Result<()> {
     use pc_core::disk::ExclusiveRename;
@@ -480,14 +458,34 @@ pub fn check_candidates(
     Ok(())
 }
 
-/// Before a reorganisation: as [`check_candidates`]. Any move of one is
-/// refused on Windows until reorganising is enabled there (el-61ar8 §4.C);
-/// an empty list — every preview asks — passes.
+/// Before a reorganisation: as [`check_candidates`]. Only reads. On
+/// Windows each photograph and its new folder are also asked for the volume
+/// they are on, by the serial number of the folders that hold them, so a
+/// folder another volume is mounted into is refused before anything moves
+/// (el-61ar8 §2.7); a photograph already gone is refused on its own by the
+/// move.
 pub fn check_organize(moves: &[pc_organize::Move]) -> Result<()> {
-    if !moves.is_empty() {
-        not_yet_on_windows(("раскладка по папкам", "reorganising into folders"))?;
+    check_all(moves.iter().map(|m| Path::new(&m.dst)))?;
+    // Each pair of folders is asked once: a plan of thousands of photographs
+    // has a few dozen of them.
+    #[cfg(windows)]
+    {
+        let mut asked = std::collections::BTreeSet::new();
+        for m in moves {
+            let (src, dst) = (Path::new(&m.src), Path::new(&m.dst));
+            if !asked.insert((src.parent(), dst.parent())) {
+                continue;
+            }
+            if fs::symlink_metadata(src).is_ok() {
+                same_volume(src, dst)?;
+            } else {
+                // Gone: refused on its own by the move. Asked again if
+                // another photograph of the same folder is there.
+                asked.remove(&(src.parent(), dst.parent()));
+            }
+        }
     }
-    check_all(moves.iter().map(|m| Path::new(&m.dst)))
+    Ok(())
 }
 
 /// Tests only: one bound move of one object, outside any operation — the
@@ -755,8 +753,7 @@ pub mod race {
 mod legacy;
 
 #[cfg(test)]
-// Some helpers serve only the reorganisation tests, which Windows refuses
-// until el-61ar8 §4.C, and the purge tests, which are Unix-only.
+// Some helpers serve only the purge tests and the Unix-only refusal tests.
 #[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod race_tests;
 
@@ -779,7 +776,7 @@ mod mount_bound_tests;
 #[cfg(all(test, unix))]
 mod purge_tests;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod abandon_tests;
 
 /// What `derived clean` leaves, with the reason — the one answer the
@@ -834,10 +831,6 @@ pub fn select_derived(
 /// it got there, so it writes one now, and the move can be walked back like
 /// any other.
 pub fn adopt_orphan(db: &Db, run_id: i64, src: &str, dst: &str) -> Result<Tally> {
-    not_yet_on_windows((
-        "возврат файла, о котором журнал ничего не знает",
-        "returning a file the journal never recorded",
-    ))?;
     // An early answer; the move itself never replaces what is there.
     if fs::symlink_metadata(dst).is_ok() {
         bail!(
@@ -850,6 +843,22 @@ pub fn adopt_orphan(db: &Db, run_id: i64, src: &str, dst: &str) -> Result<Tally>
         );
     }
     let proof = files::evidence(Path::new(src))?;
+    // Only a plain file comes out as an orphan: the scan lists nothing else
+    // (`pc_walk`), and a link, a junction, a folder or a placeholder at an
+    // orphan's path now is not what it found — the unit rule of
+    // el-1nx1u B1 for any member that is not a plain file. It stays where it
+    // is, and nothing is written. The move is bound to this evidence, so a
+    // file replaced by anything else after this look is refused there.
+    if !files::plain_proof(proof.as_ref()) {
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "{0} — не обычный файл (ссылка, соединение junction, папка или иной объект), либо эта система не может его назвать; из карантина возвращаются только обычные файлы, он остаётся на месте",
+                "{0} — not a plain file (a link, a junction, a folder or another object), or this system cannot name it; only plain files come out of quarantine, and it stays where it is",
+                src
+            )
+        );
+    }
     let size = proof.as_ref().and_then(|p| p.size).unwrap_or(0);
     let manifest = [pc_db::Moved {
         src: src.to_string(),

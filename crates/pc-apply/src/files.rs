@@ -175,6 +175,52 @@ pub(crate) fn found_at(p: &Path) -> std::io::Result<Found> {
     })
 }
 
+/// Only a plain file moves as a photograph — as a frame to organize, out of
+/// quarantine as an orphan, or back by an undo of either: the one rule for
+/// every unit member (el-1nx1u B1/B2, el-4hyy6 B1). A link or junction moved
+/// as itself would leave the photograph behind and be counted as moved;
+/// followed, it would carry someone else's file. A folder, a cloud
+/// placeholder or another special object is not a photograph this tool
+/// knows how to carry. The evidence a unit is bound to says the same of the
+/// object the move then renames ([`plain_proof`]).
+///
+/// `None` for a plain file and for nothing at all (that answer is the
+/// caller's); otherwise why the whole unit stays where it is.
+pub(crate) fn not_a_plain_file(p: &Path) -> Option<String> {
+    let what = match found_at(p) {
+        Ok(Found::File) => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return Some(unknown_kind(p, &e)),
+        Ok(Found::Link) => pc_core::tr!(
+            "символическая ссылка или соединение (junction)",
+            "a symbolic link or a junction"
+        ),
+        Ok(Found::Dir) => pc_core::tr!("папка", "a folder"),
+        Ok(Found::Other) => pc_core::tr!(
+            "не обычный файл (облачная заглушка или иной особый объект)",
+            "not a regular file (a cloud placeholder or another special object)"
+        ),
+    };
+    Some(not_plain_text(p, what))
+}
+
+/// The evidence describes a plain file, read as itself. Anything else —
+/// a link, a folder, an object this system cannot name — is refused, so
+/// the move bound to this evidence never renames something else.
+pub(crate) fn plain_proof(proof: Option<&pc_core::proof::Proof>) -> bool {
+    proof.is_some_and(|p| p.kind == pc_core::proof::Kind::File)
+}
+
+/// The refusal for an entry that is not a plain file, or cannot be told.
+pub(crate) fn not_plain_text(p: &Path, what: &str) -> String {
+    pc_core::tf!(
+        "{0} — {1}, а не обычный файл: программа по нему не переходит и не переносит его; кадр со спутниками не переносится, ничего не перенесено",
+        "{0} is {1}, not a plain file: the tool neither follows nor moves it; the frame and its companions are not moved, nothing moved",
+        p.display(),
+        what
+    )
+}
+
 fn unknown_kind(p: &Path, e: &std::io::Error) -> String {
     pc_core::tf!(
         "не удалось узнать, что такое {0}, не переходя по нему ({1}); кадр со спутниками не переносится, ничего не перенесено",
@@ -663,7 +709,7 @@ pub fn quarantine_file(
         // The evidence is what the unit is bound to: it has to describe a
         // plain file, read as itself, or the entry became something else
         // since [`companion_doubt`] looked (el-1nx1u B1/B2).
-        if proof.kind != pc_core::proof::Kind::File {
+        if !plain_proof(Some(&proof)) {
             return Ok(Filed::refused(not_a_companion(&side.src).unwrap_or_else(
                 || {
                     pc_core::tf!(

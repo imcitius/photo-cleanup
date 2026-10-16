@@ -80,6 +80,65 @@ impl Fixture {
     }
 }
 
+/// An orphan in quarantine that is a link — to a folder (a junction on
+/// Windows), to a file, or to nothing — or a folder, is not carried out:
+/// only plain files come out of quarantine (el-4hyy6, the unit rule of
+/// el-1nx1u B1). Nothing moves, nothing is written, and what a link leads
+/// to is untouched; a plain orphan beside it still comes home.
+#[test]
+fn an_orphan_that_is_not_a_plain_file_stays_in_quarantine() {
+    let f = Fixture::new();
+    let q = f.dir.join(pc_core::QUARANTINE_DIR);
+    fs::create_dir_all(&q).unwrap();
+    let elsewhere = f.tmp.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("inside.jpg"), b"the user's 21").unwrap();
+    let to_folder = q.join("Album");
+    directory_link(&to_folder, &elsewhere);
+    let to_file = q.join("linked.jpg");
+    file_link(&to_file, &elsewhere.join("inside.jpg"));
+    let dangling = q.join("gone");
+    directory_link(&dangling, &f.tmp.path().join("nowhere"));
+    let folder = q.join("Folder");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("x.jpg"), b"inside 9").unwrap();
+
+    for at in [&to_folder, &to_file, &dangling, &folder] {
+        let home = f.dir.join(at.file_name().unwrap());
+        let r = crate::adopt_orphan(
+            &f.db,
+            f.run,
+            &at.display().to_string(),
+            &home.display().to_string(),
+        );
+        let e = r.expect_err(&format!("{} came out", at.display()));
+        assert!(
+            format!("{e:#}").contains(&at.display().to_string()),
+            "{e:#}"
+        );
+        assert!(fs::symlink_metadata(at).is_ok(), "{}", at.display());
+        assert!(fs::symlink_metadata(&home).is_err(), "{}", home.display());
+    }
+    assert_eq!(f.rows(), 0);
+    assert_eq!(
+        fs::read(elsewhere.join("inside.jpg")).unwrap(),
+        b"the user's 21"
+    );
+    assert_eq!(fs::read(folder.join("x.jpg")).unwrap(), b"inside 9");
+
+    let plain = q.join("plain.jpg");
+    fs::write(&plain, b"orphan 8").unwrap();
+    let home = f.dir.join("plain.jpg");
+    crate::adopt_orphan(
+        &f.db,
+        f.run,
+        &plain.display().to_string(),
+        &home.display().to_string(),
+    )
+    .unwrap();
+    assert_eq!(fs::read(&home).unwrap(), b"orphan 8");
+}
+
 /// A link to a folder: a symbolic link on Unix, a junction on Windows (no
 /// privilege needed).
 fn directory_link(at: &Path, target: &Path) {
@@ -657,4 +716,115 @@ fn an_old_row_outside_its_own_run_roots_is_refused() {
     );
     let entry = f.db.journal_entry(id).unwrap().unwrap();
     assert_kept(&f, &entry, &f.dir);
+}
+
+/// A planned organize move for the fixture's photograph into `new/`.
+fn organize_move(f: &Fixture, size: i64, mtime: i64) -> pc_organize::Move {
+    pc_organize::Move {
+        file_id: 0,
+        src: f.photo.display().to_string(),
+        dst: f.tmp.path().join("new/frame.arw").display().to_string(),
+        size,
+        mtime,
+        date: pc_organize::Dated {
+            ts: 1_562_000_000,
+            source: pc_organize::Source::Exif,
+            precision: pc_organize::Precision::Day,
+        },
+        event: "2019".into(),
+        renamed_from: None,
+    }
+}
+
+/// Organize looks at the frame as itself before anything follows it
+/// (el-4hyy6 B1): a file link, a link to a folder (a junction on Windows)
+/// or a folder standing at the planned frame's name refuses the whole unit
+/// before the journal is written — the link stays, its plain sidecar stays,
+/// nothing is counted as done, and what it leads to is untouched.
+#[test]
+fn organize_refuses_a_frame_that_is_not_a_plain_file_before_any_move() {
+    for case in ["file link", "folder link", "folder"] {
+        let f = Fixture::new();
+        let md = fs::metadata(&f.photo).unwrap();
+        let m = organize_move(&f, md.len() as i64, pc_core::time::mtime_unix(&md));
+        let side = f.dir.join("frame.xmp");
+        fs::write(&side, b"synthetic edits 291").unwrap();
+        let aside = f.tmp.path().join("saved-frame.arw");
+        fs::rename(&f.photo, &aside).unwrap();
+        let foreign = f.tmp.path().join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        let target = foreign.join("frame.arw");
+        fs::copy(&aside, &target).unwrap();
+        match case {
+            "file link" => file_link(&f.photo, &target),
+            "folder link" => directory_link(&f.photo, &foreign),
+            _ => fs::create_dir(&f.photo).unwrap(),
+        }
+        let before = snapshot(&target);
+
+        let r = crate::organize(&f.db, f.run, std::slice::from_ref(&m)).unwrap();
+        assert_eq!(r.done.frames, 0, "{case}: {r:?}");
+        assert_eq!(r.done.companions, 0, "{case}: {r:?}");
+        let why = &r.refused.first().expect(case).1;
+        assert!(why.contains(&m.src), "{case}: {why}");
+        assert!(why.contains("not a plain file"), "{case}: {why}");
+        assert_eq!(f.rows(), 0, "{case}: a refused frame writes no row");
+        assert!(fs::symlink_metadata(&f.photo).is_ok(), "{case}");
+        assert_eq!(fs::read(&side).unwrap(), b"synthetic edits 291", "{case}");
+        assert!(fs::symlink_metadata(&m.dst).is_err(), "{case}");
+        assert!(
+            fs::symlink_metadata(f.tmp.path().join("new/frame.xmp")).is_err(),
+            "{case}"
+        );
+        assert_eq!(snapshot(&target), before, "{case}");
+        assert_eq!(fs::read_dir(&foreign).unwrap().count(), 1, "{case}");
+    }
+}
+
+/// An undo whose row recorded a link as its frame — no row this version
+/// writes, but one an older candidate could have — moves nothing: only
+/// plain files come back, the row stays open, and the link and what it
+/// leads to are where they were.
+#[test]
+fn an_undo_does_not_bring_back_a_frame_recorded_as_a_link() {
+    let f = Fixture::new();
+    let new = f.tmp.path().join("new");
+    fs::create_dir_all(&new).unwrap();
+    let target = f.tmp.path().join("foreign.arw");
+    fs::rename(&f.photo, &target).unwrap();
+    let arrived = new.join("frame.arw");
+    file_link(&arrived, &target);
+    let before = snapshot(&target);
+    let manifest = [pc_db::Moved {
+        src: f.photo.display().to_string(),
+        dst: arrived.display().to_string(),
+        proof: crate::files::evidence(&arrived).unwrap(),
+        home: Some(crate::bound::folder_of(&f.photo).unwrap()),
+    }];
+    assert!(!crate::files::plain_proof(manifest[0].proof.as_ref()));
+    let id =
+        f.db.journal_begin(&pc_db::NewJournalEntry {
+            run_id: f.run,
+            op: "organize",
+            target_id: None,
+            src: &manifest[0].src,
+            dst: Some(&manifest[0].dst),
+            size: 0,
+            file_count: 1,
+            manifest: &manifest,
+        })
+        .unwrap();
+    f.db.journal_finish(id, JournalStatus::Done, None).unwrap();
+
+    let err = crate::undo(&f.db, id).unwrap_err();
+    let shown = format!("{err:#}");
+    assert!(shown.contains("only plain files come back"), "{shown}");
+    assert!(fs::symlink_metadata(&arrived)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(fs::symlink_metadata(&f.photo).is_err(), "{shown}");
+    assert_eq!(snapshot(&target), before);
+    let now = f.db.journal_entry(id).unwrap().unwrap();
+    assert_eq!(now.status, JournalStatus::Done);
 }

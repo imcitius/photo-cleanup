@@ -278,8 +278,6 @@ fn reconcile_uses_identity_instead_of_home_name() {
 /// the row was finished. Recovery works from the evidence recorded before
 /// the move, so the frame comes back, and a file swapped in at its
 /// quarantine name meanwhile does not.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn retry_after_crash_uses_persisted_object_evidence() {
     for swapped in [false, true] {
@@ -435,8 +433,6 @@ fn reconcile_ambiguity_preserves_prior_evidence() {
 }
 
 /// D6b. A successful recovery adds its own line and keeps the history.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn reconcile_success_preserves_prior_evidence() {
     let a = archive();
@@ -516,8 +512,6 @@ fn a_refused_sidecar_keeps_its_frame_and_nothing_is_counted() {
 /// A reorganisation stopped in its litter sweep: the frame, its sidecar
 /// and the first service file moved; the second service file met the
 /// volume. All three moves are in what the stop reports.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn partial_outcomes_include_moved_sidecars_and_litter() {
     let a = archive();

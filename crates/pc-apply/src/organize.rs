@@ -88,8 +88,6 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
     let mut report = OrganizeReport::default();
     let mut source_dirs: BTreeSet<PathBuf> = BTreeSet::new();
     let route = Route::Organize { run_id };
-    // Not on Windows yet (el-61ar8 §4.C), whatever the list.
-    crate::not_yet_on_windows(("раскладка по папкам", "reorganising into folders"))?;
     // A volume that cannot move without replacing stops the run before its
     // first move.
     crate::check_organize(moves)?;
@@ -115,6 +113,14 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
         let src = Path::new(&m.src);
         let dst = Path::new(&m.dst);
 
+        // The frame itself is looked at as itself first: a link, a junction
+        // or any object but a plain file at the planned name refuses the
+        // unit before anything below follows it (el-4hyy6 B1). The checks
+        // after this one read the file through its name.
+        if let Some(why) = crate::files::not_a_plain_file(src) {
+            report.refused.push((m.src.clone(), why));
+            continue;
+        }
         if !src.is_file() {
             report.refused.push((
                 m.src.clone(),
@@ -154,6 +160,22 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
                 continue;
             }
         };
+        // The unit is bound to this evidence, so it has to describe a plain
+        // file: an entry that became something else since the look above is
+        // refused here, before the journal, and never renamed.
+        if !crate::files::plain_proof(frame_proof.as_ref()) {
+            let why = crate::files::not_a_plain_file(src).unwrap_or_else(|| {
+                crate::files::not_plain_text(
+                    src,
+                    pc_core::tr!(
+                        "объект, который эта система не может назвать",
+                        "an object this system cannot name"
+                    ),
+                )
+            });
+            report.refused.push((m.src.clone(), why));
+            continue;
+        }
         // Which folder each member leaves, for a completed undo to return
         // to that folder and no other (el-4r8yf B3-R2); the move checks it
         // against the folder it holds.
@@ -211,6 +233,18 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
                     break;
                 }
             };
+            // Bound to this evidence: a plain file, as in quarantine, or the
+            // entry became something else since [`companion_doubt`] looked.
+            if !crate::files::plain_proof(Some(&proof)) {
+                refusal = Some(crate::files::not_a_companion(&side.src).unwrap_or_else(|| {
+                    pc_core::tf!(
+                        "спутник {0} не обычный файл",
+                        "the companion {0} is not a regular file",
+                        side.src.display()
+                    )
+                }));
+                break;
+            }
             let home = match crate::bound::folder_of(&side.src) {
                 Ok(h) => h,
                 Err(e) => {
@@ -441,6 +475,20 @@ fn sweep_litter(
                     continue;
                 }
             };
+            // The same rule as for a frame: only a plain file moves.
+            if !crate::files::plain_proof(proof.as_ref()) {
+                let why = crate::files::not_a_plain_file(&src).unwrap_or_else(|| {
+                    crate::files::not_plain_text(
+                        &src,
+                        pc_core::tr!(
+                            "объект, который эта система не может назвать",
+                            "an object this system cannot name"
+                        ),
+                    )
+                });
+                report.refused.push((src_s, why));
+                continue;
+            }
             let size = proof.as_ref().and_then(|p| p.size).unwrap_or(0);
             let home = match crate::bound::folder_of(&src) {
                 Ok(h) => h,
@@ -525,7 +573,6 @@ fn sweep_litter(
 /// back is counted from what each undo actually did — entries walked back
 /// whole, entries walked back in part, and files.
 pub fn undo_run(db: &Db, run_id: i64) -> Result<(Tally, Vec<String>)> {
-    crate::not_yet_on_windows(("откат раскладки по папкам", "undoing a reorganisation"))?;
     let entries = db.journal_by_run_op(run_id, "organize")?;
     if entries.is_empty() {
         bail!(
@@ -564,8 +611,6 @@ pub fn undo_run(db: &Db, run_id: i64) -> Result<(Tally, Vec<String>)> {
 mod tests {
     use super::*;
 
-    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-    #[cfg(unix)]
     #[test]
     fn an_undo_after_a_reset_moves_the_file_and_leaves_the_index_alone() {
         // Same reuse of row ids as in quarantine: an old reorganisation entry
@@ -647,8 +692,6 @@ mod tests {
         );
     }
 
-    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-    #[cfg(unix)]
     #[test]
     fn a_service_file_is_quarantined_not_deleted_and_comes_back() {
         // An AppleDouble can carry a resource fork, and Finder's folder note

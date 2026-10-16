@@ -176,8 +176,6 @@ fn unsupported_proof_schema_must_not_become_legacy_adoption() {
 
 // ------------------------------------------------------------------ B3 ----
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn organize_second_journal_failure_keeps_first_move_in_typed_result() {
     let a = archive();
@@ -186,17 +184,20 @@ fn organize_second_journal_failure_keeps_first_move_in_typed_result() {
     fs::write(&one, b"frame one").unwrap();
     fs::write(&two, b"frame two").unwrap();
     let ms = [
-        organized(&a, &one, &a.dir.join("new/one.arw")),
-        organized(&a, &two, &a.dir.join("new/two.arw")),
+        organized(&a, &one, &a.dir.join("new").join("one.arw")),
+        organized(&a, &two, &a.dir.join("new").join("two.arw")),
     ];
     a.db.conn
         .execute_batch(
-            "CREATE TRIGGER fail_second BEFORE INSERT ON journal WHEN NEW.src LIKE '%/two.arw' \
+            "CREATE TRIGGER fail_second BEFORE INSERT ON journal WHEN NEW.src LIKE '%two.arw' \
              BEGIN SELECT RAISE(FAIL,'synthetic second journal failure'); END;",
         )
         .unwrap();
     let e = crate::organize(&a.db, a.run, &ms).unwrap_err();
-    assert_eq!(fs::read(a.dir.join("new/one.arw")).unwrap(), b"frame one");
+    assert_eq!(
+        fs::read(a.dir.join("new").join("one.arw")).unwrap(),
+        b"frame one"
+    );
     assert_eq!(fs::read(&two).unwrap(), b"frame two");
     assert_eq!(
         crate::stopped_run(&e).map(|s| (s.done.frames, s.done.bytes)),
@@ -205,8 +206,6 @@ fn organize_second_journal_failure_keeps_first_move_in_typed_result() {
     );
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn litter_journal_failure_counts_litter_already_moved() {
     let a = archive();
@@ -215,17 +214,17 @@ fn litter_journal_failure_counts_litter_already_moved() {
     let src = dir.join("frame.arw");
     fs::write(&src, b"frame one").unwrap();
     fs::write(dir.join(".DS_Store"), b"finder data").unwrap();
-    let m = organized(&a, &src, &a.dir.join("new/frame.arw"));
+    let m = organized(&a, &src, &a.dir.join("new").join("frame.arw"));
     a.db.conn
         .execute_batch(
             "CREATE TRIGGER fail_litter BEFORE UPDATE OF status ON journal \
-             WHEN NEW.src LIKE '%/.DS_Store' AND NEW.status='done' \
+             WHEN NEW.src LIKE '%.DS_Store' AND NEW.status='done' \
              BEGIN SELECT RAISE(FAIL,'synthetic litter journal failure'); END;",
         )
         .unwrap();
     let e = crate::organize(&a.db, a.run, &[m]).unwrap_err();
     assert_eq!(
-        fs::read(a.quarantine.join("old/.DS_Store")).unwrap(),
+        fs::read(a.quarantine.join("old").join(".DS_Store")).unwrap(),
         b"finder data"
     );
     let stop = crate::stopped_run(&e).expect("a typed stop");
@@ -239,7 +238,7 @@ fn litter_journal_failure_counts_litter_already_moved() {
     let litter_row: i64 =
         a.db.conn
             .query_row(
-                "SELECT id FROM journal WHERE src LIKE '%/.DS_Store'",
+                "SELECT id FROM journal WHERE src LIKE '%.DS_Store'",
                 [],
                 |r| r.get(0),
             )
@@ -310,7 +309,9 @@ fn undo_persistence_failure_keeps_returned_file_in_typed_result() {
 
 // ------------------------------------------------------------------ B4 ----
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+// A row without evidence, as only older Unix versions wrote: on Windows such
+// a row is never walked back by its names, and the reconciliation refuses it
+// (`windows_recovery_uses_file_identity_not_a_path_key`).
 #[cfg(unix)]
 #[test]
 fn legacy_reconcile_partial_can_retry_without_guessing_home() {

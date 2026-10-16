@@ -737,25 +737,29 @@ fn windows_never_purges() {
 
 // --------------------------------------------------------- el-61ar8 §4.C ---
 
-/// What is not carried out on Windows yet is refused with the reason, and
-/// touches nothing: a reorganisation and its undo, the reconciliation of an
-/// interrupted operation, an orphan's return.
-#[test]
-fn reorganising_reconciling_and_adopting_are_refused_on_windows_for_now() {
-    let a = archive();
-    let not_yet = |e: anyhow::Error, what: &str| {
-        let shown = format!("{e:#}");
-        assert!(
-            shown.contains("on Windows") && shown.contains(what),
-            "{what}: {shown}"
-        );
-    };
-    let planned = pc_organize::Move {
-        file_id: 1,
-        src: a.dir.join("frame.jpg").display().to_string(),
-        dst: a.dir.join("2019").join("frame.jpg").display().to_string(),
-        size: 1,
-        mtime: 0,
+/// A reorganisation move of `src` to `dst`, as the planner hands it over:
+/// indexed, with the size and time the index recorded.
+fn organized(a: &Archive, src: &Path, dst: &Path) -> pc_organize::Move {
+    let md = fs::metadata(src).unwrap();
+    let mtime = pc_core::time::mtime_unix(&md);
+    let file_id =
+        a.db.upsert_file(
+            &pc_db::NewFile {
+                path: src.display().to_string(),
+                name: src.file_name().unwrap().to_string_lossy().into_owned(),
+                size: md.len() as i64,
+                mtime,
+                ..Default::default()
+            },
+            a.run,
+        )
+        .unwrap();
+    pc_organize::Move {
+        file_id,
+        src: src.display().to_string(),
+        dst: dst.display().to_string(),
+        size: md.len() as i64,
+        mtime,
         date: pc_organize::Dated {
             ts: 1_562_000_000,
             source: pc_organize::Source::Exif,
@@ -763,66 +767,309 @@ fn reorganising_reconciling_and_adopting_are_refused_on_windows_for_now() {
         },
         event: "2019".into(),
         renamed_from: None,
-    };
-    not_yet(
-        crate::check_organize(std::slice::from_ref(&planned)).unwrap_err(),
-        "reorganising",
-    );
-    crate::check_organize(&[]).unwrap();
-    assert!(!a.dir.join("2019").exists());
-    not_yet(
-        crate::organize(&a.db, a.run, &[]).unwrap_err(),
-        "reorganising",
-    );
-    not_yet(crate::undo_run(&a.db, a.run).unwrap_err(), "reorganisation");
+    }
+}
 
-    // An interrupted move: the file is held, the row pending.
-    fs::create_dir_all(&a.quarantine).unwrap();
-    let home = a.dir.join("frame.arw");
-    let held = a.quarantine.join("frame.arw");
-    fs::write(&held, b"raw frame 6024").unwrap();
-    let m = pc_db::Moved {
-        src: home.display().to_string(),
-        dst: held.display().to_string(),
-        proof: crate::files::evidence(&held).unwrap(),
-        home: None,
-    };
-    assert!(m.proof.is_some(), "NTFS gives evidence");
-    let id =
-        a.db.journal_begin(&pc_db::NewJournalEntry {
-            run_id: a.run,
-            op: "quarantine-file",
-            target_id: None,
-            src: &m.src,
-            dst: Some(&m.dst),
-            size: 14,
-            file_count: 1,
-            manifest: std::slice::from_ref(&m),
+fn indexed_path(db: &Db, file_id: i64) -> String {
+    db.conn
+        .query_row("SELECT path FROM files WHERE id = ?1", [file_id], |r| {
+            r.get(0)
         })
-        .unwrap();
-    not_yet(crate::reconcile_undo(&a.db, id).unwrap_err(), "reconciling");
-    assert_eq!(
-        a.db.journal_entry(id).unwrap().unwrap().status,
-        JournalStatus::Pending
-    );
-    assert!(fs::symlink_metadata(&home).is_err());
+        .unwrap()
+}
 
+/// A reorganisation on NTFS: the frame goes to its new folder with its
+/// sidecar, the index follows, and the service file left alone in the
+/// emptied folder is moved into quarantine beside it — moved, never
+/// deleted, and the emptied folder stays. Walking the run back brings every
+/// one of them home, and the index with them.
+#[test]
+fn a_reorganisation_moves_the_frame_its_sidecar_and_the_service_files_and_comes_back() {
+    let a = archive();
+    let old = a.dir.join("card");
+    fs::create_dir_all(&old).unwrap();
+    let photo = old.join("DSC01234.ARW");
+    let side = old.join("DSC01234.xmp");
+    let finder = old.join(".DS_Store");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    fs::write(&side, b"edits 812").unwrap();
+    fs::write(&finder, b"finder 6148").unwrap();
+    let new = a.dir.join("2019").join("2019-07-01");
+    let m = organized(&a, &photo, &new.join("DSC01234.ARW"));
+    let id = m.file_id;
+
+    crate::check_organize(std::slice::from_ref(&m)).unwrap();
+    let report = crate::organize(&a.db, a.run, &[m]).unwrap();
+
+    assert_eq!(
+        (
+            report.done.frames,
+            report.done.companions,
+            report.done.litter
+        ),
+        (1, 1, 1),
+        "{:?}",
+        report.refused
+    );
+    assert_eq!(
+        fs::read(new.join("DSC01234.ARW")).unwrap(),
+        b"raw frame 6024"
+    );
+    assert_eq!(fs::read(new.join("DSC01234.xmp")).unwrap(), b"edits 812");
+    let swept = a.quarantine.join("card").join(".DS_Store");
+    assert_eq!(fs::read(&swept).unwrap(), b"finder 6148");
+    assert!(old.is_dir(), "the emptied folder was removed");
+    assert_eq!(fs::read_dir(&old).unwrap().count(), 0);
+    assert_eq!(
+        indexed_path(&a.db, id),
+        new.join("DSC01234.ARW").display().to_string()
+    );
+
+    let (back, failed) = crate::undo_run(&a.db, a.run).unwrap();
+
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(back.entries_back, 2);
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+    assert_eq!(fs::read(&side).unwrap(), b"edits 812");
+    assert_eq!(fs::read(&finder).unwrap(), b"finder 6148");
+    assert!(fs::symlink_metadata(new.join("DSC01234.ARW")).is_err());
+    assert!(fs::symlink_metadata(&swept).is_err());
+    assert_eq!(indexed_path(&a.db, id), photo.display().to_string());
+}
+
+/// A photograph another program has open is not reorganised: it is refused
+/// as in use, in the words the command line and the web both show, the
+/// refusal is a failed row, and nothing moves. Once it is closed, it moves.
+#[test]
+fn a_reorganisation_of_a_file_held_by_another_program_is_refused_and_named() {
+    let a = archive();
+    let photo = a.dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    let dst = a.dir.join("2019").join("frame.arw");
+    let m = organized(&a, &photo, &dst);
+    let other = held_by_another_program(&photo);
+
+    let report = crate::organize(&a.db, a.run, std::slice::from_ref(&m)).unwrap();
+
+    assert_eq!(report.done.frames, 0);
+    let (_, why) = &report.refused[0];
+    assert!(why.contains(&crate::in_use_text(&photo)), "{why}");
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+    assert!(fs::symlink_metadata(&dst).is_err());
+    let (status, note) = last_row(&a.db);
+    assert_eq!(status, JournalStatus::Failed.as_str());
+    assert!(note.contains(&crate::in_use_text(&photo)), "{note}");
+    assert!(a
+        .db
+        .journal_by_run_op(a.run, "organize")
+        .unwrap()
+        .is_empty());
+
+    drop(other);
+    let report = crate::organize(&a.db, a.run, &[m]).unwrap();
+    assert_eq!(report.done.frames, 1, "{:?}", report.refused);
+    assert_eq!(fs::read(&dst).unwrap(), b"raw frame 6024");
+}
+
+/// A reorganisation into a folder on another volume is refused before
+/// anything moves: the preview's check and the run say so. (As
+/// `a_quarantine_on_another_volume_is_refused_before_anything_moves`.)
+#[test]
+fn a_reorganisation_onto_another_volume_is_refused_before_anything_moves() {
+    let a = archive();
+    let other_root = std::env::var_os("PC_TEST_OTHER_VOLUME")
+        .map(PathBuf::from)
+        .or_else(|| Some(std::env::current_exe().ok()?.parent()?.to_path_buf()))
+        .unwrap();
+    let other = tempfile::tempdir_in(&other_root).unwrap();
+    let serial = |p: &Path| pc_core::anchored::Dir::open(p).unwrap().ident().unwrap().0;
+    if serial(other.path()) == serial(&a.dir) {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must have a second volume for this test"
+        );
+        eprintln!("skipped: {} is on the same volume", other_root.display());
+        return;
+    }
+    let photo = a.dir.join("frame.arw");
+    fs::write(&photo, b"raw frame 6024").unwrap();
+    let m = organized(&a, &photo, &other.path().join("2019").join("frame.arw"));
+
+    let checked = crate::check_organize(std::slice::from_ref(&m)).unwrap_err();
+    let e = crate::organize(&a.db, a.run, &[m]).unwrap_err();
+
+    for e in [checked, e] {
+        assert!(format!("{e:#}").contains("different filesystem"), "{e:#}");
+    }
+    assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+    assert_eq!(fs::read_dir(other.path()).unwrap().count(), 0);
+    assert_eq!(rows(&a.db), 0);
+}
+
+/// Set `at`'s last-write time to `like`'s: the only field of the evidence a
+/// stranger could share besides its size, so what tells them apart is the
+/// NTFS file ID alone.
+fn same_times(at: &Path, like: &Path) {
+    let t = fs::metadata(like).unwrap().modified().unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(at)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+}
+
+/// The process dies between the rename and the journal's record of it, in
+/// a move into quarantine and in a reorganisation: the row is left
+/// `pending`. Someone moves the frame aside and puts a copy of it in its
+/// place — the same bytes, the same size, the same last-write time — so
+/// only the NTFS file ID tells them apart. The reconciliation does not take
+/// the copy for the frame: nothing moves, the copy stays, the row stays
+/// pending and says where. With the frame itself back at that place, the
+/// reconciliation brings it home by its file ID and closes the row.
+#[test]
+fn a_crash_between_the_rename_and_the_journal_is_reconciled_by_file_id_and_claims_no_stranger() {
+    for organize in [false, true] {
+        let a = archive();
+        let photo = a.dir.join("frame.arw");
+        fs::write(&photo, b"raw frame 6024").unwrap();
+        let held = if organize {
+            a.dir.join("2019").join("frame.arw")
+        } else {
+            a.quarantine.join("frame.arw")
+        };
+        a.db.conn
+            .execute_batch(
+                "CREATE TRIGGER crash BEFORE UPDATE OF status ON journal
+                 BEGIN SELECT RAISE(ABORT, 'process killed'); END;",
+            )
+            .unwrap();
+        if organize {
+            let m = organized(&a, &photo, &held);
+            assert!(crate::organize(&a.db, a.run, &[m]).is_err());
+        } else {
+            let c = candidate(&a.db, a.run, &photo);
+            let _ = crate::files::quarantine_file(&a.db, a.run, &c, None);
+        }
+        a.db.conn.execute_batch("DROP TRIGGER crash").unwrap();
+        let id: i64 =
+            a.db.conn
+                .query_row("SELECT max(id) FROM journal", [], |r| r.get(0))
+                .unwrap();
+        let entry = a.db.journal_entry(id).unwrap().unwrap();
+        assert_eq!(entry.status, JournalStatus::Pending, "organize={organize}");
+        assert_eq!(fs::read(&held).unwrap(), b"raw frame 6024");
+        assert!(fs::symlink_metadata(&photo).is_err());
+        let ours = entry.manifest[0].proof.clone().expect("evidence recorded");
+
+        // The frame aside; a copy of it, to the last-write time, in its place.
+        let aside = a.dir.join("frame-aside.arw");
+        fs::rename(&held, &aside).unwrap();
+        fs::write(&held, b"raw frame 6024").unwrap();
+        same_times(&held, &aside);
+        let copy = crate::files::evidence(&held).unwrap().unwrap();
+        assert_eq!(
+            (copy.dev, copy.size, copy.mtime_ns),
+            (ours.dev, ours.size, ours.mtime_ns),
+            "organize={organize}: the copy differs in more than its file ID"
+        );
+        assert_ne!(copy.ino, ours.ino);
+
+        let e = crate::reconcile_undo(&a.db, id).unwrap_err();
+
+        let shown = format!("{e:#}");
+        assert!(
+            shown.contains(&held.display().to_string()),
+            "organize={organize}: {shown}"
+        );
+        assert!(
+            fs::symlink_metadata(&photo).is_err(),
+            "a stranger came home"
+        );
+        assert_eq!(fs::read(&held).unwrap(), b"raw frame 6024");
+        assert_eq!(fs::read(&aside).unwrap(), b"raw frame 6024");
+        let (status, note) = last_row(&a.db);
+        assert_eq!(status, "pending", "organize={organize}");
+        assert!(note.contains(&held.display().to_string()), "{note}");
+
+        // The copy is the user's to keep; the frame goes back where the
+        // operation put it, and comes home from there.
+        let kept = a.dir.join("copy-kept.arw");
+        fs::rename(&held, &kept).unwrap();
+        fs::rename(&aside, &held).unwrap();
+
+        let r = crate::reconcile_undo(&a.db, id).unwrap();
+
+        assert_eq!(r.done.files_back, 1, "organize={organize}");
+        assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
+        assert!(fs::symlink_metadata(&held).is_err());
+        assert_eq!(fs::read(&kept).unwrap(), b"raw frame 6024");
+        assert_eq!(
+            a.db.journal_entry(id).unwrap().unwrap().status,
+            JournalStatus::Undone
+        );
+    }
+}
+
+/// A file in quarantine the journal never recorded comes back where its
+/// path says, and that return is journaled and can be walked back like any
+/// other move. A junction at an orphan's path is not followed: it is
+/// refused, and it and what it leads to stay as they were.
+#[test]
+fn an_orphan_comes_home_and_a_junction_in_its_place_is_refused() {
+    let a = archive();
+    fs::create_dir_all(&a.quarantine).unwrap();
     let orphan = a.quarantine.join("orphan.arw");
     fs::write(&orphan, b"nobody's 9").unwrap();
     let back = a.dir.join("orphan.arw");
-    not_yet(
-        crate::adopt_orphan(
-            &a.db,
-            a.run,
-            &orphan.display().to_string(),
-            &back.display().to_string(),
-        )
-        .unwrap_err(),
-        "journal never recorded",
-    );
+
+    let done = crate::adopt_orphan(
+        &a.db,
+        a.run,
+        &orphan.display().to_string(),
+        &back.display().to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(done.files_back, 1);
+    assert_eq!(fs::read(&back).unwrap(), b"nobody's 9");
+    assert!(fs::symlink_metadata(&orphan).is_err());
+    let entry =
+        a.db.journal_by_run_op(a.run, "adopt")
+            .unwrap()
+            .pop()
+            .unwrap();
+    assert_eq!(entry.status, JournalStatus::Done);
+    crate::undo(&a.db, entry.id).unwrap();
     assert_eq!(fs::read(&orphan).unwrap(), b"nobody's 9");
     assert!(fs::symlink_metadata(&back).is_err());
-    assert_eq!(fs::read(&held).unwrap(), b"raw frame 6024");
+
+    let elsewhere = a.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("inside.jpg"), b"the user's 21").unwrap();
+    let link = a.quarantine.join("Album");
+    junction(&link, &elsewhere);
+    let home = a.dir.join("Album");
+    let rows_before = rows(&a.db);
+
+    let r = crate::adopt_orphan(
+        &a.db,
+        a.run,
+        &link.display().to_string(),
+        &home.display().to_string(),
+    );
+
+    assert!(r.is_err(), "{r:?}");
+    assert_eq!(rows(&a.db), rows_before, "a refused orphan wrote a row");
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(fs::symlink_metadata(&home).is_err());
+    assert_eq!(
+        fs::read(elsewhere.join("inside.jpg")).unwrap(),
+        b"the user's 21"
+    );
 }
 
 // ----------------------------------------------------------- gathered ----

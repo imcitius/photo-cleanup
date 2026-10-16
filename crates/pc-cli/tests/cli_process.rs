@@ -317,8 +317,6 @@ fn previews_stay_whether_their_catalogue_is_open_or_closed() {
 /// the journal refuses the second photograph's row after the first has
 /// moved. The command fails, and prints the receipt of the move that did
 /// happen — the same summary the web's job carries.
-// Reorganising is refused on Windows until el-61ar8 §4.C.
-#[cfg(unix)]
 #[test]
 fn a_database_failure_after_a_move_prints_the_receipt() {
     let cli = Cli::new();
