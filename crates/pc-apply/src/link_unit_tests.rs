@@ -80,6 +80,65 @@ impl Fixture {
     }
 }
 
+/// An orphan in quarantine that is a link — to a folder (a junction on
+/// Windows), to a file, or to nothing — or a folder, is not carried out:
+/// only plain files come out of quarantine (el-4hyy6, the unit rule of
+/// el-1nx1u B1). Nothing moves, nothing is written, and what a link leads
+/// to is untouched; a plain orphan beside it still comes home.
+#[test]
+fn an_orphan_that_is_not_a_plain_file_stays_in_quarantine() {
+    let f = Fixture::new();
+    let q = f.dir.join(pc_core::QUARANTINE_DIR);
+    fs::create_dir_all(&q).unwrap();
+    let elsewhere = f.tmp.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("inside.jpg"), b"the user's 21").unwrap();
+    let to_folder = q.join("Album");
+    directory_link(&to_folder, &elsewhere);
+    let to_file = q.join("linked.jpg");
+    file_link(&to_file, &elsewhere.join("inside.jpg"));
+    let dangling = q.join("gone");
+    directory_link(&dangling, &f.tmp.path().join("nowhere"));
+    let folder = q.join("Folder");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("x.jpg"), b"inside 9").unwrap();
+
+    for at in [&to_folder, &to_file, &dangling, &folder] {
+        let home = f.dir.join(at.file_name().unwrap());
+        let r = crate::adopt_orphan(
+            &f.db,
+            f.run,
+            &at.display().to_string(),
+            &home.display().to_string(),
+        );
+        let e = r.expect_err(&format!("{} came out", at.display()));
+        assert!(
+            format!("{e:#}").contains(&at.display().to_string()),
+            "{e:#}"
+        );
+        assert!(fs::symlink_metadata(at).is_ok(), "{}", at.display());
+        assert!(fs::symlink_metadata(&home).is_err(), "{}", home.display());
+    }
+    assert_eq!(f.rows(), 0);
+    assert_eq!(
+        fs::read(elsewhere.join("inside.jpg")).unwrap(),
+        b"the user's 21"
+    );
+    assert_eq!(fs::read(folder.join("x.jpg")).unwrap(), b"inside 9");
+
+    let plain = q.join("plain.jpg");
+    fs::write(&plain, b"orphan 8").unwrap();
+    let home = f.dir.join("plain.jpg");
+    crate::adopt_orphan(
+        &f.db,
+        f.run,
+        &plain.display().to_string(),
+        &home.display().to_string(),
+    )
+    .unwrap();
+    assert_eq!(fs::read(&home).unwrap(), b"orphan 8");
+}
+
 /// A link to a folder: a symbolic link on Unix, a junction on Windows (no
 /// privilege needed).
 fn directory_link(at: &Path, target: &Path) {

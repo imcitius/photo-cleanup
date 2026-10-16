@@ -466,10 +466,23 @@ pub fn check_candidates(
 /// move.
 pub fn check_organize(moves: &[pc_organize::Move]) -> Result<()> {
     check_all(moves.iter().map(|m| Path::new(&m.dst)))?;
+    // Each pair of folders is asked once: a plan of thousands of photographs
+    // has a few dozen of them.
     #[cfg(windows)]
-    for m in moves {
-        if fs::symlink_metadata(&m.src).is_ok() {
-            same_volume(Path::new(&m.src), Path::new(&m.dst))?;
+    {
+        let mut asked = std::collections::BTreeSet::new();
+        for m in moves {
+            let (src, dst) = (Path::new(&m.src), Path::new(&m.dst));
+            if !asked.insert((src.parent(), dst.parent())) {
+                continue;
+            }
+            if fs::symlink_metadata(src).is_ok() {
+                same_volume(src, dst)?;
+            } else {
+                // Gone: refused on its own by the move. Asked again if
+                // another photograph of the same folder is there.
+                asked.remove(&(src.parent(), dst.parent()));
+            }
         }
     }
     Ok(())
@@ -830,6 +843,22 @@ pub fn adopt_orphan(db: &Db, run_id: i64, src: &str, dst: &str) -> Result<Tally>
         );
     }
     let proof = files::evidence(Path::new(src))?;
+    // Only a plain file comes out as an orphan: the scan lists nothing else
+    // (`pc_walk`), and a link, a junction, a folder or a placeholder at an
+    // orphan's path now is not what it found — the unit rule of
+    // el-1nx1u B1 for any member that is not a plain file. It stays where it
+    // is, and nothing is written. The move is bound to this evidence, so a
+    // file replaced by anything else after this look is refused there.
+    if proof.as_ref().map(|p| p.kind) != Some(pc_core::proof::Kind::File) {
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "{0} — не обычный файл (ссылка, соединение junction, папка или иной объект), либо эта система не может его назвать; из карантина возвращаются только обычные файлы, он остаётся на месте",
+                "{0} — not a plain file (a link, a junction, a folder or another object), or this system cannot name it; only plain files come out of quarantine, and it stays where it is",
+                src
+            )
+        );
+    }
     let size = proof.as_ref().and_then(|p| p.size).unwrap_or(0);
     let manifest = [pc_db::Moved {
         src: src.to_string(),

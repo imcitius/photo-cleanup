@@ -1050,6 +1050,7 @@ fn an_orphan_comes_home_and_a_junction_in_its_place_is_refused() {
     let link = a.quarantine.join("Album");
     junction(&link, &elsewhere);
     let home = a.dir.join("Album");
+    let rows_before = rows(&a.db);
 
     let r = crate::adopt_orphan(
         &a.db,
@@ -1059,6 +1060,7 @@ fn an_orphan_comes_home_and_a_junction_in_its_place_is_refused() {
     );
 
     assert!(r.is_err(), "{r:?}");
+    assert_eq!(rows(&a.db), rows_before, "a refused orphan wrote a row");
     assert!(fs::symlink_metadata(&link)
         .unwrap()
         .file_type()
