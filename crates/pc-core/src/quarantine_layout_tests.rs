@@ -34,10 +34,22 @@ fn aside(p: &Path) -> PathBuf {
     PathBuf::from(format!("{}.retained-own", p.display()))
 }
 
+/// A volume refusing the no-replace rename: `ENOTSUP` on Unix, the
+/// `Unsupported` kind Windows code uses for it.
+fn refused_call() -> io::Error {
+    #[cfg(unix)]
+    return io::Error::from_raw_os_error(libc::ENOTSUP);
+    #[cfg(windows)]
+    return io::Error::from(io::ErrorKind::Unsupported);
+}
+
 /// R1. At publication another program moves our temporary aside, puts its
 /// own file at the temporary's name and another at the note's name. The
 /// rename is refused; the cleanup must not delete the stranger at the
-/// temporary name, and the error names it.
+/// temporary name, and the error names it. Unix only: on Windows the
+/// temporary is held shared for reading only and cannot be moved aside
+/// (see `windows_a_held_temporary_cannot_be_substituted`).
+#[cfg(unix)]
 #[test]
 fn independent_layout_refusal_keeps_substituted_temp() {
     let (_t, root) = fresh();
@@ -108,9 +120,13 @@ fn write_or_sync_failure_retains_and_reports_unproved_temp() {
         e.retained.iter().any(|r| r.path == root.join(&left[0])),
         "{e}"
     );
-    drop(_g);
+}
 
-    // Swapped before the failure: the stranger stays and is named.
+/// Swapped before the failure: the stranger stays and is named. Unix only:
+/// on Windows the swap itself is refused (the temporary is held).
+#[cfg(unix)]
+#[test]
+fn a_write_failure_after_a_swap_keeps_the_stranger_and_names_it() {
     let (_t, root) = fresh();
     let _g = seam::set(|stage, p| match stage {
         Stage::Written => {
@@ -135,7 +151,8 @@ fn write_or_sync_failure_retains_and_reports_unproved_temp() {
 /// D1. The destination is free, but the temporary was swapped for a
 /// stranger's file just before publication: the rename publishes that
 /// file. It is not accepted as our note — the call fails, names it, and
-/// leaves it where it is.
+/// leaves it where it is. Unix only, as R1.
+#[cfg(unix)]
 #[test]
 fn layout_publication_does_not_accept_a_substituted_source() {
     let (_t, root) = fresh();
@@ -165,7 +182,7 @@ fn layout_failure_does_not_remove_a_substituted_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("collected").join(crate::QUARANTINE_DIR);
     let _g = seam::set(|stage, _| match stage {
-        Stage::Publish => Err(io::Error::from_raw_os_error(libc::ENOTSUP)),
+        Stage::Publish => Err(refused_call()),
         _ => Ok(()),
     });
     let e = note(&root, "disk1", Path::new("/mnt/disk1")).unwrap_err();
@@ -194,27 +211,32 @@ fn layout_failure_does_not_remove_a_substituted_directory() {
 fn an_existing_layout_is_admitted_by_its_schema_and_never_silently_rewritten() {
     let (_t, root) = fresh();
     let layout = root.join(crate::QUARANTINE_LAYOUT);
-    let old = br#"{"disk1": "/mnt/disk1"}"#;
+    // A mount point is an absolute path of this system: the earlier format
+    // is only believed when it says one.
+    let (disk1, disk2) = if cfg!(windows) {
+        (r"D:\", r"E:\")
+    } else {
+        ("/mnt/disk1", "/mnt/disk2")
+    };
+    let old = format!(r#"{{"disk1": {}}}"#, serde_json::to_string(disk1).unwrap());
+    let old = old.as_bytes();
     fs::write(&layout, old).unwrap();
-    note(&root, "disk1", Path::new("/mnt/disk1")).unwrap();
+    note(&root, "disk1", Path::new(disk1)).unwrap();
     assert_eq!(fs::read(&layout).unwrap(), old);
-    assert_eq!(
-        read(&root).get("disk1").map(String::as_str),
-        Some("/mnt/disk1")
-    );
-    assert!(note(&root, "disk2", Path::new("/mnt/disk2")).is_err());
+    assert_eq!(read(&root).get("disk1").map(String::as_str), Some(disk1));
+    assert!(note(&root, "disk2", Path::new(disk2)).is_err());
     assert_eq!(fs::read(&layout).unwrap(), old, "an old note was rewritten");
 
     for stranger in [&br#"{"notes": "my own json"}"#[..], br#"{"a": 1}"#, b"[]"] {
         fs::write(&layout, stranger).unwrap();
-        assert!(note(&root, "disk1", Path::new("/mnt/disk1")).is_err());
+        assert!(note(&root, "disk1", Path::new(disk1)).is_err());
         assert_eq!(fs::read(&layout).unwrap(), stranger);
     }
 
     // The versioned note grows, and keeps what it had.
     fs::remove_file(&layout).unwrap();
-    note(&root, "disk1", Path::new("/mnt/disk1")).unwrap();
-    note(&root, "disk2", Path::new("/mnt/disk2")).unwrap();
+    note(&root, "disk1", Path::new(disk1)).unwrap();
+    note(&root, "disk2", Path::new(disk2)).unwrap();
     let disks = read(&root);
     assert_eq!(disks.len(), 2);
     let raw = fs::read_to_string(&layout).unwrap();
@@ -231,7 +253,7 @@ fn an_unpublished_own_temporary_is_left_and_reported() {
         let (_t, root) = fresh();
         let _g = seam::set(move |stage, _| {
             if stage == stage_failing {
-                return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+                return Err(refused_call());
             }
             Ok(())
         });
@@ -293,4 +315,65 @@ fn late_temp_substitution_preserves_foreign_entry() {
         assert!(fs::read_to_string(&tmp).unwrap().contains(FORMAT));
     }
     assert!(e.retained.iter().any(|r| r.path == tmp), "{e}");
+}
+
+/// Windows (el-6s3go): the temporary this call created is held shared for
+/// reading only and published through that handle. Another program can
+/// neither move it aside, nor write over it, at any step — so the note
+/// published is the one written.
+#[cfg(windows)]
+#[test]
+fn windows_a_held_temporary_cannot_be_substituted() {
+    let (_t, root) = fresh();
+    let tried = std::rc::Rc::new(std::cell::Cell::new(0));
+    let seen = tried.clone();
+    let _g = seam::set(move |stage, p| {
+        if matches!(stage, Stage::Written | Stage::Publish) {
+            assert!(fs::rename(p, aside(p)).is_err(), "{stage:?}: moved aside");
+            assert!(
+                fs::write(p, FOREIGN_TMP).is_err(),
+                "{stage:?}: written over"
+            );
+            seen.set(seen.get() + 1);
+        }
+        Ok(())
+    });
+    note(&root, "disk1", Path::new(r"D:\")).unwrap();
+    assert_eq!(tried.get(), 2);
+    let raw = fs::read_to_string(root.join(crate::QUARANTINE_LAYOUT)).unwrap();
+    assert!(raw.contains(FORMAT), "{raw}");
+    assert_eq!(names(&root), vec![crate::QUARANTINE_LAYOUT.to_string()]);
+}
+
+/// Windows: a junction where the quarantine folder should be, or at the
+/// note's name, is never written through; the junction's target is
+/// untouched.
+#[cfg(windows)]
+#[test]
+fn windows_a_junction_is_never_written_through() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    let junction = |at: &Path| {
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(at)
+            .arg(&elsewhere)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "mklink /J failed");
+    };
+    let root = tmp.path().join("q");
+    junction(&root);
+    let e = note(&root, "disk1", Path::new(r"D:\")).unwrap_err();
+    assert!(e.to_string().contains("junction"), "{e}");
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+
+    let (_t, root) = fresh();
+    junction(&root.join(crate::QUARANTINE_LAYOUT));
+    let e = note(&root, "disk1", Path::new(r"D:\")).unwrap_err();
+    assert_eq!(e.cause.kind(), io::ErrorKind::AlreadyExists, "{e}");
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
 }

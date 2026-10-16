@@ -452,22 +452,31 @@ fn refuse(db: &Db, e: &JournalEntry, why: &str, listed: &[(String, String)]) -> 
     }
 }
 
+/// Why permanent deletion is not carried out on this system, if it is not:
+/// on Windows nothing is ever deleted (the user's decision; el-61ar8). The
+/// one answer the command line and the web give before listing anything,
+/// and the refusal every entry gets if asked anyway.
+pub fn purge_refused_here() -> Option<&'static str> {
+    #[cfg(unix)]
+    {
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        Some(pc_core::tr!(
+            "на Windows окончательное удаление не выполняется: на этой системе программа ничего \
+             не удаляет; перенесённое остаётся в карантине, и его можно вернуть откатом",
+            "on Windows permanent deletion is not carried out: on this system the tool deletes \
+             nothing; what was moved stays in quarantine and can be brought back by undo"
+        ))
+    }
+}
+
 #[cfg(not(unix))]
 fn run(db: &Db, e: &JournalEntry, _: &pc_core::work::Control) -> Result<Tally> {
-    // Deleting by proof needs held folders, links that are not followed and
-    // object identity, none of which is verified on a real Windows system
-    // (el-usdqi D4): nothing is deleted there.
-    Err(refuse(
-        db,
-        e,
-        pc_core::tr!(
-            "на Windows окончательное удаление не выполняется: личность файлов и удаление через \
-             удерживаемую папку на настоящей системе Windows не проверены",
-            "on Windows permanent deletion is not carried out: file identity and deletion \
-             through a held folder have not been verified on a real Windows system"
-        ),
-        &[],
-    ))
+    // Nothing is ever deleted on Windows: the held folder there has no
+    // removal at all (`pc_core::anchored::Dir`), so this is the only answer.
+    Err(refuse(db, e, purge_refused_here().unwrap_or_default(), &[]))
 }
 
 #[cfg(unix)]

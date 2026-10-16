@@ -30,6 +30,7 @@
 //! frames are refused more often. That is meant — leave extra, never lose.
 
 use anyhow::anyhow;
+use pc_core::anchored::Dir;
 use pc_core::proof::Proof;
 use pc_core::whereabouts::Whereabouts;
 use pc_db::{Db, Moved};
@@ -45,6 +46,13 @@ pub(crate) struct Member<'a> {
     pub(crate) from: &'a Path,
     pub(crate) to: &'a Path,
     pub(crate) expect: Option<&'a Proof>,
+    /// The folder it leaves has to be this one, as recorded before the
+    /// move: checked against the folder held for it before the first
+    /// rename of the unit.
+    pub(crate) leaves: Option<&'a pc_db::FolderId>,
+    /// The folder it lands in, already opened and proven by the caller
+    /// ([`crate::bound::origin_folder`]); the rename goes into this handle.
+    pub(crate) into: Option<&'a Dir>,
 }
 
 impl<'a> Member<'a> {
@@ -55,17 +63,24 @@ impl<'a> Member<'a> {
             from: Path::new(&rec.src),
             to: Path::new(&rec.dst),
             expect: rec.proof.as_ref(),
+            leaves: rec.home.as_ref(),
+            into: None,
         }
     }
 
     /// Walking `rec` back: from where it is looked for (`look.dst`, which
     /// may be a place the journal later proved) to its recorded `src`.
-    pub(crate) fn back(rec: &'a Moved, look: &'a Moved) -> Self {
+    ///
+    /// `into` is the folder it comes back to, held and proven to be the one
+    /// it left; `None` only for a row that recorded no folder.
+    pub(crate) fn back(rec: &'a Moved, look: &'a Moved, into: Option<&'a Dir>) -> Self {
         Member {
             rec,
             from: Path::new(&look.dst),
             to: Path::new(&look.src),
             expect: look.proof.as_ref(),
+            leaves: None,
+            into,
         }
     }
 }
@@ -206,6 +221,25 @@ pub(crate) fn move_unit(
                 Err(e) => return Unit::Refused(not_held(m, e)),
             },
         };
+        // The folder recorded as the one it leaves is the folder held for
+        // the move, or nothing moves: the record names the folder the
+        // object actually left through, which a completed undo asks for.
+        if let Some(home) = m.leaves {
+            match h.folder() {
+                Ok(id) if id == *home => {}
+                Ok(_) => {
+                    return Unit::Refused(not_held(
+                        m,
+                        anyhow!(pc_core::tf!(
+                            "папка {0} — уже не та, что записана перед переносом",
+                            "the folder {0} is no longer the one recorded before the move",
+                            h.folder_path().display()
+                        )),
+                    ))
+                }
+                Err(e) => return Unit::Refused(not_held(m, e)),
+            }
+        }
         held.push(h);
     }
     for m in members.iter().skip(1) {
@@ -225,7 +259,7 @@ pub(crate) fn move_unit(
     let mut failed = None;
     for (i, (m, h)) in members.iter().zip(&held).enumerate() {
         let ks: &[&Held] = if i == 0 { keepers } else { &[] };
-        match rename_bound(h, m.to, ks) {
+        match rename_bound(h, m.to, ks, m.into) {
             Ok(a) => arrived.push(a),
             Err(e) => {
                 failed = Some(e);

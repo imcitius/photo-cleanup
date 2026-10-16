@@ -5,7 +5,7 @@
 //! later stage would be reasoning about paths that no longer exist.
 
 use anyhow::Result;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::{Db, JournalEntry};
 
@@ -100,6 +100,28 @@ impl Db {
             }
         }
         Ok(out)
+    }
+
+    /// The roots of the run that wrote journal entry `journal_id` — and of
+    /// no other run. `None` when the entry or its run is not there, or its
+    /// roots cannot be read: a caller that bounds a check by them has no
+    /// bound then, and refuses.
+    ///
+    /// An undo of an entry written before folder identities were recorded
+    /// checks the path to the files' folder up to this boundary (el-6s3go).
+    /// Roots of other runs say nothing about this entry: a later scan of a
+    /// folder deep inside it would shorten the check and let a link above
+    /// that folder carry the files elsewhere (el-4r8yf B3-R2).
+    pub fn journal_run_roots(&self, journal_id: i64) -> Result<Option<Vec<String>>> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT r.roots FROM journal j JOIN runs r ON r.id = j.run_id WHERE j.id = ?1",
+                [journal_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(json.and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok()))
     }
 
     /// Runs that moved files into the reorganised tree, newest first.

@@ -102,6 +102,7 @@ enum Spot {
     Unreadable(String),
 }
 
+#[cfg(not(windows))]
 fn spot(path: &str, proof: Option<&Proof>) -> Spot {
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Spot::Absent,
@@ -118,9 +119,50 @@ fn spot(path: &str, proof: Option<&Proof>) -> Spot {
     }
 }
 
+/// Windows (el-61ar8 §2.5): a path's metadata names no object there, so the
+/// entry is read as itself through its folder's handle — the folder
+/// followed as the user named it, the last component not — and compared by
+/// [`Proof::verify`]. A missing folder or name is nothing there; any other
+/// failure says nothing about what is there.
+#[cfg(windows)]
+fn spot(path: &str, proof: Option<&Proof>) -> Spot {
+    let at = Path::new(path);
+    let (Some(parent), Some(name)) = (
+        at.parent().filter(|p| !p.as_os_str().is_empty()),
+        at.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return Spot::Unreadable(pc_core::tf!(
+            "не путь к файлу: {0}",
+            "not a path to a file: {0}",
+            path
+        ));
+    };
+    let dir = match pc_core::anchored::Dir::open_following(parent) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Spot::Absent,
+        Err(e) => return Spot::Unreadable(e.to_string()),
+    };
+    match dir.entry_at(name) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Spot::Absent,
+        Err(e) => return Spot::Unreadable(e.to_string()),
+        Ok(_) => {}
+    }
+    let Some(p) = proof else {
+        return Spot::Unproven;
+    };
+    match pc_core::proof::Proof::at(&dir, name) {
+        Some(now) => match p.verify(&now, None) {
+            Verdict::Same => Spot::Proven,
+            Verdict::Differs(w) | Verdict::Unprovable(w) => Spot::Other(w),
+        },
+        None => Spot::Other("this system cannot name a file system object"),
+    }
+}
+
 /// The evidence against what is at `path`, by [`Proof::verify`]: through
 /// an open descriptor when the evidence records a hash, so the content is
 /// compared too; a hash that cannot be read again is not a match.
+#[cfg(not(windows))]
 fn verdict_at(path: &str, p: &Proof, md: &fs::Metadata) -> Verdict {
     if p.blake3.is_none() || !md.is_file() {
         return p.check(md);
@@ -151,6 +193,19 @@ fn verdict_at(path: &str, p: &Proof, md: &fs::Metadata) -> Verdict {
 
 /// The one classifier.
 pub fn classify(m: &Moved) -> Standing {
+    // Windows (el-usdqi D4, el-6s3go): a row without evidence is never
+    // walked back there by its names. Every row this tool writes on Windows
+    // records evidence; one without it came from elsewhere, and a file at
+    // its recorded quarantine path is not the operation's on its name alone.
+    #[cfg(windows)]
+    if m.proof.is_none() {
+        return Standing::Doubt(pc_core::tf!(
+            "{0} — запись не хранит сведений о том, какой файл перенесён, а на Windows файл по одному имени не возвращается; он остаётся на месте: {1}",
+            "{0} — the entry records no evidence of which file moved, and on Windows a file is not brought back on its name alone; it stays where it is: {1}",
+            m.src,
+            m.dst
+        ));
+    }
     let held = spot(&m.dst, m.proof.as_ref());
     let home = spot(&m.src, m.proof.as_ref());
     match (held, home) {
@@ -427,9 +482,62 @@ fn walk_back(
     if moving.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
+    // The folder each member comes back to has to be the folder it left.
+    // Recorded at the move, its identity decides (director decision after
+    // el-4r8yf B3-R2): the folder is opened once, compared with the record
+    // before any rename, and that handle is where the rename goes. A row
+    // from before identities were recorded is judged by its path, checked
+    // up to its own run's root and no other (el-1nx1u B3). Refused, nothing
+    // moves, every member stays where it is proven, and the entry stays
+    // open to be undone again.
+    let mut homes: Vec<Option<pc_core::anchored::Dir>> = Vec::with_capacity(moving.len());
+    let mut own_roots: Option<Option<Vec<String>>> = None;
+    let mut unsafe_at = None;
+    for p in &moving {
+        let src = Path::new(&p.look.src);
+        match &p.rec.home {
+            Some(home) => match crate::bound::origin_folder(src, home) {
+                Ok(dir) => homes.push(Some(dir)),
+                Err(e) => {
+                    unsafe_at = Some(format!("{e:#}"));
+                    break;
+                }
+            },
+            None => {
+                if own_roots.is_none() {
+                    own_roots = Some(db.journal_run_roots(id)?);
+                }
+                let roots = own_roots.as_ref().and_then(|r| r.as_deref());
+                if let Some(why) = src.parent().and_then(|f| origin_doubt(roots, f)) {
+                    unsafe_at = Some(why);
+                    break;
+                }
+                homes.push(None);
+            }
+        }
+    }
+    if let Some(unsafe_at) = unsafe_at {
+        drop(homes);
+        let why = pc_core::tf!(
+            "{0}: ничего не перенесено — {1}; всё остаётся в карантине, и запись можно откатить, когда на этом месте снова будет та папка; где что: {2}",
+            "{0}: nothing was moved — {1}; everything stays in quarantine, and the entry can be undone once that folder is in that place again; where things are: {2}",
+            phase,
+            unsafe_at,
+            listing(&items)
+        );
+        return Err(told(
+            db,
+            id,
+            phase,
+            "refused",
+            &why,
+            anyhow::anyhow!("{why}"),
+        ));
+    }
     let members: Vec<Member> = moving
         .iter()
-        .map(|p| Member::back(&p.rec, &p.look))
+        .zip(&homes)
+        .map(|(p, h)| Member::back(&p.rec, &p.look, h.as_ref()))
         .collect();
     let pb = match move_unit(&members, Way::Back, None, &[]) {
         Unit::Moved(arrived) => {
@@ -474,6 +582,74 @@ fn walk_back(
     })
 }
 
+/// Why the folder `folder`, which a member of an entry that recorded no
+/// folder identity comes back to, is not to be trusted, if it is not.
+///
+/// Only rows written before identities were recorded come here (on Unix;
+/// Windows never had a quarantine before). What is asked is every component
+/// from `folder` up to the root of the entry's *own* run that holds it
+/// (`roots`; the deepest one), each as itself, never followed: a link or a
+/// junction there — one that replaced the folder after the move — would
+/// carry the photograph into someone else's folder while the journal
+/// recorded it home (el-1nx1u B3). Roots of other runs are never asked: a
+/// later scan of a folder deep inside would shorten the check
+/// (el-4r8yf B3-R2). Above the root, the path is the user's own as they
+/// named it (`/var` on macOS is a link) and is followed. A path under none
+/// of its run's roots, or a run whose roots cannot be read, has no bound
+/// and is refused. A folder that is not there is not a doubt: it is
+/// created on the way back, through the folder above it, without following
+/// anything.
+fn origin_doubt(roots: Option<&[String]>, folder: &Path) -> Option<String> {
+    let Some(root) = roots.and_then(|roots| {
+        roots
+            .iter()
+            .map(Path::new)
+            .filter(|r| !r.as_os_str().is_empty() && folder.starts_with(r))
+            .max_by_key(|r| r.components().count())
+    }) else {
+        return Some(pc_core::tf!(
+            "место возврата {0} не лежит ни под одной из папок, которые просматривал прогон этой записи, и запись не знает, какая папка была там при переносе; программа ничего туда не возвращает",
+            "the place to return to, {0}, is under none of the folders this entry's run scanned, and the entry does not record which folder was there at the move; the tool returns nothing there",
+            folder.display()
+        ));
+    };
+    let mut at = Some(folder);
+    while let Some(p) = at.filter(|p| !p.as_os_str().is_empty()) {
+        let what = match files::found_at(p) {
+            Ok(files::Found::Dir) => None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => Some(e.to_string()),
+            Ok(files::Found::Link) => Some(
+                pc_core::tr!(
+                    "символическая ссылка или соединение (junction)",
+                    "a symbolic link or a junction"
+                )
+                .to_string(),
+            ),
+            Ok(_) => Some(
+                pc_core::tr!(
+                    "не папка (файл, облачная заглушка или иной особый объект)",
+                    "not a folder (a file, a cloud placeholder or another special object)"
+                )
+                .to_string(),
+            ),
+        };
+        if let Some(what) = what {
+            return Some(pc_core::tf!(
+                "место возврата {0} — {1}; программа не переходит по нему и ничего туда не возвращает",
+                "the place to return to, {0}, is {1}; the tool does not follow it and returns nothing there",
+                p.display(),
+                what
+            ));
+        }
+        if p == root {
+            break;
+        }
+        at = p.parent();
+    }
+    None
+}
+
 /// Walk a finished entry back: every file it moved, by its evidence, as one
 /// unit.
 pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
@@ -495,6 +671,14 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
         "в записи нет пути назначения",
         "the entry has no destination path"
     ))?;
+    if entry.op == "organize" {
+        if let Err(e) =
+            crate::not_yet_on_windows(("откат раскладки по папкам", "undoing a reorganisation"))
+        {
+            let why = format!("{e:#}");
+            return Err(told(db, journal_id, "undo", "refused", &why, e));
+        }
+    }
     let mut list = match list_of(&entry) {
         Ok(list) => list,
         Err(e) => {
@@ -648,6 +832,32 @@ pub struct Reconciled {
 /// this one, or held and free to come back. Anything else leaves the entry
 /// `pending`, which is what it is, with the reason added to its history.
 pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
+    if let Err(e) = crate::not_yet_on_windows((
+        "сверка прерванной операции",
+        "reconciling an interrupted operation",
+    )) {
+        // Every place the entry knows, so the refusal says what it is about.
+        let places = db
+            .journal_entry(journal_id)?
+            .map(|entry| {
+                list_of(&entry)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|m| format!("{} -> {}", m.src, m.dst))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_default();
+        let why = format!("{e:#}: {places}");
+        return Err(told(
+            db,
+            journal_id,
+            "reconcile",
+            "refused",
+            &why,
+            e.context(why.clone()),
+        ));
+    }
     if let Some(entry) = db.journal_entry(journal_id)? {
         if let Err(e) = readable(&entry) {
             let why = format!("{e:#}");

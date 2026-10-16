@@ -198,13 +198,21 @@ One `.exe` and nothing else to install: the interface is compiled into the
 binary. The index and the thumbnail cache are written next to it, so moving or
 deleting that folder leaves nothing behind.
 
-A note on what Windows cannot tell us. Unix names a filesystem with a device
-number; Windows has no cheap equivalent, so the drive letter stands in. That is
-the right granularity for both things this depends on — which disk to read in
-parallel, and whether a move is a rename — and the gap is a folder mounted into
-another volume's tree, which a home archive rarely has. Hard links are not
-detected there either: without an inode, two names for one file are counted
-twice rather than mistaken for each other.
+On NTFS, moving copies into quarantine and undoing a finished move work as
+everywhere else: each file is held from its last check to its move and renamed
+through that handle, never over anything. A file another program has open
+(Lightroom, an antivirus, a preview) is refused until it is closed; FAT, exFAT
+and ReFS volumes are refused. Recovering an interrupted run, returning orphans
+and reorganising into folders are refused on Windows for now, with the reason.
+Nothing is ever deleted there: `purge` refuses.
+
+A note on what Windows cannot tell us cheaply. Unix names a filesystem with a
+device number; while indexing, Windows uses the drive letter instead. That is
+the right granularity for which disk to read in parallel; a move checks the
+volume itself (its serial number) before anything moves, so a folder mounted
+from another volume is refused rather than copied. Hard links are not detected
+by the index either: without an inode, two names for one file are counted twice
+rather than mistaken for each other.
 
 ## How it reads an archive
 

@@ -13,8 +13,8 @@ pub use files::{
 };
 pub use marks::{Mark, MarkScope, Marks};
 pub use model::{
-    Bundle, BundleState, Catalog, Event, JournalEntry, JournalEvent, JournalStatus, KeeperSource,
-    Located, Moved, NewBundle, NewCatalog, NewJournalEntry, QuarantineFound,
+    Bundle, BundleState, Catalog, Event, FolderId, JournalEntry, JournalEvent, JournalStatus,
+    KeeperSource, Located, Moved, NewBundle, NewCatalog, NewJournalEntry, QuarantineFound,
 };
 pub use organize::OrganizeRow;
 
@@ -363,11 +363,13 @@ mod tests {
                         src: "/archive/frame.arw".into(),
                         dst: format!("{q}/frame.arw"),
                         proof: None,
+                        home: None,
                     },
                     model::Moved {
                         src: "/archive/frame.xmp".into(),
                         dst: format!("{q}/frame.xmp"),
                         proof: None,
+                        home: None,
                     },
                 ],
             })

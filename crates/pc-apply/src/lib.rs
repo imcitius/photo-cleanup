@@ -40,8 +40,9 @@ pub use outcome::{
     Halted, NoExclusiveRename, Placed, Role, Route, Stopped, Tally, Whereabouts,
 };
 pub use purge::{
-    is_lightroom, purge_entry_controlled, purge_keeps, purge_kept, purge_stopped, purged_before,
-    KeptWhy, OrphanKept, OrphanWhy, PurgeKept, PurgeStage, PurgeStopped,
+    is_lightroom, purge_entry_controlled, purge_keeps, purge_kept, purge_refused_here,
+    purge_stopped, purged_before, KeptWhy, OrphanKept, OrphanWhy, PurgeKept, PurgeStage,
+    PurgeStopped,
 };
 pub use recovery::{
     reconcile, reconcile_undo, undo, undo_offered, undo_preview, Item, Reconciled, Standing,
@@ -197,6 +198,21 @@ fn file_target(path: &str, override_root: Option<&Path>) -> Result<Target> {
     let mut map = pc_core::DiskMap::new();
     let disk = map.resolve(&src)?;
     let rel = disk.relative(&src);
+    // A path not below its disk's mount point comes back whole, and joining
+    // an absolute path onto the quarantine root yields that path itself: the
+    // "move" would rename the photograph onto its own name, which Windows
+    // accepts as done (el-6s3go). Refused before anything is written.
+    if rel.has_root() || rel.is_absolute() || rel.as_os_str().is_empty() {
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "{0} — не вычислить путь от точки монтирования его диска ({1}); в заданный карантин он не переносится",
+                "{0} — its path below its disk's mount point ({1}) cannot be worked out; it is not moved into the configured quarantine",
+                path,
+                disk.mount.display()
+            )
+        );
+    }
     let dev = pc_core::dev_of_nearest_existing(root)?;
     if dev != disk.dev {
         bail!(
@@ -230,7 +246,6 @@ pub(crate) fn quarantine_target_for(path: &str, override_root: Option<&Path>) ->
 }
 
 /// The nearest existing folder of `path` (itself, if it exists).
-#[cfg(not(windows))]
 fn nearest_existing(path: &Path) -> &Path {
     let mut at = path;
     while fs::symlink_metadata(at).is_err() {
@@ -244,26 +259,146 @@ fn nearest_existing(path: &Path) -> &Path {
 
 /// Refuse, before anything moves, a destination whose volume says it cannot
 /// rename without replacing (macOS exFAT), or will not say. Where the system
-/// has no such question (Linux, Windows) this passes, and the move itself
-/// answers: the refused call moves nothing, and the run stops there.
+/// has no such question (Linux) this passes, and the move itself answers:
+/// the refused call moves nothing, and the run stops there.
+///
+/// On Windows the rename never replaces (`ReplaceIfExists` is never set);
+/// what is asked is whether the volume can say *which object* moved: only
+/// NTFS gives a file identity that survives a move (el-61ar8 §2.1). FAT,
+/// exFAT and ReFS (128-bit IDs) are refused here, before anything moves,
+/// as a volume the move cannot be made safely on (director decision on
+/// el-61ar8 §5.1). Only reads.
 pub fn check_exclusive_rename(dst: &Path) -> Result<()> {
-    // Windows: the move itself refuses to replace, but nothing else this
-    // crate relies on — object identity for recovery, links that are not
-    // followed, removal through a held folder — has been verified on a real
-    // Windows system. Until it has, nothing is moved there (el-usdqi, D4).
-    #[cfg(windows)]
-    {
-        let _ = dst;
+    check_exclusive_rename_here(dst)
+}
+
+#[cfg(windows)]
+fn check_exclusive_rename_here(dst: &Path) -> Result<()> {
+    let at = nearest_existing(dst.parent().unwrap_or(dst));
+    let refused = |reason: String| -> Result<()> {
+        Err(NoExclusiveRename::new(dst.to_path_buf(), reason).into())
+    };
+    let dir = match pc_core::anchored::Dir::open_following(at) {
+        Ok(d) => d,
+        Err(e) => {
+            return refused(pc_core::tf!(
+                "не узнать свойства тома {0}: {1}",
+                "cannot read the properties of the volume of {0}: {1}",
+                at.display(),
+                e
+            ))
+        }
+    };
+    match dir.ident() {
+        Ok(_) => Ok(()),
+        Err(e) => refused(e.to_string()),
+    }
+}
+
+/// Windows: the volume a source and its destination are on, by the volume
+/// serial number of the folders that hold them — a folder another volume is
+/// mounted into is told apart, which the path prefix cannot do (el-61ar8
+/// §2.7). Only reads.
+#[cfg(windows)]
+fn same_volume(src: &Path, dst: &Path) -> Result<()> {
+    let serial = |p: &Path| -> Option<u64> {
+        pc_core::anchored::Dir::open_following(nearest_existing(p))
+            .and_then(|d| d.ident())
+            .ok()
+            .map(|(volume, _)| volume)
+    };
+    let (Some(a), Some(b)) = (
+        serial(src.parent().unwrap_or(src)),
+        serial(dst.parent().unwrap_or(dst)),
+    ) else {
+        // Unreadable: which volume either side is on is not known, so the
+        // move is refused before anything moves rather than left to the
+        // rename to discover.
         bail!(
             "{}",
-            pc_core::tr!(
-                "на Windows перенос, откат и сверка пока не выполняются: проверка личности файлов и безопасного удаления временных файлов на настоящей системе Windows ещё не проведена",
-                "on Windows, moves, undo and recovery are not carried out yet: file identity and the safe cleanup of temporary files have not been verified on a real Windows system"
+            pc_core::tf!(
+                "не удалось узнать, на одном ли томе {0} и карантин {1}; ничего не перенесено",
+                "whether {0} and the quarantine {1} are on one volume could not be read; nothing moved",
+                src.display(),
+                dst.display()
+            )
+        );
+    };
+    if a != b {
+        bail!(
+            "{}",
+            pc_core::tf!(
+                "карантин {0} на другой файловой системе, чем {1} — перенос превратился бы в копирование",
+                "quarantine {0} is on a different filesystem from {1} — the move would become a copy",
+                dst.display(),
+                src.display()
             )
         );
     }
+    Ok(())
+}
+
+/// Another program has the object open in a way that forbids moving it
+/// now: on Windows a handle without `FILE_SHARE_DELETE` (Lightroom, an
+/// antivirus, Explorer's preview) makes holding it fail with a sharing
+/// violation (el-61ar8 P3a). Unix has no such refusal.
+pub(crate) fn in_use(e: &std::io::Error) -> bool {
+    // `ERROR_SHARING_VIOLATION`.
+    #[cfg(windows)]
+    {
+        e.raw_os_error() == Some(32)
+    }
     #[cfg(not(windows))]
-    check_exclusive_rename_here(dst)
+    {
+        let _ = e;
+        false
+    }
+}
+
+/// The one refusal for an object in use: the command line and the web show
+/// these words, from here (CLI = web).
+pub fn in_use_text(path: &Path) -> String {
+    pc_core::tf!(
+        "{0} — открыт другой программой (Lightroom, антивирус, просмотр) и сейчас не переносится; закройте её и повторите; ничего не перенесено",
+        "{0} — is open in another program (Lightroom, an antivirus, a preview) and cannot be moved now; close it and try again; nothing moved",
+        path.display()
+    )
+}
+
+/// The refusal of an object in use, typed, so that its caller can tell it
+/// from any other and write it down (el-61ar8 §3.2 P3a); shown, it is
+/// [`in_use_text`].
+#[derive(Debug)]
+pub(crate) struct InUse(pub(crate) PathBuf);
+
+impl std::fmt::Display for InUse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&in_use_text(&self.0))
+    }
+}
+
+impl std::error::Error for InUse {}
+
+/// Windows (el-6s3go): what is not carried out there yet, and why. A move
+/// into quarantine and the undo of a finished one are; the reconciliation
+/// of an interrupted operation, an orphan's return and a reorganisation are
+/// the next step (el-61ar8 §4.C) and are refused until then, before anything
+/// is touched.
+pub(crate) fn not_yet_on_windows(what: (&str, &str)) -> Result<()> {
+    #[cfg(windows)]
+    bail!(
+        "{}",
+        pc_core::tf!(
+            "на Windows {0} пока не выполняется: перенос в карантин и откат завершённой записи работают, остальное будет включено отдельно; ничего не перенесено",
+            "on Windows, {0} is not carried out yet: moving into quarantine and undoing a finished entry work, the rest comes separately; nothing moved",
+            pc_core::tr!(what.0, what.1)
+        )
+    );
+    #[cfg(not(windows))]
+    {
+        let _ = what;
+        Ok(())
+    }
 }
 
 #[cfg(not(windows))]
@@ -316,6 +451,8 @@ pub fn check_candidates(
     override_root: Option<&Path>,
 ) -> Result<()> {
     let mut dsts = Vec::new();
+    #[cfg(windows)]
+    let mut pairs = Vec::new();
     for c in candidates {
         match fs::symlink_metadata(&c.path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -328,13 +465,26 @@ pub fn check_candidates(
             }
             Ok(_) => {}
         }
-        dsts.push(file_target(&c.path, override_root)?.dst);
+        let dst = file_target(&c.path, override_root)?.dst;
+        #[cfg(windows)]
+        pairs.push((PathBuf::from(&c.path), dst.clone()));
+        dsts.push(dst);
     }
-    check_all(dsts.iter().map(PathBuf::as_path))
+    check_all(dsts.iter().map(PathBuf::as_path))?;
+    #[cfg(windows)]
+    for (src, dst) in &pairs {
+        same_volume(src, dst)?;
+    }
+    Ok(())
 }
 
-/// Before a reorganisation: as [`check_candidates`].
+/// Before a reorganisation: as [`check_candidates`]. Any move of one is
+/// refused on Windows until reorganising is enabled there (el-61ar8 §4.C);
+/// an empty list — every preview asks — passes.
 pub fn check_organize(moves: &[pc_organize::Move]) -> Result<()> {
+    if !moves.is_empty() {
+        not_yet_on_windows(("раскладка по папкам", "reorganising into folders"))?;
+    }
     check_all(moves.iter().map(|m| Path::new(&m.dst)))
 }
 
@@ -347,7 +497,7 @@ pub(crate) fn rename_with_parents(
     dst: &Path,
     expect: Option<&pc_core::proof::Proof>,
 ) -> Result<bound::Arrived> {
-    bound::rename_bound(&bound::Held::bind(src, expect)?, dst, &[])
+    bound::rename_bound(&bound::Held::bind(src, expect)?, dst, &[], None)
 }
 
 /// Tests only: the moment after an operation's last rename and before its
@@ -387,8 +537,23 @@ pub(crate) fn close_refused(
 }
 
 /// What a refused rename says.
-#[cfg(unix)]
 pub(crate) fn rename_error(e: std::io::Error, src: &Path, dst: &Path) -> anyhow::Error {
+    if in_use(&e) {
+        return anyhow::anyhow!("{}", in_use_text(src));
+    }
+    // Windows: the object is held, and its folder too, so a denial here is
+    // the volume's word on this one rename. For a folder (a bundle), a file
+    // inside it open in another program is refused the same way, and the
+    // two cannot be told apart (el-61ar8 T4b): both are named.
+    #[cfg(windows)]
+    if e.raw_os_error() == Some(5) {
+        return anyhow::Error::new(e).context(pc_core::tf!(
+            "не переместить {0} -> {1}: нет прав, или внутри папки открыт файл другой программой; ничего не перенесено",
+            "cannot move {0} -> {1}: access is denied, or a file inside the folder is open in another program; nothing moved",
+            src.display(),
+            dst.display()
+        ));
+    }
     if e.kind() == std::io::ErrorKind::AlreadyExists {
         anyhow::anyhow!(
             "{}",
@@ -423,8 +588,6 @@ pub(crate) fn rename_error(e: std::io::Error, src: &Path, dst: &Path) -> anyhow:
 /// build: the feature without debug assertions is a compile error.
 #[cfg(any(test, feature = "test-seams"))]
 #[doc(hidden)]
-// The move seams serve tests of moves, which Windows refuses (el-usdqi D4).
-#[cfg_attr(not(unix), allow(dead_code))]
 pub mod race {
     use std::cell::RefCell;
     use std::io;
@@ -506,8 +669,7 @@ pub mod race {
     /// While the guard lives, `hook(moment, src, dst)` runs on this thread
     /// at both [`Syscall`] moments of every bound move; an `Err` at
     /// `Before` is the move's error, at `After` it is ignored.
-    // Used by the Unix-only binding tests.
-    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn at_rename(
         hook: impl FnMut(Syscall, &Path, &Path) -> io::Result<()> + 'static,
     ) -> SyscallGuard {
@@ -515,7 +677,7 @@ pub mod race {
         SyscallGuard
     }
 
-    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) struct SyscallGuard;
 
     impl Drop for SyscallGuard {
@@ -570,7 +732,6 @@ pub mod race {
         Ok(())
     }
 
-    #[cfg(unix)]
     pub(crate) fn fire(src: &Path, dst: &Path) -> io::Result<()> {
         HOOK.with(|h| match h.borrow_mut().as_mut() {
             Some(hook) => hook(src, dst),
@@ -587,19 +748,28 @@ pub mod race {
 }
 
 #[cfg(test)]
-// Most of these tests need a move, which Windows refuses (el-usdqi D4);
-// their helpers are unused there.
-#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
+// Its bundle statistics serve the purge tests, which are Unix-only.
+#[cfg_attr(not(unix), allow(dead_code))]
 mod legacy;
 
 #[cfg(test)]
-// Most of these tests need a move, which Windows refuses (el-usdqi D4);
-// their helpers are unused there.
+// Some helpers serve only the reorganisation tests, which Windows refuses
+// until el-61ar8 §4.C, and the purge tests, which are Unix-only.
 #[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod race_tests;
 
+// Each of these stages another program swapping a name or a folder between
+// the check and the rename. On Windows that swap is itself refused — the
+// object and its folders are held — so the same boundary is proven there by
+// `windows_tests` instead.
 #[cfg(all(test, unix))]
 mod binding_tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;
+
+#[cfg(test)]
+mod link_unit_tests;
 
 #[cfg(all(test, unix))]
 mod purge_tests;
@@ -659,6 +829,10 @@ pub fn select_derived(
 /// it got there, so it writes one now, and the move can be walked back like
 /// any other.
 pub fn adopt_orphan(db: &Db, run_id: i64, src: &str, dst: &str) -> Result<Tally> {
+    not_yet_on_windows((
+        "возврат файла, о котором журнал ничего не знает",
+        "returning a file the journal never recorded",
+    ))?;
     // An early answer; the move itself never replaces what is there.
     if fs::symlink_metadata(dst).is_ok() {
         bail!(
@@ -676,6 +850,7 @@ pub fn adopt_orphan(db: &Db, run_id: i64, src: &str, dst: &str) -> Result<Tally>
         src: src.to_string(),
         dst: dst.to_string(),
         proof,
+        home: Some(bound::folder_of(Path::new(src))?),
     }];
     let jid = db.journal_begin(&pc_db::NewJournalEntry {
         run_id,
@@ -927,8 +1102,6 @@ mod lightroom_tests {
         assert!(db.journal_quarantined(None).unwrap().is_empty());
     }
 
-    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-    #[cfg(unix)]
     #[test]
     fn a_lightroom_bundle_moved_by_an_earlier_version_still_comes_home() {
         // Returning is putting back: the rule that keeps Lightroom where it
@@ -954,9 +1127,6 @@ mod lightroom_tests {
 }
 
 #[cfg(test)]
-// Most of these tests need a move, which Windows refuses (el-usdqi D4);
-// their helpers are unused there.
-#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod undo_tests {
     use super::*;
     use pc_db::{Db, JournalStatus, Moved, NewJournalEntry};
@@ -978,16 +1148,21 @@ mod undo_tests {
                 dst: Some(&d),
                 size: 32,
                 file_count: 2,
+                // With the evidence a forward move records — of each file and
+                // of the folder it left: on Windows a row without it is never
+                // walked back by its names.
                 manifest: &[
                     Moved {
                         src: s.clone(),
                         dst: d.clone(),
-                        proof: None,
+                        proof: files::evidence(&dst).unwrap(),
+                        home: Some(bound::folder_of(&src).unwrap()),
                     },
                     Moved {
                         src: src.with_extension("xmp").display().to_string(),
                         dst: dst.with_extension("xmp").display().to_string(),
-                        proof: None,
+                        proof: files::evidence(&dst.with_extension("xmp")).unwrap(),
+                        home: Some(bound::folder_of(&src).unwrap()),
                     },
                 ],
             })
@@ -996,8 +1171,6 @@ mod undo_tests {
         (id, src, dst)
     }
 
-    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-    #[cfg(unix)]
     #[test]
     fn an_undo_that_cannot_finish_moves_nothing_and_can_be_asked_again() {
         // Half an undo is not an undo. The photograph used to come home while

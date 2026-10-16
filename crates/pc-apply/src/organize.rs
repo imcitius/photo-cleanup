@@ -88,6 +88,8 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
     let mut report = OrganizeReport::default();
     let mut source_dirs: BTreeSet<PathBuf> = BTreeSet::new();
     let route = Route::Organize { run_id };
+    // Not on Windows yet (el-61ar8 §4.C), whatever the list.
+    crate::not_yet_on_windows(("раскладка по папкам", "reorganising into folders"))?;
     // A volume that cannot move without replacing stops the run before its
     // first move.
     crate::check_organize(moves)?;
@@ -152,14 +154,32 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
                 continue;
             }
         };
+        // Which folder each member leaves, for a completed undo to return
+        // to that folder and no other (el-4r8yf B3-R2); the move checks it
+        // against the folder it holds.
+        let home = match crate::bound::folder_of(src) {
+            Ok(h) => h,
+            Err(e) => {
+                report.refused.push((m.src.clone(), format!("{e:#}")));
+                continue;
+            }
+        };
         let mut planned = vec![pc_db::Moved {
             src: m.src.clone(),
             dst: m.dst.clone(),
             proof: frame_proof,
+            home: Some(home),
         }];
         // Every sidecar goes with the photograph or none does (user decision
         // (c)): one that cannot be proven, or whose new name is taken,
         // refuses the photograph too, before anything moves.
+        // An entry under a companion's name that is not a plain file, or a
+        // folder that cannot be searched in full, refuses the unit as it
+        // does in quarantine: the one rule (el-1nx1u B1/B2).
+        if let Some(why) = crate::files::companion_doubt(src) {
+            report.refused.push((m.src.clone(), why));
+            continue;
+        }
         let mut refusal = None;
         for side in companion_plan(src, dst) {
             let proof = match evidence(&side.src) {
@@ -191,10 +211,23 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
                     break;
                 }
             };
+            let home = match crate::bound::folder_of(&side.src) {
+                Ok(h) => h,
+                Err(e) => {
+                    refusal = Some(pc_core::tf!(
+                        "спутник {0}: {1}",
+                        "companion {0}: {1}",
+                        side.src.display(),
+                        format!("{e:#}")
+                    ));
+                    break;
+                }
+            };
             planned.push(pc_db::Moved {
                 src: side.src.to_string_lossy().into_owned(),
                 dst: side.dst.to_string_lossy().into_owned(),
                 proof: Some(proof),
+                home: Some(home),
             });
         }
         if let Some(why) = refusal {
@@ -409,10 +442,18 @@ fn sweep_litter(
                 }
             };
             let size = proof.as_ref().and_then(|p| p.size).unwrap_or(0);
+            let home = match crate::bound::folder_of(&src) {
+                Ok(h) => h,
+                Err(err) => {
+                    report.refused.push((src_s, format!("{err:#}")));
+                    continue;
+                }
+            };
             let manifest = [pc_db::Moved {
                 src: src_s.clone(),
                 dst: dst_s.clone(),
                 proof,
+                home: Some(home),
             }];
             let jid = db.journal_begin(&pc_db::NewJournalEntry {
                 run_id,
@@ -484,6 +525,7 @@ fn sweep_litter(
 /// back is counted from what each undo actually did — entries walked back
 /// whole, entries walked back in part, and files.
 pub fn undo_run(db: &Db, run_id: i64) -> Result<(Tally, Vec<String>)> {
+    crate::not_yet_on_windows(("откат раскладки по папкам", "undoing a reorganisation"))?;
     let entries = db.journal_by_run_op(run_id, "organize")?;
     if entries.is_empty() {
         bail!(

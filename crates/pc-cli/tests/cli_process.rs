@@ -94,6 +94,7 @@ fn moved_by_an_earlier_version(cli: &Cli, rel: &str) -> PathBuf {
         src: src_s.clone(),
         dst: dst.display().to_string(),
         proof: pc_core::proof::Proof::of(&std::fs::symlink_metadata(&src).unwrap()),
+        home: None,
     }];
     let run = db.latest_run().unwrap().unwrap();
     let jid = db
@@ -123,8 +124,6 @@ fn moved_by_an_earlier_version(cli: &Cli, rel: &str) -> PathBuf {
     dst
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn a_copy_goes_to_quarantine_comes_back_and_only_then_can_be_deleted() {
     let cli = Cli::new();
@@ -202,6 +201,94 @@ fn deleting_for_good_needs_the_flag_and_the_holding_period() {
     assert!(quarantined(&cli.archive).is_empty(), "байты остались");
 }
 
+/// Windows deletes nothing (el-6s3go): `derived purge` refuses before it
+/// lists anything as to be deleted, fails, and the quarantine keeps what it
+/// holds — which can still be undone.
+#[cfg(windows)]
+#[test]
+fn windows_never_purges_from_the_command_line() {
+    let cli = Cli::new();
+    cli.photo("frame.jpg", 90);
+    let copy = cli.photo("frame copy.jpg", 90);
+    cli.run(&[
+        "index",
+        "--root",
+        cli.archive.to_str().unwrap(),
+        "--min-size",
+        "0",
+    ]);
+    cli.run(&["families", "build"]);
+    cli.run(&["apply", "--yes"]);
+    assert_eq!(quarantined(&cli.archive).len(), 1);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup"))
+        .arg("--db")
+        .arg(&cli.db)
+        .args(["derived", "purge", "--older-than", "0d", "--yes"])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{text}");
+    assert!(
+        text.contains("on Windows permanent deletion is not carried out"),
+        "{text}"
+    );
+    assert!(!text.contains("Will be deleted"), "{text}");
+    assert_eq!(quarantined(&cli.archive).len(), 1, "{text}");
+
+    let entry = {
+        let db = pc_db::Db::open(&cli.db).unwrap();
+        db.journal_quarantined(None).unwrap().pop().unwrap().id
+    };
+    cli.run(&["derived", "undo", "--journal", &entry.to_string()]);
+    assert!(copy.exists());
+}
+
+/// Windows: a copy another program holds open is refused by `apply` in the
+/// words the web shows (`pc_apply::in_use_text`), and stays where it is.
+#[cfg(windows)]
+#[test]
+fn windows_names_a_file_in_use_and_leaves_it() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let cli = Cli::new();
+    cli.photo("frame.jpg", 90);
+    let copy = cli.photo("frame copy.jpg", 90);
+    cli.run(&[
+        "index",
+        "--root",
+        cli.archive.to_str().unwrap(),
+        "--min-size",
+        "0",
+    ]);
+    cli.run(&["families", "build"]);
+    let other = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .open(&copy)
+        .unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup"))
+        .arg("--db")
+        .arg(&cli.db)
+        .args(["apply", "--yes"])
+        .output()
+        .unwrap();
+    drop(other);
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains(&pc_apply::in_use_text(&copy)), "{text}");
+    assert!(copy.exists(), "{text}");
+    assert!(quarantined(&cli.archive).is_empty(), "{text}");
+}
+
 #[test]
 fn previews_stay_whether_their_catalogue_is_open_or_closed() {
     // The command line once went straight past the open-catalogue check the
@@ -230,7 +317,7 @@ fn previews_stay_whether_their_catalogue_is_open_or_closed() {
 /// the journal refuses the second photograph's row after the first has
 /// moved. The command fails, and prints the receipt of the move that did
 /// happen — the same summary the web's job carries.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+// Reorganising is refused on Windows until el-61ar8 §4.C.
 #[cfg(unix)]
 #[test]
 fn a_database_failure_after_a_move_prints_the_receipt() {
@@ -316,8 +403,25 @@ fn reviewer_missing_purge_confirmation_leaves_the_fixture_intact() {
     cli.run(&["scan", "--root", cli.archive.to_str().unwrap()]);
     let at = moved_by_an_earlier_version(&cli, "Cat Previews.lrdata").join("cache.lrprev");
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    let out = cli.said(&["derived", "purge", "--older-than", "0d"]);
-    assert!(out.contains("cannot be undone"), "{out}");
+    // Windows deletes nothing: the command refuses before listing anything
+    // (`windows_never_purges_from_the_command_line`).
+    #[cfg(unix)]
+    {
+        let out = cli.said(&["derived", "purge", "--older-than", "0d"]);
+        assert!(out.contains("cannot be undone"), "{out}");
+    }
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_photo-cleanup"))
+            .arg("--db")
+            .arg(&cli.db)
+            .args(["derived", "purge", "--older-than", "0d"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(said.contains("deletes nothing"), "{said}");
+    }
     assert_eq!(std::fs::read(at).unwrap(), b"synthetic cache");
 }
 

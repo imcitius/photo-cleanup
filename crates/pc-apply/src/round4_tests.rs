@@ -59,8 +59,6 @@ fn organize_leaves_the_folder_it_emptied_and_any_stranger_at_its_name() {
 
 /// The same for an undo: the folders in quarantine it empties on the way
 /// out stay where they are.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn undo_leaves_the_quarantine_folders_it_emptied() {
     let a = archive();
@@ -254,8 +252,6 @@ fn litter_journal_failure_counts_litter_already_moved() {
     );
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn undo_persistence_failure_keeps_returned_file_in_typed_result() {
     let a = archive();
@@ -266,7 +262,8 @@ fn undo_persistence_failure_keeps_returned_file_in_typed_result() {
     let pair = pc_db::Moved {
         src: home.display().to_string(),
         dst: held.display().to_string(),
-        proof: pc_core::proof::Proof::of(&fs::symlink_metadata(&held).unwrap()),
+        proof: crate::files::evidence(&held).unwrap(),
+        home: None,
     };
     let id =
         a.db.journal_begin(&pc_db::NewJournalEntry {
@@ -372,8 +369,6 @@ fn legacy_reconcile_partial_can_retry_without_guessing_home() {
 /// B6 (el-1y8uo). Every forward outcome — success without any note, a
 /// refusal, a partial carry — appends a typed event with structured data,
 /// not a generic `note/note` that exists only when a human note does.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn every_forward_outcome_has_a_structured_event() {
     // Success, one frame, no companions, no note.
@@ -389,7 +384,9 @@ fn every_forward_outcome_has_a_structured_event() {
         .find(|e| e.phase == "forward" && e.kind == "done")
         .unwrap_or_else(|| panic!("no forward/done event: {ev:?}"));
     let data = done.data.as_deref().expect("structured data");
-    assert!(data.contains(&src.display().to_string()), "{data}");
+    // As JSON spells it: a Windows path's backslashes come doubled.
+    let spelled = src.display().to_string().replace('\\', "\\\\");
+    assert!(data.contains(&spelled), "{data}");
     assert!(!ev.iter().any(|e| e.kind == "note"), "{ev:?}");
 
     // Refusal: the destination is taken at the move.

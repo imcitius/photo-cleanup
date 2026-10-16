@@ -36,6 +36,7 @@ pub(crate) fn moved_by_an_earlier_version(db: &Db, run_id: i64, b: &Bundle) -> R
         src: b.path.clone(),
         dst: dst_str.clone(),
         proof: files::evidence(src)?,
+        home: None,
     }];
     let jid = db.journal_begin(&pc_db::NewJournalEntry {
         run_id,

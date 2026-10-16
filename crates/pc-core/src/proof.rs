@@ -22,10 +22,11 @@
 //! so [`Proof::of`] stays `None` there and a caller that only has a path
 //! keeps refusing. Evidence is taken through a handle instead
 //! ([`Proof::of_file`], [`Proof::at`]): volume serial number and NTFS file ID
-//! (`FileIdInfo`) in place of device and inode, `LastWriteTime` and
-//! `CreationTime` for the times, the same fields and the same comparison
-//! (el-543ou, design el-61ar8 §2.2). File systems other than NTFS give no
-//! evidence. `ChangeTime` is not recorded: a rename changes it.
+//! (`FileIdInfo`) in place of device and inode, `LastWriteTime` for the
+//! modification time, the same fields and the same comparison (el-543ou,
+//! design el-61ar8 §2.2). File systems other than NTFS give no evidence.
+//! Neither `ChangeTime` (a rename changes it) nor `CreationTime` (NTFS
+//! tunnelling hands it from one file to another, el-6s3go) is recorded.
 
 use serde::{Deserialize, Serialize};
 use std::fs::Metadata;
@@ -151,10 +152,18 @@ impl Proof {
                 kind,
                 size: is_file.then_some(standard.EndOfFile.max(0) as u64),
                 mtime_ns: is_file.then(|| winfs::unix_nanos(basic.LastWriteTime)),
-                // Weaker than on APFS: anyone with FILE_WRITE_ATTRIBUTES can
-                // set it (el-61ar8 T1b). It never turns another object into
-                // `Same` — the file ID differs anyway — so it stays.
-                birth_ns: Some(winfs::unix_nanos(basic.CreationTime)),
+                // Not recorded on Windows (el-6s3go). NTFS "tunnelling" gives
+                // a file renamed into a folder the creation time of the file
+                // that bore its name there a moment before: an undo right
+                // after the stranger at home was moved aside brought the
+                // sidecar back with the stranger's creation time, and the
+                // unchanged sidecar was refused as another object (observed
+                // on the CI runner). Anyone with FILE_WRITE_ATTRIBUTES can
+                // set it too (el-61ar8 T1b). It adds nothing the file ID
+                // does not already say: the 64-bit NTFS file ID carries the
+                // MFT record's sequence number, so a reused record is
+                // another ID (P5).
+                birth_ns: None,
                 blake3: None,
             })
         }

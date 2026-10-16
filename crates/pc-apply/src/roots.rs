@@ -12,13 +12,11 @@ use anyhow::Result;
 use pc_db::Db;
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
 use pc_core::anchored::Dir;
 
 /// The roots of the runs this database knows that hold any path of the run,
 /// each opened once and held.
 pub struct RunRoots {
-    #[cfg(unix)]
     held: Vec<(PathBuf, Dir)>,
 }
 
@@ -33,27 +31,21 @@ impl RunRoots {
                 }
             }
         }
-        #[cfg(unix)]
-        {
-            // A root that cannot be opened now holds nothing of this run
-            // that could move under it; the moves themselves say why they
-            // cannot reach their files.
-            let held = used
-                .into_iter()
-                .filter_map(|r| Dir::open_following(&r).ok().map(|d| (r, d)))
-                .collect();
-            Ok(RunRoots { held })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = used;
-            Ok(RunRoots {})
-        }
+        // A root that cannot be opened now holds nothing of this run that
+        // could move under it; the moves themselves say why they cannot
+        // reach their files. On Windows a root is held sharing everything:
+        // it is held for the whole run, and the user is not locked out of
+        // their own archive for that long (el-61ar8 §2.1) — while any
+        // handle inside it is open, Windows refuses to rename it anyway.
+        let held = used
+            .into_iter()
+            .filter_map(|r| Dir::open_following(&r).ok().map(|d| (r, d)))
+            .collect();
+        Ok(RunRoots { held })
     }
 
     /// Every root's path still leads to the folder held for it.
     pub fn check(&self) -> std::result::Result<(), crate::FolderMoved> {
-        #[cfg(unix)]
         for (path, dir) in &self.held {
             if !dir.is_at(path) {
                 let now = dir.current_path();
