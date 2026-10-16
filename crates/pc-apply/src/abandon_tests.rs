@@ -11,7 +11,24 @@
 
 use crate::*;
 use pc_db::{Db, JournalStatus};
-use std::os::unix::fs::symlink;
+
+/// A link at `at` to the photograph `outside`. On Windows a junction to the
+/// folder that holds it: a symlink there needs a privilege a runner may not
+/// have, and a junction is the link anyone can make (el-61ar8 P6).
+fn link_to(outside: &Path, at: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside, at).unwrap();
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(at)
+            .arg(outside.parent().unwrap())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "mklink /J: {out:?}");
+    }
+}
 
 struct Fx {
     _tmp: tempfile::TempDir,
@@ -23,7 +40,12 @@ struct Fx {
 
 fn fx() -> Fx {
     let tmp = tempfile::tempdir().unwrap();
+    // `/var` is a link on macOS; on Windows `canonicalize` spells the path
+    // verbatim (`\\?\`), which `mklink` does not take.
+    #[cfg(unix)]
     let root = tmp.path().canonicalize().unwrap();
+    #[cfg(windows)]
+    let root = tmp.path().to_path_buf();
     let archive = root.join("archive");
     let q = archive.join(pc_core::QUARANTINE_DIR);
     fs::create_dir_all(&q).unwrap();
@@ -107,10 +129,11 @@ fn an_orphan_file_with_no_recorded_evidence_is_kept() {
 #[test]
 fn a_link_at_an_orphan_path_is_kept_and_so_is_what_it_points_to() {
     let f = fx();
-    let outside = f.root.join("elsewhere.jpg");
+    let outside = f.root.join("elsewhere").join("IMG_0002.jpg");
+    fs::create_dir_all(outside.parent().unwrap()).unwrap();
     fs::write(&outside, b"the user's photograph").unwrap();
     let link = f.q.join("IMG_0002.jpg");
-    symlink(&outside, &link).unwrap();
+    link_to(&outside, &link);
 
     let kept = f.abandon(&link).unwrap();
 

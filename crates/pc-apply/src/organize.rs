@@ -88,8 +88,6 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
     let mut report = OrganizeReport::default();
     let mut source_dirs: BTreeSet<PathBuf> = BTreeSet::new();
     let route = Route::Organize { run_id };
-    // Not on Windows yet (el-61ar8 §4.C), whatever the list.
-    crate::not_yet_on_windows(("раскладка по папкам", "reorganising into folders"))?;
     // A volume that cannot move without replacing stops the run before its
     // first move.
     crate::check_organize(moves)?;
@@ -525,7 +523,6 @@ fn sweep_litter(
 /// back is counted from what each undo actually did — entries walked back
 /// whole, entries walked back in part, and files.
 pub fn undo_run(db: &Db, run_id: i64) -> Result<(Tally, Vec<String>)> {
-    crate::not_yet_on_windows(("откат раскладки по папкам", "undoing a reorganisation"))?;
     let entries = db.journal_by_run_op(run_id, "organize")?;
     if entries.is_empty() {
         bail!(
@@ -564,8 +561,6 @@ pub fn undo_run(db: &Db, run_id: i64) -> Result<(Tally, Vec<String>)> {
 mod tests {
     use super::*;
 
-    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-    #[cfg(unix)]
     #[test]
     fn an_undo_after_a_reset_moves_the_file_and_leaves_the_index_alone() {
         // Same reuse of row ids as in quarantine: an old reorganisation entry
@@ -647,8 +642,6 @@ mod tests {
         );
     }
 
-    // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-    #[cfg(unix)]
     #[test]
     fn a_service_file_is_quarantined_not_deleted_and_comes_back() {
         // An AppleDouble can carry a resource fork, and Finder's folder note

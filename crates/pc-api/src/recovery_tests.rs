@@ -116,8 +116,6 @@ async fn cli_and_api_share_recovery_classification() {
 /// A photograph whose sidecar's place in quarantine is taken: the frame and
 /// its companions are one unit (user decision (c)), so on the web, as on the
 /// command line, neither moves, and the job says which sidecar held it.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[tokio::test]
 async fn a_frame_whose_sidecar_cannot_follow_stays_and_the_job_says_why() {
     let f = Fixture::new();
@@ -278,8 +276,6 @@ fn litter_unsupported(marker: &str) -> pc_apply::race::SharedGuard {
 /// R4 (reviewer el-2hkbk). The organize job stops on the litter after the
 /// frame moved: the job says the frame moved — one file and its bytes —
 /// instead of overwriting the actual total with zero.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[tokio::test]
 async fn independent_litter_stop_job_counts_moved_frame() {
     let f = Fixture::new();
@@ -321,8 +317,6 @@ async fn independent_litter_stop_job_counts_moved_frame() {
 /// the whole plan through `pc_apply::organize` and prints the typed stop's
 /// total; the web runs it action by action. Both report the same moved
 /// work, nothing counted twice and nothing reset.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[tokio::test]
 async fn cli_and_api_report_equal_nested_partial_results() {
     // The command line's path: one call over the whole plan.
@@ -392,10 +386,8 @@ async fn cli_and_api_report_equal_nested_partial_results() {
 /// words the command line prints for the same stop (its half is
 /// `pc-cli/tests/cli_process.rs`,
 /// `a_database_failure_after_a_move_prints_the_receipt`).
-#[cfg(unix)]
 #[tokio::test]
 async fn a_database_failure_after_a_move_keeps_the_receipt_in_the_job() {
-    use std::os::unix::fs::MetadataExt;
     let f = Fixture::new();
     let old = f.archive.join("old");
     std::fs::create_dir(&old).unwrap();
@@ -414,7 +406,7 @@ async fn a_database_failure_after_a_move_keeps_the_receipt_in_the_job() {
                 &pc_db::NewFile {
                     path: src.display().to_string(),
                     name: name.into(),
-                    dev: md.dev() as i64,
+                    dev: pc_core::volume::device_of(&md, &src) as i64,
                     size: md.len() as i64,
                     mtime: pc_core::time::mtime_unix(&md),
                     ..Default::default()

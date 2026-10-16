@@ -372,14 +372,12 @@ fn organized(a: &Archive, src: &Path, dst: &Path) -> pc_organize::Move {
     }
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn organize_never_replaces_what_appears_at_the_destination() {
     for what in strangers() {
         let a = archive();
         let src = a.dir.join("a.jpg");
-        let dst = a.dir.join("2019/a.jpg");
+        let dst = a.dir.join("2019").join("a.jpg");
         fs::write(&src, b"picture").unwrap();
         let m = organized(&a, &src, &dst);
 
@@ -398,13 +396,11 @@ fn organize_never_replaces_what_appears_at_the_destination() {
     }
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn an_organize_undo_never_replaces_what_appears_at_the_old_place() {
     let a = archive();
     let src = a.dir.join("a.jpg");
-    let dst = a.dir.join("2019/a.jpg");
+    let dst = a.dir.join("2019").join("a.jpg");
     fs::write(&src, b"picture").unwrap();
     let m = organized(&a, &src, &dst);
     assert_eq!(crate::organize(&a.db, a.run, &[m]).unwrap().done.frames, 1);
@@ -435,7 +431,11 @@ fn journal_rows(db: &Db) -> i64 {
         .unwrap()
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+// A volume that answers a no-replace rename with "unsupported" is a Unix
+// question (macOS exFAT, Linux without RENAME_NOREPLACE): on Windows the
+// rename never replaces, and FAT/exFAT are refused for lacking a file
+// identity before anything moves (`check_exclusive_rename`). The stop
+// itself is shared (`refusal_tests`).
 #[cfg(unix)]
 #[test]
 fn a_volume_that_cannot_refuse_to_replace_stops_apply_before_anything_moves() {
@@ -466,13 +466,17 @@ fn a_volume_that_cannot_refuse_to_replace_stops_apply_before_anything_moves() {
     );
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
+// A volume that answers a no-replace rename with "unsupported" is a Unix
+// question (macOS exFAT, Linux without RENAME_NOREPLACE): on Windows the
+// rename never replaces, and FAT/exFAT are refused for lacking a file
+// identity before anything moves (`check_exclusive_rename`). The stop
+// itself is shared (`refusal_tests`).
 #[cfg(unix)]
 #[test]
 fn a_volume_that_cannot_refuse_to_replace_stops_organize_and_undo() {
     let a = archive();
     let src = a.dir.join("a.jpg");
-    let dst = a.dir.join("2019/a.jpg");
+    let dst = a.dir.join("2019").join("a.jpg");
     fs::write(&src, b"picture").unwrap();
     let m = organized(&a, &src, &dst);
     {
@@ -562,7 +566,7 @@ mod exfat {
             db,
             run,
         };
-        let m = organized(&a, &photo, &dir.join("2019/photo.bmp"));
+        let m = organized(&a, &photo, &dir.join("2019").join("photo.bmp"));
         let err = crate::organize(&a.db, a.run, &[m]).unwrap_err();
         assert!(crate::is_no_exclusive_rename(&err), "{err:#}");
 

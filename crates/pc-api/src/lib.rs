@@ -159,7 +159,7 @@ pub async fn serve(
 }
 
 #[cfg(test)]
-// Most of these tests need a move, which Windows refuses (el-usdqi D4);
-// their helpers are unused there.
+// Some helpers serve only the purge tests, which are Unix-only: Windows
+// deletes nothing.
 #[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests;

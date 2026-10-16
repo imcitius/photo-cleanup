@@ -103,6 +103,27 @@ fn pair(src: &Path, dst: &Path) -> pc_db::Moved {
     }
 }
 
+/// A pair held at `dst`, as an interrupted run left it. On Windows with the
+/// evidence and the folder identity a move records there before it renames
+/// — a row without evidence is
+/// never walked back on Windows by its names
+/// (`windows_recovery_uses_file_identity_not_a_path_key`); on Unix as an
+/// older version wrote it, without, so the legacy path is what is asked.
+fn held_pair(src: &Path, dst: &Path) -> pc_db::Moved {
+    #[cfg(windows)]
+    {
+        pc_db::Moved {
+            proof: crate::files::evidence(dst).unwrap(),
+            home: Some(crate::bound::folder_of(src).unwrap()),
+            ..pair(src, dst)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        pair(src, dst)
+    }
+}
+
 /// Plant `what` at `at` once, just before something moves there, and keep
 /// what it looked like right after.
 #[cfg(unix)]
@@ -422,8 +443,6 @@ fn a_volume_refusal_at_a_sidecar_stops_apply_after_journaling_the_photo() {
 }
 
 /// The same at a sidecar in a reorganisation.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn a_volume_refusal_at_a_sidecar_stops_organize() {
     let a = archive();
@@ -433,8 +452,8 @@ fn a_volume_refusal_at_a_sidecar_stops_organize() {
     let side = a.dir.join("one.xmp");
     fs::write(&side, b"edits").unwrap();
     let moves = [
-        organized(&a, &one, &a.dir.join("2019/one.jpg")),
-        organized(&a, &two, &a.dir.join("2019/two.jpg")),
+        organized(&a, &one, &a.dir.join("2019").join("one.jpg")),
+        organized(&a, &two, &a.dir.join("2019").join("two.jpg")),
     ];
 
     let _refused = unsupported_for(side.clone());
@@ -442,7 +461,7 @@ fn a_volume_refusal_at_a_sidecar_stops_organize() {
 
     assert!(crate::is_no_exclusive_rename(&err), "{err:#}");
     assert_eq!(fs::read(&one).unwrap(), b"one", "файл уехал без спутника");
-    assert!(fs::symlink_metadata(a.dir.join("2019/one.jpg")).is_err());
+    assert!(fs::symlink_metadata(a.dir.join("2019").join("one.jpg")).is_err());
     assert_eq!(fs::read(&side).unwrap(), b"edits");
     assert_eq!(fs::read(&two).unwrap(), b"two", "следующий файл уехал");
     assert!(a
@@ -462,8 +481,6 @@ fn a_volume_refusal_at_a_sidecar_stops_organize() {
 /// The litter sweep after a reorganisation: the first service file refused
 /// by the volume stops the sweep, so the second emptied folder is left as
 /// it was, and organize reports the stop.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn a_volume_refusal_in_the_litter_sweep_stops_it() {
     let a = archive();
@@ -476,8 +493,8 @@ fn a_volume_refusal_in_the_litter_sweep_stops_it() {
     fs::write(d1.join(".DS_Store"), b"finder one").unwrap();
     fs::write(d2.join(".DS_Store"), b"finder two").unwrap();
     let moves = [
-        organized(&a, &one, &a.dir.join("2019/one.jpg")),
-        organized(&a, &two, &a.dir.join("2019/two.jpg")),
+        organized(&a, &one, &a.dir.join("2019").join("one.jpg")),
+        organized(&a, &two, &a.dir.join("2019").join("two.jpg")),
     ];
 
     let _refused = unsupported_for(d1.join(".DS_Store"));
@@ -494,8 +511,6 @@ fn a_volume_refusal_in_the_litter_sweep_stops_it() {
 
 /// Walking a reorganisation back: a volume refusal stops the walk instead of
 /// being collected as one more failure while the next entries are tried.
-// Reorganising is refused on Windows until el-61ar8 §4.C.
-#[cfg(unix)]
 #[test]
 fn a_volume_refusal_stops_the_undo_of_a_run() {
     let a = archive();
@@ -512,14 +527,17 @@ fn a_volume_refusal_stops_the_undo_of_a_run() {
 
     // Newest first: three.jpg comes back, the volume refuses two.jpg, and
     // one.jpg must not be tried at all.
-    let _refused = unsupported_for(a.dir.join("2019/two.jpg"));
+    let _refused = unsupported_for(a.dir.join("2019").join("two.jpg"));
     let err = crate::undo_run(&a.db, a.run).unwrap_err();
 
     assert!(crate::is_no_exclusive_rename(&err), "{err:#}");
     assert_eq!(fs::read(a.dir.join("three.jpg")).unwrap(), b"three.jpg");
-    assert_eq!(fs::read(a.dir.join("2019/two.jpg")).unwrap(), b"two.jpg");
     assert_eq!(
-        fs::read(a.dir.join("2019/one.jpg")).unwrap(),
+        fs::read(a.dir.join("2019").join("two.jpg")).unwrap(),
+        b"two.jpg"
+    );
+    assert_eq!(
+        fs::read(a.dir.join("2019").join("one.jpg")).unwrap(),
         b"one.jpg",
         "после отказа тома откат продолжился"
     );
@@ -608,8 +626,6 @@ fn a_refused_recovery_is_written_down_and_stays_pending() {
 /// and the first goes back into quarantine (user decision (c)). The journal
 /// says where both are, the entry stays pending, and the volume refusal
 /// keeps its type for the caller.
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[test]
 fn a_recovery_stopped_by_the_volume_says_what_came_back() {
     let a = archive();
@@ -622,7 +638,7 @@ fn a_recovery_stopped_by_the_volume_says_what_came_back() {
         &a,
         &home,
         &held,
-        &[pair(&home, &held), pair(&side, &held_side)],
+        &[held_pair(&home, &held), held_pair(&side, &held_side)],
         JournalStatus::Pending,
     );
 

@@ -1016,8 +1016,6 @@ async fn a_group_keeps_the_last_decision_and_never_empties_itself() {
     );
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[tokio::test]
 async fn an_orphan_comes_out_of_quarantine_the_way_it_went_in() {
     // Quarantine keeps the shape of what went into it, so a file deep inside
@@ -1028,7 +1026,11 @@ async fn an_orphan_comes_out_of_quarantine_the_way_it_went_in() {
     let f = Fixture::new();
     let hidden = f.archive.join(pc_core::QUARANTINE_DIR).join("Old.lrdata");
     std::fs::create_dir_all(hidden.join("sub")).unwrap();
-    std::fs::write(hidden.join("sub/cache"), b"previews from another database").unwrap();
+    std::fs::write(
+        hidden.join("sub").join("cache"),
+        b"previews from another database",
+    )
+    .unwrap();
     f.scan().await;
 
     let (s, orphans) = f.req("GET", "/api/quarantine/orphans", Value::Null).await;
@@ -1038,7 +1040,7 @@ async fn an_orphan_comes_out_of_quarantine_the_way_it_went_in() {
     let plan = f.preview("quarantine-adopt", json!({})).await;
     let items = plan["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "{plan}");
-    let home = f.archive.join("Old.lrdata/sub/cache");
+    let home = f.archive.join("Old.lrdata").join("sub").join("cache");
     assert_eq!(
         items[0]["dst"].as_str().unwrap(),
         home.display().to_string(),
@@ -1058,7 +1060,7 @@ async fn an_orphan_comes_out_of_quarantine_the_way_it_went_in() {
         b"previews from another database"
     );
     assert!(
-        !hidden.join("sub/cache").exists(),
+        !hidden.join("sub").join("cache").exists(),
         "файл остался в карантине"
     );
 
@@ -1796,8 +1798,6 @@ async fn a_tree_with_no_roots_configured_hands_back_paths_that_can_be_marked() {
     );
 }
 
-// Needs a move to succeed; Windows refuses every move (el-usdqi D4).
-#[cfg(unix)]
 #[tokio::test]
 async fn an_interrupted_move_can_be_read_against_the_disk_and_undone() {
     // A killed process leaves a `pending` row: the list of what it meant to
@@ -1817,6 +1817,15 @@ async fn an_interrupted_move_can_be_read_against_the_disk_and_undone() {
         let run = db
             .start_run(&[f.archive.display().to_string()], "test")
             .unwrap();
+        // Without evidence, as older Unix versions wrote. Windows never walks
+        // such a row back by its names, and every row it writes records the
+        // evidence of the file before it moves: that is the row there.
+        #[cfg(unix)]
+        let proof = None;
+        #[cfg(windows)]
+        let proof = pc_core::proof::Proof::of_file(&std::fs::File::open(&dst).unwrap());
+        #[cfg(windows)]
+        assert!(proof.is_some(), "NTFS gives evidence");
         db.journal_begin(&pc_db::NewJournalEntry {
             run_id: run,
             op: "quarantine-file",
@@ -1828,7 +1837,7 @@ async fn an_interrupted_move_can_be_read_against_the_disk_and_undone() {
             manifest: &[pc_db::Moved {
                 src: s.clone(),
                 dst: d.clone(),
-                proof: None,
+                proof,
                 home: None,
             }],
         })
@@ -2255,31 +2264,52 @@ async fn a_file_in_use_is_refused_by_the_web_in_the_words_of_the_command_line() 
     assert!(!photo.exists());
 }
 
-/// Windows: reorganising is not carried out there yet (el-61ar8 §4.C); the
-/// preview refuses with the reason and nothing is touched.
+/// Windows (el-4hyy6; this replaces the refusal of el-6s3go): on NTFS the
+/// preview of a reorganisation is offered and writes nothing, the job moves
+/// the photograph into the new tree, and the web's undo of the run brings it
+/// back — through the same `pc_apply::organize`/`undo` the command line
+/// runs.
 #[cfg(windows)]
 #[tokio::test]
-async fn windows_still_refuses_to_reorganise_and_says_why() {
+async fn windows_reorganises_and_walks_the_run_back() {
     let f = Fixture::new();
     let (photo, encoded) = one_indexed_frame(&f, "DSC9004.JPG").await;
     let tree = f.archive.parent().unwrap().join("sorted");
     std::fs::create_dir(&tree).unwrap();
-    let (s, v) = f
-        .req(
-            "POST",
-            "/api/preview",
-            json!({"kind":"organize-apply","params":{"root":tree,"allow_duplicates":true}}),
+
+    let plan = f
+        .preview(
+            "organize-apply",
+            json!({"root":tree,"allow_duplicates":true}),
         )
         .await;
-    assert_eq!(s, 400, "the preview must plan a move to be refused: {v}");
-    assert!(
-        v["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("on Windows") && e.contains("reorganising")),
-        "{v}"
-    );
-    assert_eq!(std::fs::read(&photo).unwrap(), encoded);
+    assert_eq!(plan["total_files"], 1, "{plan}");
+    let dst = PathBuf::from(plan["items"][0]["dst"].as_str().unwrap());
+    assert!(dst.starts_with(&tree), "{plan}");
     assert_eq!(std::fs::read_dir(&tree).unwrap().count(), 0);
+    assert_eq!(std::fs::read(&photo).unwrap(), encoded);
+
+    let done = f.apply(&plan).await;
+    assert_eq!(done["state"], "done", "{done}");
+    assert!(!photo.exists());
+    assert_eq!(std::fs::read(&dst).unwrap(), encoded);
+
+    let run_id = {
+        let db = f.state.db.lock().unwrap();
+        db.conn
+            .query_row(
+                "SELECT run_id FROM journal WHERE op = 'organize' AND status = 'done'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    let back = f.preview("organize-undo", json!({"run_id":run_id})).await;
+    assert_eq!(back["total_files"], 1, "{back}");
+    let restored = f.apply(&back).await;
+    assert_eq!(restored["state"], "done", "{restored}");
+    assert_eq!(std::fs::read(&photo).unwrap(), encoded);
+    assert!(std::fs::symlink_metadata(&dst).is_err());
 }
 
 /// Windows deletes nothing (el-6s3go): the web's purge offers nothing and

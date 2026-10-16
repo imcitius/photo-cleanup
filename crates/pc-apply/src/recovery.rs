@@ -721,14 +721,6 @@ pub fn undo(db: &Db, journal_id: i64) -> Result<Tally> {
         "в записи нет пути назначения",
         "the entry has no destination path"
     ))?;
-    if entry.op == "organize" {
-        if let Err(e) =
-            crate::not_yet_on_windows(("откат раскладки по папкам", "undoing a reorganisation"))
-        {
-            let why = format!("{e:#}");
-            return Err(told(db, journal_id, "undo", "refused", &why, e));
-        }
-    }
     let mut list = match list_of(&entry) {
         Ok(list) => list,
         Err(e) => {
@@ -882,32 +874,6 @@ pub struct Reconciled {
 /// this one, or held and free to come back. Anything else leaves the entry
 /// `pending`, which is what it is, with the reason added to its history.
 pub fn reconcile_undo(db: &Db, journal_id: i64) -> Result<Reconciled> {
-    if let Err(e) = crate::not_yet_on_windows((
-        "сверка прерванной операции",
-        "reconciling an interrupted operation",
-    )) {
-        // Every place the entry knows, so the refusal says what it is about.
-        let places = db
-            .journal_entry(journal_id)?
-            .map(|entry| {
-                list_of(&entry)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|m| format!("{} -> {}", m.src, m.dst))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            })
-            .unwrap_or_default();
-        let why = format!("{e:#}: {places}");
-        return Err(told(
-            db,
-            journal_id,
-            "reconcile",
-            "refused",
-            &why,
-            e.context(why.clone()),
-        ));
-    }
     if let Some(entry) = db.journal_entry(journal_id)? {
         if let Err(e) = readable(&entry) {
             let why = format!("{e:#}");
