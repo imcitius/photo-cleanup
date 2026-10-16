@@ -1003,6 +1003,12 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
             continue;
         }
         let purge = r.kind == "derived-purge";
+        // Two companions differing only in case (a case-sensitive folder on
+        // Windows): the job refuses the unit, in pc-apply's words, and the
+        // preview says so in advance.
+        if let Some(why) = pc_apply::files::companion_doubt(FsPath::new(src)).filter(|_| !purge) {
+            warnings.push(json!({"path": src, "why": why}));
+        }
         let mut listed = Vec::new();
         let mut extra = 0;
         for side in pc_apply::companion_plan(FsPath::new(src), FsPath::new(dst)) {
