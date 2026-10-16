@@ -165,6 +165,73 @@ async fn a_frame_whose_sidecar_cannot_follow_stays_and_the_job_says_why() {
     assert!(said.contains("DSC9101.xmp"), "{job}");
 }
 
+/// A link under a sidecar's name (a junction on Windows): the preview says
+/// in advance, in pc-apply's words, that the unit is refused; the job
+/// refuses it the same way the command line does; nothing moves and what
+/// the link leads to is untouched (el-1nx1u B1/B2).
+#[tokio::test]
+async fn a_link_under_a_sidecar_name_is_refused_alike_in_preview_and_job() {
+    let f = Fixture::new();
+    let img = image::RgbImage::from_fn(200, 150, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 61])
+    });
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+        .encode_image(&img)
+        .unwrap();
+    let photo = f.archive.join("DSC9202.JPG");
+    std::fs::write(&photo, &encoded).unwrap();
+    let id = f
+        .start("index", json!({"roots":[f.archive],"min_size":0}))
+        .await;
+    assert_eq!(f.wait(id).await["state"], "done");
+    let (_, recent) = f.req("GET", "/api/recent?limit=1", Value::Null).await;
+    let file_id = recent[0]["id"].as_i64().unwrap();
+    f.req(
+        "POST",
+        &format!("/api/files/{file_id}/reject"),
+        json!({"rejected":true}),
+    )
+    .await;
+    let foreign = f.archive.parent().unwrap().join("foreign-edits");
+    std::fs::create_dir(&foreign).unwrap();
+    std::fs::write(foreign.join("payload"), b"foreign edits 4417").unwrap();
+    let side = photo.with_extension("xmp");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&foreign, &side).unwrap();
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&side)
+            .arg(&foreign)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "mklink /J: {out:?}");
+    }
+    let why = pc_apply::files::companion_doubt(&photo).expect("refused");
+
+    let preview = f.preview("plan-apply", json!({"roles":["copy"]})).await;
+    let warned = preview["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w["why"] == json!(why));
+    assert!(warned, "{preview}");
+    let dst = PathBuf::from(preview["items"][0]["dst"].as_str().unwrap());
+    let job = f.apply(&preview).await;
+
+    assert!(!dst.exists(), "the photograph moved: {job}");
+    assert_eq!(std::fs::read(&photo).unwrap(), encoded);
+    assert!(std::fs::symlink_metadata(&side).is_ok());
+    assert_eq!(
+        std::fs::read(foreign.join("payload")).unwrap(),
+        b"foreign edits 4417"
+    );
+    assert_eq!(std::fs::read_dir(&foreign).unwrap().count(), 1);
+    assert!(job.to_string().contains("DSC9202.xmp"), "{job}");
+}
+
 /// One synthetic JPEG and a `.DS_Store` beside it in a folder only this
 /// test uses, indexed the way a scan would, so organize plans to move the
 /// frame and sweep the litter after it.

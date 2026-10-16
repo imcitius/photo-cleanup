@@ -162,6 +162,13 @@ pub fn organize(db: &Db, run_id: i64, moves: &[Move]) -> Result<OrganizeReport> 
         // Every sidecar goes with the photograph or none does (user decision
         // (c)): one that cannot be proven, or whose new name is taken,
         // refuses the photograph too, before anything moves.
+        // An entry under a companion's name that is not a plain file, or a
+        // folder that cannot be searched in full, refuses the unit as it
+        // does in quarantine: the one rule (el-1nx1u B1/B2).
+        if let Some(why) = crate::files::companion_doubt(src) {
+            report.refused.push((m.src.clone(), why));
+            continue;
+        }
         let mut refusal = None;
         for side in companion_plan(src, dst) {
             let proof = match evidence(&side.src) {

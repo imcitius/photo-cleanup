@@ -132,8 +132,10 @@ fn held_by_another_program(path: &Path) -> fs::File {
 // ------------------------------------------------------------- P3a -------
 
 /// A photograph another program has open is refused as in use, in the
-/// words the command line and the web both show; nothing moves and nothing
-/// is journaled. Once the program lets go, asking again moves it.
+/// words the command line and the web both show; nothing moves, and the
+/// refusal is written down as a failed row with that reason, naming no
+/// destination and claiming nothing moved (el-61ar8 §3.2 P3a). Once the
+/// program lets go, asking again moves it.
 #[test]
 fn a_file_held_by_another_program_is_refused_and_named() {
     let a = archive();
@@ -149,7 +151,15 @@ fn a_file_held_by_another_program_is_refused_and_named() {
     assert!(why.contains(&crate::in_use_text(&photo)), "{why}");
     assert_eq!(fs::read(&photo).unwrap(), b"raw frame 6024");
     assert!(!a.quarantine.join("frame.arw").exists());
-    assert_eq!(rows(&a.db), 0);
+    assert_eq!(rows(&a.db), 1);
+    let entry = a.db.journal_entry(1).unwrap().expect("the refusal's row");
+    assert_eq!(entry.status, JournalStatus::Failed);
+    assert_eq!(entry.dst, None);
+    assert!(entry.manifest.is_empty(), "{:?}", entry.manifest);
+    assert_eq!((entry.size, entry.file_count), (0, 0));
+    let (_, note) = last_row(&a.db);
+    assert!(note.contains(&crate::in_use_text(&photo)), "{note}");
+    assert!(!crate::recovery::undo_offered(&entry));
 
     drop(other);
     let report = crate::apply(&a.db, a.run, &[c], None).unwrap();

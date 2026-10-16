@@ -365,6 +365,20 @@ pub fn in_use_text(path: &Path) -> String {
     )
 }
 
+/// The refusal of an object in use, typed, so that its caller can tell it
+/// from any other and write it down (el-61ar8 §3.2 P3a); shown, it is
+/// [`in_use_text`].
+#[derive(Debug)]
+pub(crate) struct InUse(pub(crate) PathBuf);
+
+impl std::fmt::Display for InUse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&in_use_text(&self.0))
+    }
+}
+
+impl std::error::Error for InUse {}
+
 /// Windows (el-6s3go): what is not carried out there yet, and why. A move
 /// into quarantine and the undo of a finished one are; the reconciliation
 /// of an interrupted operation, an orphan's return and a reorganisation are
@@ -753,6 +767,9 @@ mod binding_tests;
 
 #[cfg(all(test, windows))]
 mod windows_tests;
+
+#[cfg(test)]
+mod link_unit_tests;
 
 #[cfg(all(test, unix))]
 mod purge_tests;

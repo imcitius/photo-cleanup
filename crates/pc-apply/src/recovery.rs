@@ -482,6 +482,33 @@ fn walk_back(
     if moving.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
+    // The folder each member comes back to has to be the folder it left —
+    // a real folder, reached without following anything the run did not
+    // start from (el-1nx1u B3). Refused, nothing moves, every member stays
+    // where it is proven, and the entry stays open to be undone again once
+    // the folder is a folder again.
+    let roots = db.all_run_roots()?;
+    if let Some(unsafe_at) = moving.iter().find_map(|p| {
+        Path::new(&p.look.src)
+            .parent()
+            .and_then(|f| origin_doubt(&roots, f))
+    }) {
+        let why = pc_core::tf!(
+            "{0}: ничего не перенесено — {1}; всё остаётся в карантине, и запись можно откатить, когда на этом месте снова будет обычная папка; где что: {2}",
+            "{0}: nothing was moved — {1}; everything stays in quarantine, and the entry can be undone once a plain folder is in that place again; where things are: {2}",
+            phase,
+            unsafe_at,
+            listing(&items)
+        );
+        return Err(told(
+            db,
+            id,
+            phase,
+            "refused",
+            &why,
+            anyhow::anyhow!("{why}"),
+        ));
+    }
     let members: Vec<Member> = moving
         .iter()
         .map(|p| Member::back(&p.rec, &p.look))
@@ -527,6 +554,62 @@ fn walk_back(
     } else {
         e
     })
+}
+
+/// Why the folder `folder`, which a member of an entry comes back to, is
+/// not to be trusted, if it is not.
+///
+/// What is asked is every component from `folder` up to the run's root that
+/// holds it (the deepest one), each as itself, never followed: a link or a
+/// junction there — one that replaced the folder after the move, or was
+/// planted between two runs — would carry the photograph into someone
+/// else's folder while the journal recorded it home (el-1nx1u B3). Above
+/// the root, the path is the user's own as they named it (`/var` on macOS
+/// is a link) and is followed. A path under no recorded root has only its
+/// own folder asked. A folder that is not there is not a doubt: it is
+/// created on the way back, through the folder above it, without following
+/// anything.
+fn origin_doubt(roots: &[String], folder: &Path) -> Option<String> {
+    let root = roots
+        .iter()
+        .map(Path::new)
+        .filter(|r| folder.starts_with(r))
+        .max_by_key(|r| r.components().count());
+    let mut at = Some(folder);
+    while let Some(p) = at.filter(|p| !p.as_os_str().is_empty()) {
+        let what = match files::found_at(p) {
+            Ok(files::Found::Dir) => None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => Some(e.to_string()),
+            Ok(files::Found::Link) => Some(
+                pc_core::tr!(
+                    "символическая ссылка или соединение (junction)",
+                    "a symbolic link or a junction"
+                )
+                .to_string(),
+            ),
+            Ok(_) => Some(
+                pc_core::tr!(
+                    "не папка (файл, облачная заглушка или иной особый объект)",
+                    "not a folder (a file, a cloud placeholder or another special object)"
+                )
+                .to_string(),
+            ),
+        };
+        if let Some(what) = what {
+            return Some(pc_core::tf!(
+                "место возврата {0} — {1}; программа не переходит по нему и ничего туда не возвращает",
+                "the place to return to, {0}, is {1}; the tool does not follow it and returns nothing there",
+                p.display(),
+                what
+            ));
+        }
+        if root.is_none_or(|r| p == r) {
+            break;
+        }
+        at = p.parent();
+    }
+    None
 }
 
 /// Walk a finished entry back: every file it moved, by its evidence, as one

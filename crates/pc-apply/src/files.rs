@@ -13,23 +13,17 @@ use std::path::{Path, PathBuf};
 
 use crate::Tally;
 
-/// Files that belong to a photograph and must travel with it.
+/// Every entry beside a photograph that bears a companion's name, and must
+/// travel with it.
 ///
 /// An orphaned `.xmp` left behind is a Lightroom edit pointing at nothing,
-/// and an orphaned AppleDouble is litter.
+/// and an orphaned AppleDouble is litter. Each entry is taken *as itself*:
+/// nothing is followed and nothing is filtered by what it leads to, so a
+/// link, a junction, a folder or a dangling link under a companion's name is
+/// here too — and [`companion_doubt`] refuses the unit for it, rather than
+/// the frame moving while that entry stays behind (el-1nx1u B1).
 pub fn companions(path: &Path) -> Vec<PathBuf> {
-    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-        return Vec::new();
-    };
-    let Some(dir) = path.parent() else {
-        return Vec::new();
-    };
-    #[cfg(windows)]
-    {
-        companions_listed(dir, name)
-    }
-    #[cfg(not(windows))]
-    companions_named(dir, name)
+    scan(path).0
 }
 
 /// The names a companion of the photograph `name` can bear.
@@ -46,6 +40,23 @@ fn companion_names(name: &str) -> [String; 7] {
     ]
 }
 
+/// The companions' entries, and why the search for them is not to be
+/// trusted, if it is not.
+fn scan(path: &Path) -> (Vec<PathBuf>, Option<String>) {
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+        return (Vec::new(), None);
+    };
+    let Some(dir) = path.parent() else {
+        return (Vec::new(), None);
+    };
+    #[cfg(windows)]
+    {
+        scan_listed(dir, name)
+    }
+    #[cfg(not(windows))]
+    scan_named(dir, name)
+}
+
 /// Windows: the companions as the folder lists them, each with the exact
 /// spelling it has there (el-61ar8 §2.6). NTFS folders ignore case by
 /// default, so asking for `a.XMP` would answer with `a.xmp` — and the
@@ -53,56 +64,171 @@ fn companion_names(name: &str) -> [String; 7] {
 /// folder can be made case-sensitive (`fsutil file setCaseSensitiveInfo`,
 /// WSL), and then `a.xmp` and `a.XMP` are two files: both are listed here,
 /// and [`companion_doubt`] refuses the unit.
+///
+/// A listing that fails — the folder, or any one entry in it — means a
+/// sidecar may be missed and left behind as an orphan: that is the doubt.
 #[cfg(windows)]
-fn companions_listed(dir: &Path, name: &str) -> Vec<PathBuf> {
+fn scan_listed(dir: &Path, name: &str) -> (Vec<PathBuf>, Option<String>) {
     let wanted: Vec<String> = companion_names(name)
         .iter()
         .map(|n| n.to_lowercase())
         .collect();
-    let Ok(listing) = fs::read_dir(dir) else {
-        return Vec::new();
+    let unlisted = || {
+        Some(pc_core::tf!(
+            "папку {0} не удалось прочитать целиком, и неизвестно, все ли спутники кадра найдены; кадр со спутниками не переносится, ничего не перенесено",
+            "the folder {0} could not be listed in full, and whether every companion of the frame was found is not known; the frame and its companions are not moved, nothing moved",
+            dir.display()
+        ))
     };
-    let mut out: Vec<PathBuf> = listing
-        .flatten()
-        .filter_map(|e| {
-            let listed = e.file_name().to_str()?.to_string();
-            let p = dir.join(&listed);
-            (wanted.contains(&listed.to_lowercase()) && fs::metadata(&p).is_ok_and(|m| m.is_file()))
-                .then_some(p)
-        })
-        .collect();
+    let Ok(listing) = fs::read_dir(dir) else {
+        return (Vec::new(), unlisted());
+    };
+    let mut out = Vec::new();
+    let mut doubt = None;
+    for e in listing {
+        let Ok(e) = e else {
+            doubt = unlisted();
+            continue;
+        };
+        let Some(listed) = e.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if wanted.contains(&listed.to_lowercase()) {
+            out.push(dir.join(listed));
+        }
+    }
     out.sort();
-    out
+    (out, doubt)
 }
 
+/// Unix: each companion's name asked for as itself (`lstat`). On
+/// case-insensitive file systems `.xmp` and `.XMP` can address one entry:
+/// it is counted and moved once. A name whose entry cannot be asked about
+/// for any reason but its absence is the doubt.
 #[cfg(not(windows))]
-fn companions_named(dir: &Path, name: &str) -> Vec<PathBuf> {
+fn scan_named(dir: &Path, name: &str) -> (Vec<PathBuf>, Option<String>) {
     let mut out = Vec::new();
     let mut identities = std::collections::HashSet::new();
+    let mut doubt = None;
     for candidate in companion_names(name) {
         let p = dir.join(candidate);
-        if let Ok(md) = fs::metadata(&p) {
-            // On case-insensitive filesystems .xmp and .XMP can address
-            // one directory entry. Count and move that companion once.
-            if md.is_file() && identities.insert(pc_core::volume::entry_key(&md, &p)) {
-                out.push(p);
+        match fs::symlink_metadata(&p) {
+            Ok(md) => {
+                if identities.insert(pc_core::volume::entry_key(&md, &p)) {
+                    out.push(p);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                doubt.get_or_insert_with(|| unknown_kind(&p, &e));
             }
         }
     }
-    out
+    (out, doubt)
 }
 
-/// Why the companions of `path` cannot go as one unit, if they cannot: two
-/// of them that differ only in case (a case-sensitive folder on Windows).
-/// Which of them belongs to the photograph is not the tool's to guess, so
-/// the whole unit is refused (director decision on el-61ar8 §5.6). The one
-/// answer for the command line and the web.
-pub fn companion_doubt(path: &Path) -> Option<String> {
+/// What an entry is, as itself: never followed, never opened for its data
+/// (opening a cloud placeholder would recall it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Found {
+    File,
+    Dir,
+    /// A symbolic link, or on Windows a junction.
+    Link,
+    /// Anything else: a device, a socket, and on Windows another reparse
+    /// point (a cloud placeholder, a deduplicated file) or a file whose data
+    /// is not here.
+    Other,
+}
+
+pub(crate) fn found_at(p: &Path) -> std::io::Result<Found> {
+    let md = fs::symlink_metadata(p)?;
     #[cfg(windows)]
-    if let Some(why) = listing_doubt(path) {
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT; OFFLINE, RECALL_ON_OPEN,
+        // RECALL_ON_DATA_ACCESS — the same classes `pc_core::winfs::kind`
+        // refuses through a handle.
+        const REPARSE: u32 = 0x400;
+        const NOT_HERE: u32 = 0x1000 | 0x4_0000 | 0x40_0000;
+        let a = md.file_attributes();
+        if a & REPARSE != 0 {
+            return Ok(if md.file_type().is_symlink() {
+                Found::Link
+            } else {
+                Found::Other
+            });
+        }
+        if a & NOT_HERE != 0 {
+            return Ok(Found::Other);
+        }
+    }
+    let t = md.file_type();
+    Ok(if t.is_symlink() {
+        Found::Link
+    } else if t.is_dir() {
+        Found::Dir
+    } else if t.is_file() {
+        Found::File
+    } else {
+        Found::Other
+    })
+}
+
+fn unknown_kind(p: &Path, e: &std::io::Error) -> String {
+    pc_core::tf!(
+        "не удалось узнать, что такое {0}, не переходя по нему ({1}); кадр со спутниками не переносится, ничего не перенесено",
+        "what {0} is cannot be told without following it ({1}); the frame and its companions are not moved, nothing moved",
+        p.display(),
+        e
+    )
+}
+
+/// Why an entry under a companion's name cannot travel with its frame, if
+/// it cannot: only a plain file does. A link or junction is neither
+/// followed nor moved — moved as itself it would leave its edits behind,
+/// followed it would carry someone else's (director decision on el-1nx1u
+/// B2, criterion 4) — and a folder, a cloud placeholder or another special
+/// object is not a sidecar this tool knows how to carry.
+pub(crate) fn not_a_companion(p: &Path) -> Option<String> {
+    let what = match found_at(p) {
+        Ok(Found::File) => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return Some(unknown_kind(p, &e)),
+        Ok(Found::Link) => pc_core::tr!(
+            "символическая ссылка или соединение (junction)",
+            "a symbolic link or a junction"
+        ),
+        Ok(Found::Dir) => pc_core::tr!("папка", "a folder"),
+        Ok(Found::Other) => pc_core::tr!(
+            "не обычный файл (облачная заглушка или иной особый объект)",
+            "not a regular file (a cloud placeholder or another special object)"
+        ),
+    };
+    Some(pc_core::tf!(
+        "{0} носит имя спутника кадра, но это {1}: программа по нему не переходит и не переносит его; замените его самим файлом или уберите и повторите; кадр со спутниками не переносится, ничего не перенесено",
+        "{0} bears the name of the frame's companion but is {1}: the tool neither follows nor moves it; replace it with the file itself or move it away, then try again; the frame and its companions are not moved, nothing moved",
+        p.display(),
+        what
+    ))
+}
+
+/// Why the companions of `path` cannot go as one unit, if they cannot: the
+/// folder could not be searched in full, an entry under a companion's name
+/// is not a plain file or cannot be told without following it, or two of
+/// them differ only in case (a case-sensitive folder on Windows; which of
+/// them belongs to the photograph is not the tool's to guess — director
+/// decision on el-61ar8 §5.6). Then the whole unit is refused before
+/// anything moves. The one answer for the command line and the web.
+pub fn companion_doubt(path: &Path) -> Option<String> {
+    let (found, doubt) = scan(path);
+    if doubt.is_some() {
+        return doubt;
+    }
+    if let Some(why) = found.iter().find_map(|p| not_a_companion(p)) {
         return Some(why);
     }
-    let names: Vec<String> = companions(path)
+    let names: Vec<String> = found
         .iter()
         .filter_map(|p| p.file_name()?.to_str().map(str::to_string))
         .collect();
@@ -126,26 +252,6 @@ pub fn companion_doubt(path: &Path) -> Option<String> {
             .collect::<Vec<_>>()
             .join(", ")
     ))
-}
-
-/// Windows: the companions are found by listing the folder, so a listing
-/// that fails — the folder, or any one entry in it — means a sidecar may
-/// be missed and left behind as an orphan. The unit is refused rather than
-/// moved without it.
-#[cfg(windows)]
-fn listing_doubt(path: &Path) -> Option<String> {
-    let dir = path.parent()?;
-    let unreadable = match fs::read_dir(dir) {
-        Ok(listing) => listing.into_iter().any(|e| e.is_err()),
-        Err(_) => true,
-    };
-    unreadable.then(|| {
-        pc_core::tf!(
-            "папку {0} не удалось прочитать целиком, и неизвестно, все ли спутники кадра найдены; кадр со спутниками не переносится, ничего не перенесено",
-            "the folder {0} could not be listed in full, and whether every companion of the frame was found is not known; the frame and its companions are not moved, nothing moved",
-            dir.display()
-        )
-    })
 }
 
 /// One sidecar of a photograph about to move: where it lands, and whether
@@ -358,6 +464,47 @@ pub(crate) fn moved_bytes(moved: &[pc_db::Moved]) -> u64 {
         .sum()
 }
 
+/// The journal's row for a photograph refused as in use: begun and closed
+/// as failed at once, with no manifest, no destination, no size — it claims
+/// nothing was moved and nothing is owned, so neither undo, reconciliation
+/// nor purge ever acts on it. The words returned are the refusal; a journal
+/// that does not take the row is said too, never passed over in silence.
+pub(crate) fn record_in_use(db: &Db, run_id: i64, c: &Candidate, why: String) -> String {
+    let refused = [(c.path.clone(), why.clone())];
+    let recorded = db
+        .journal_begin(&pc_db::NewJournalEntry {
+            run_id,
+            op: "quarantine-file",
+            target_id: Some(c.file_id),
+            src: &c.path,
+            dst: None,
+            size: 0,
+            file_count: 0,
+            manifest: &[],
+        })
+        .and_then(|jid| {
+            db.journal_close(
+                jid,
+                JournalStatus::Failed,
+                &pc_db::Event {
+                    text: &why,
+                    error: Some(&why),
+                    refused: &refused,
+                    ..pc_db::Event::new("forward", "refused")
+                },
+            )
+        });
+    match recorded {
+        Ok(()) => why,
+        Err(e) => pc_core::tf!(
+            "{0}; журнал не принял запись об этом отказе ({1})",
+            "{0}; the journal did not take the record of this refusal ({1})",
+            why,
+            format!("{e:#}")
+        ),
+    }
+}
+
 pub fn quarantine_file(
     db: &Db,
     run_id: i64,
@@ -378,7 +525,16 @@ pub fn quarantine_file(
                 "the file is already gone"
             )))
         }
-        Err(e) => return Ok(Filed::refused(format!("{e:#}"))),
+        Err(e) => {
+            let why = format!("{e:#}");
+            // A file another program holds is a refusal of its own kind, and
+            // it is written down (el-61ar8 §3.2 P3a): a row that failed,
+            // with the reason, naming no destination and moving nothing.
+            if e.downcast_ref::<crate::InUse>().is_some() {
+                return Ok(Filed::refused(record_in_use(db, run_id, c, why)));
+            }
+            return Ok(Filed::refused(why));
+        }
     };
 
     // A candidate the tool picked has to prove itself: the file that makes it
@@ -497,6 +653,20 @@ pub fn quarantine_file(
             }
             Err(e) => return refuse(format!("{e:#}")),
         };
+        // The evidence is what the unit is bound to: it has to describe a
+        // plain file, read as itself, or the entry became something else
+        // since [`companion_doubt`] looked (el-1nx1u B1/B2).
+        if proof.kind != pc_core::proof::Kind::File {
+            return Ok(Filed::refused(not_a_companion(&side.src).unwrap_or_else(
+                || {
+                    pc_core::tf!(
+                        "спутник {0} не обычный файл; кадр со спутниками не переносится, ничего не перенесено",
+                        "the companion {0} is not a regular file; the frame and its companions are not moved, nothing moved",
+                        side.src.display()
+                    )
+                },
+            )));
+        }
         planned.push(pc_db::Moved {
             src: side.src.to_string_lossy().into_owned(),
             dst: side.dst.to_string_lossy().into_owned(),

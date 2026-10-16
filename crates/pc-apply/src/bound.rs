@@ -133,7 +133,7 @@ impl Entry {
         // folder is followed once, here, and held from now on.
         let dir = hold_folder(parent).map_err(|e| {
             if crate::in_use(&e) {
-                return anyhow!("{}", crate::in_use_text(parent));
+                return anyhow::Error::new(crate::InUse(parent.to_path_buf()));
             }
             anyhow::Error::new(e).context(pc_core::tf!(
                 "не открыть папку {0}",
@@ -263,7 +263,7 @@ impl Entry {
 
     fn gone(&self, e: std::io::Error) -> anyhow::Error {
         if crate::in_use(&e) {
-            return anyhow!("{}", crate::in_use_text(&self.path));
+            return anyhow::Error::new(crate::InUse(self.path.clone()));
         }
         anyhow!(pc_core::tf!(
             "{0} — не прочитать через удерживаемую папку: {1}; ничего не перенесено",
