@@ -20,14 +20,18 @@
 //! the folder held, not into whatever its path names by then.
 //!
 //! Above the bound the path is resolved as the user's own: on macOS
-//! `/var`, `/tmp` and `/etc` are links. Exactly this is allowed: a link on
-//! the way to the mount point, or at it, only when it belongs to the system
-//! (owned by root, as those are), and the folder reached must be the top of
+//! `/var`, `/tmp` and `/etc` are links. Exactly this is allowed for a link
+//! on the way to the mount point, or at it: the link itself is owned by
+//! root, and the folder it is in is owned by root and writable by neither
+//! its group nor others ([`system_link`]) — a link the user can neither
+//! make nor swap, as those are. Each prefix is looked at without following
+//! before it is followed, so a link the user made cannot steer which
+//! folder becomes the bound. And the folder reached must be the top of
 //! that volume on its path — on the files' device, its parent (`..`) on
-//! another one or the root itself. A link the user can make or replace is
-//! refused there as anywhere below. A link to a folder *below* the mount
-//! point (`/var/folders/...` when `/` and `/private/var` are one volume) is
-//! below the bound and refused like any other.
+//! another one or the root itself. Any other link there is refused, as
+//! anywhere below. A link to a folder *below* the mount point
+//! (`/var/folders/...` when `/` and `/private/var` are one volume) is below
+//! the bound and refused like any other.
 //!
 //! Unix only: on Windows no row was ever written without an identity.
 
@@ -81,6 +85,13 @@ fn other_volume(at: &Path) -> String {
     )
 }
 
+/// A link at or above the bound is followed only when the user can neither
+/// make nor swap it: the link is owned by root, and so is the folder it is
+/// in, which neither its group nor others may write.
+pub(crate) fn system_link(link_uid: u32, parent_uid: u32, parent_mode: u32) -> bool {
+    link_uid == 0 && parent_uid == 0 && parent_mode & 0o022 == 0
+}
+
 /// Check the way from the mount point of the volume `dev` to `folder`.
 /// Nothing is created; an `Err` says, in words, which place is refused.
 pub(crate) fn check(folder: &Path, dev: u64) -> Result<Chain, String> {
@@ -108,24 +119,38 @@ pub(crate) fn check(folder: &Path, dev: u64) -> Result<Chain, String> {
         prefixes.push(next);
     }
     // Where the path enters the volume: the shallowest folder on it that
-    // is on the files' device, as the user's path resolves.
-    let Some(top) = prefixes
-        .iter()
-        .position(|p| std::fs::metadata(p).is_ok_and(|m| m.dev() == dev))
-    else {
+    // is on the files' device, as the user's path resolves. Each prefix is
+    // looked at without following before it is followed, so no link the
+    // user can make or swap steers which folder is the bound: at the bound
+    // and above it, a link is followed only when it is the system's own.
+    let mut top = None;
+    for (i, p) in prefixes.iter().enumerate() {
+        let md = match std::fs::symlink_metadata(p) {
+            Ok(md) => md,
+            // Not there before the volume is reached: not on it (below).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(refuse(p, &e.to_string())),
+        };
+        if md.file_type().is_symlink() {
+            // `/` is never a link, so a link always has a parent prefix.
+            let parent = &prefixes[i.saturating_sub(1)];
+            let up = std::fs::metadata(parent).map_err(|e| refuse(parent, &e.to_string()))?;
+            if !system_link(md.uid(), up.uid(), up.mode()) {
+                return Err(refuse(p, link_text()));
+            }
+        }
+        if std::fs::metadata(p).is_ok_and(|m| m.dev() == dev) {
+            top = Some(i);
+            break;
+        }
+    }
+    let Some(top) = top else {
         return Err(pc_core::tf!(
             "место возврата {0} не на томе, откуда файлы перенесены (том не подключён или путь ведёт на другой); программа ничего туда не возвращает",
             "the place to return to, {0}, is not on the volume the files were moved from (the volume is not mounted, or the path leads to another one); the tool returns nothing there",
             folder.display()
         ));
     };
-    // Above the bound and at it, only the system's own links are followed.
-    for p in &prefixes[..=top] {
-        let md = std::fs::symlink_metadata(p).map_err(|e| refuse(p, &e.to_string()))?;
-        if md.file_type().is_symlink() && md.uid() != 0 {
-            return Err(refuse(p, link_text()));
-        }
-    }
     let bound = &prefixes[top];
     let mut held = Dir::open_following(bound).map_err(|e| refuse(bound, &e.to_string()))?;
     let id = held.ident().map_err(|e| refuse(bound, &e.to_string()))?;

@@ -287,3 +287,44 @@ fn an_old_row_of_a_run_with_roots_keeps_its_own_bound() {
     assert!(f.in_quarantine());
     assert_eq!(f.status(id), JournalStatus::Done);
 }
+
+/// A link at or above the bound is followed only when the user can neither
+/// make nor swap it: owned by root, in a folder owned by root that neither
+/// its group nor others may write (el-53l7h, review el-4hpzh B1).
+#[test]
+fn only_a_root_link_in_a_root_folder_nobody_else_writes_is_a_system_link() {
+    use crate::mount_bound::system_link;
+    // `/var` on macOS: root's link in `/` (root, 0755).
+    assert!(system_link(0, 0, 0o040_755));
+    assert!(system_link(0, 0, 0o041_755));
+    // Root's link, but in a folder the group, others or a user can write.
+    assert!(!system_link(0, 0, 0o040_775));
+    assert!(!system_link(0, 0, 0o040_757));
+    assert!(!system_link(0, 0, 0o041_777)); // sticky `/tmp`-like
+    assert!(!system_link(0, 501, 0o040_755));
+    // The user's own link, wherever it is.
+    assert!(!system_link(501, 0, 0o040_755));
+    assert!(!system_link(501, 501, 0o040_700));
+}
+
+/// A link the user made exactly where the path enters the volume is refused
+/// by name, not followed to pick the bound. The volume here is the device
+/// of `/dev`, which the fixture's own folder is never on.
+#[test]
+fn a_users_link_at_the_mount_point_is_refused_and_not_followed() {
+    use std::os::unix::fs::MetadataExt;
+    let f = Fixture::new();
+    let devfs = fs::metadata("/dev").unwrap().dev();
+    if fs::metadata(&f.base).unwrap().dev() == devfs || fs::metadata("/").unwrap().dev() == devfs {
+        eprintln!("skipped: /dev shares a device with / or the fixture");
+        return;
+    }
+    let link = f.base.join("to-dev");
+    std::os::unix::fs::symlink("/dev", &link).unwrap();
+    let err = match crate::mount_bound::check(&link.join("fd"), devfs) {
+        Ok(_) => panic!("a user's link at the mount point was followed"),
+        Err(e) => e,
+    };
+    assert!(err.contains(&link.display().to_string()), "{err}");
+    assert!(err.contains("symbolic link"), "{err}");
+}
