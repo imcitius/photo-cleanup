@@ -33,13 +33,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # The rust-cache key hashes every installed toolchain; the image's own
+      # `stable` is not used and changes with each image rollout (ci.yml).
+      - name: Remove toolchains other than the pinned one
+        shell: bash
+        run: |
+          rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
+            | xargs -r -n1 rustup toolchain uninstall
+          rustup toolchain list
       # Its own cache key: the job id `windows` used to give it the same key
       # as the Windows job of `Checks`, and the release cache and the test
       # cache overwrote each other. Saved only from `main`, like `Checks`.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ env.RUST_TOOLCHAIN }}
-          add-rust-environment-hash-key: false
           shared-key: desktop-package-windows
           save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'agent/desktop-worker/el-5u45y-ci-checks-github' }}
 

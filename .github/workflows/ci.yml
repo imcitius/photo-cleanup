@@ -27,12 +27,12 @@ env:
 # `main` and stores nothing: a ~850 MB copy per pull request used to push the
 # cache of `main` out of the 10 GB limit, and the next run started cold.
 #
-# The key names the toolchain and the debug setting above itself, instead of
-# the rust-cache environment hash: that hash covers every toolchain on the
-# runner, including the image's own `stable` that this build never uses, so
-# while GitHub rolls out an image with a newer `stable` the same commit
-# missed the cache on one runner and hit it on the next (el-5u45y, Rust
-# 1.99.1 rollout). Change RUST_TOOLCHAIN here and rust-toolchain.toml together.
+# rust-cache key: it hashes every installed toolchain, the image's own
+# `stable` included, which nothing here builds with. While GitHub rolled out
+# an image with a newer `stable`, the same commit missed the cache on one
+# runner and hit it on the next (Rust 1.99.1, el-5u45y). Each job therefore
+# removes every toolchain but RUST_TOOLCHAIN before the cache step. Change
+# RUST_TOOLCHAIN together with rust-toolchain.toml.
 jobs:
   # Windows has no st_dev, no inode and a different path separator, so it is
   # the platform that catches a Unix assumption creeping back in. It runs the
@@ -44,10 +44,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # See «rust-cache key» at the top.
+      - name: Remove toolchains other than the pinned one
+        shell: bash
+        run: |
+          rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
+            | xargs -r -n1 rustup toolchain uninstall
+          rustup toolchain list
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ env.RUST_TOOLCHAIN }}-debug-${{ env.CARGO_PROFILE_DEV_DEBUG }}
-          add-rust-environment-hash-key: false
           shared-key: checks-windows-test
           save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'agent/desktop-worker/el-5u45y-ci-checks-github' }}
       - run: cargo test --workspace --locked
@@ -60,10 +65,15 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
+      # See «rust-cache key» at the top.
+      - name: Remove toolchains other than the pinned one
+        shell: bash
+        run: |
+          rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
+            | xargs -r -n1 rustup toolchain uninstall
+          rustup toolchain list
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ env.RUST_TOOLCHAIN }}-debug-${{ env.CARGO_PROFILE_DEV_DEBUG }}
-          add-rust-environment-hash-key: false
           shared-key: checks-windows-lint-release
           save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'agent/desktop-worker/el-5u45y-ci-checks-github' }}
       # The Windows branches of `cfg` are compiled only here; without clippy
@@ -80,10 +90,15 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
+      # See «rust-cache key» at the top.
+      - name: Remove toolchains other than the pinned one
+        shell: bash
+        run: |
+          rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
+            | xargs -r -n1 rustup toolchain uninstall
+          rustup toolchain list
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ env.RUST_TOOLCHAIN }}-debug-${{ env.CARGO_PROFILE_DEV_DEBUG }}
-          add-rust-environment-hash-key: false
           shared-key: checks-linux-rust
           save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'agent/desktop-worker/el-5u45y-ci-checks-github' }}
       - run: cargo fmt --all --check
@@ -109,11 +124,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # See «rust-cache key» at the top.
+      - name: Remove toolchains other than the pinned one
+        shell: bash
+        run: |
+          rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
+            | xargs -r -n1 rustup toolchain uninstall
+          rustup toolchain list
       # Both legs build the same debug pc-cli, so they share one cache.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ env.RUST_TOOLCHAIN }}-debug-${{ env.CARGO_PROFILE_DEV_DEBUG }}
-          add-rust-environment-hash-key: false
           shared-key: checks-linux-web
           save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'agent/desktop-worker/el-5u45y-ci-checks-github' }}
       - run: npm ci
