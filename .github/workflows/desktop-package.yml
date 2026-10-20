@@ -22,6 +22,8 @@ permissions:
 
 env:
   PACKAGE: photo-cleanup-desktop-windows-x64
+  # The same toolchain as `Checks`; the cache key names it (see ci.yml).
+  RUST_TOOLCHAIN: "1.98.1"
 
 jobs:
   windows:
@@ -30,12 +32,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.98.1
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       # Its own cache key: the job id `windows` used to give it the same key
       # as the Windows job of `Checks`, and the release cache and the test
       # cache overwrote each other. Saved only from `main`, like `Checks`.
       - uses: Swatinem/rust-cache@v2
         with:
+          key: ${{ env.RUST_TOOLCHAIN }}
+          add-rust-environment-hash-key: false
           shared-key: desktop-package-windows
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
