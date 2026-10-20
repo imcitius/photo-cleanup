@@ -48,6 +48,10 @@ jobs:
       - name: Remove toolchains other than the pinned one
         shell: bash
         run: |
+          # Fails if the pin here and rust-toolchain.toml drift apart: the
+          # step would otherwise remove the toolchain the build really uses.
+          tr -d "\r" < rust-toolchain.toml | grep -qx "channel = \"${RUST_TOOLCHAIN}\"" \
+            || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
           rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
             | xargs -r -n1 rustup toolchain uninstall
           rustup toolchain list
@@ -69,6 +73,10 @@ jobs:
       - name: Remove toolchains other than the pinned one
         shell: bash
         run: |
+          # Fails if the pin here and rust-toolchain.toml drift apart: the
+          # step would otherwise remove the toolchain the build really uses.
+          tr -d "\r" < rust-toolchain.toml | grep -qx "channel = \"${RUST_TOOLCHAIN}\"" \
+            || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
           rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
             | xargs -r -n1 rustup toolchain uninstall
           rustup toolchain list
@@ -94,6 +102,10 @@ jobs:
       - name: Remove toolchains other than the pinned one
         shell: bash
         run: |
+          # Fails if the pin here and rust-toolchain.toml drift apart: the
+          # step would otherwise remove the toolchain the build really uses.
+          tr -d "\r" < rust-toolchain.toml | grep -qx "channel = \"${RUST_TOOLCHAIN}\"" \
+            || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
           rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
             | xargs -r -n1 rustup toolchain uninstall
           rustup toolchain list
@@ -105,9 +117,10 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --workspace --locked
 
-  # One leg per browser. Each project of playwright.config.ts has its own
-  # server on its own temporary database, so the legs share nothing; run one
-  # after the other they only added up.
+  # One leg per browser. Each project of playwright.config.ts talks to its
+  # own server on its own temporary database, so the legs share no state; run
+  # one after the other they only added up. (`--project` does not filter
+  # `webServer`: each leg still starts both servers and uses one.)
   linux-web:
     runs-on: ubuntu-latest
     strategy:
@@ -128,6 +141,10 @@ jobs:
       - name: Remove toolchains other than the pinned one
         shell: bash
         run: |
+          # Fails if the pin here and rust-toolchain.toml drift apart: the
+          # step would otherwise remove the toolchain the build really uses.
+          tr -d "\r" < rust-toolchain.toml | grep -qx "channel = \"${RUST_TOOLCHAIN}\"" \
+            || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
           rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
             | xargs -r -n1 rustup toolchain uninstall
           rustup toolchain list

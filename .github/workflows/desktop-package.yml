@@ -38,12 +38,17 @@ jobs:
       - name: Remove toolchains other than the pinned one
         shell: bash
         run: |
+          # Fails if the pin here and rust-toolchain.toml drift apart: the
+          # step would otherwise remove the toolchain the build really uses.
+          tr -d "\r" < rust-toolchain.toml | grep -qx "channel = \"${RUST_TOOLCHAIN}\"" \
+            || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
           rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
             | xargs -r -n1 rustup toolchain uninstall
           rustup toolchain list
       # Its own cache key: the job id `windows` used to give it the same key
       # as the Windows job of `Checks`, and the release cache and the test
-      # cache overwrote each other. Saved only from `main`, like `Checks`.
+      # cache overwrote each other. Saved only from `main`, like `Checks`; as
+      # this workflow rarely runs on `main`, a package build usually starts cold.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: desktop-package-windows
