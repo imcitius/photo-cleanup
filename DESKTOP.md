@@ -1792,6 +1792,9 @@ Linux-бинари, образ GHCR) сохраняются. Всё, что CI �
 `check:unused`, отладочный `pc-cli`, Playwright одного браузера. У каждого
 джоба свой ключ `Swatinem/rust-cache` (`shared-key`), у `Desktop package`
 тоже; кэш сохраняет только `main`, pull request его лишь восстанавливает.
+Ключ rust-cache хэширует все установленные тулчейны, поэтому перед ним
+каждый джоб удаляет всё, кроме закреплённого `RUST_TOOLCHAIN` (свой
+`stable` образа раннера при раскатке нового образа менял ключ).
 Dev/test-профиль в CI собирается с `CARGO_PROFILE_DEV_DEBUG=line-tables-only`
 (профиль release не меняется).
 
