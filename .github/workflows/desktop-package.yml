@@ -41,7 +41,7 @@ jobs:
           key: ${{ env.RUST_TOOLCHAIN }}
           add-rust-environment-hash-key: false
           shared-key: desktop-package-windows
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'agent/desktop-worker/el-5u45y-ci-checks-github' }}
 
       # What goes into the package is decided by features, and a wrong one
       # is invisible in the exe. `custom-protocol` makes Tauri serve the
