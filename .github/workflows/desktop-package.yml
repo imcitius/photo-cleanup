@@ -31,7 +31,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
+      # Its own cache key: the job id `windows` used to give it the same key
+      # as the Windows job of `Checks`, and the release cache and the test
+      # cache overwrote each other. Saved only from `main`, like `Checks`.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop-package-windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # What goes into the package is decided by features, and a wrong one
       # is invisible in the exe. `custom-protocol` makes Tauri serve the
