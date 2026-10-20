@@ -50,7 +50,7 @@ jobs:
         run: |
           # Fails if the pin here and rust-toolchain.toml drift apart: the
           # step would otherwise remove the toolchain the build really uses.
-          tr -d "\r" < rust-toolchain.toml | grep -qx "channel = \"${RUST_TOOLCHAIN}\"" \
+          tr -d "\r" < rust-toolchain.toml | grep -x "channel = \"${RUST_TOOLCHAIN}\"" >/dev/null \
             || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
           rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
             | xargs -r -n1 rustup toolchain uninstall
@@ -75,7 +75,7 @@ jobs:
         run: |
           # Fails if the pin here and rust-toolchain.toml drift apart: the
           # step would otherwise remove the toolchain the build really uses.
-          tr -d "\r" < rust-toolchain.toml | grep -qx "channel = \"${RUST_TOOLCHAIN}\"" \
+          tr -d "\r" < rust-toolchain.toml | grep -x "channel = \"${RUST_TOOLCHAIN}\"" >/dev/null \
             || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
           rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
             | xargs -r -n1 rustup toolchain uninstall
@@ -104,7 +104,7 @@ jobs:
         run: |
           # Fails if the pin here and rust-toolchain.toml drift apart: the
           # step would otherwise remove the toolchain the build really uses.
-          tr -d "\r" < rust-toolchain.toml | grep -qx "channel = \"${RUST_TOOLCHAIN}\"" \
+          tr -d "\r" < rust-toolchain.toml | grep -x "channel = \"${RUST_TOOLCHAIN}\"" >/dev/null \
             || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
           rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
             | xargs -r -n1 rustup toolchain uninstall
@@ -143,7 +143,7 @@ jobs:
         run: |
           # Fails if the pin here and rust-toolchain.toml drift apart: the
           # step would otherwise remove the toolchain the build really uses.
-          tr -d "\r" < rust-toolchain.toml | grep -qx "channel = \"${RUST_TOOLCHAIN}\"" \
+          tr -d "\r" < rust-toolchain.toml | grep -x "channel = \"${RUST_TOOLCHAIN}\"" >/dev/null \
             || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
           rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
             | xargs -r -n1 rustup toolchain uninstall
