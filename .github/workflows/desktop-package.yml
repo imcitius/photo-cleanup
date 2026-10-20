@@ -22,6 +22,8 @@ permissions:
 
 env:
   PACKAGE: photo-cleanup-desktop-windows-x64
+  # The same toolchain as `Checks`; the cache key names it (see ci.yml).
+  RUST_TOOLCHAIN: "1.98.1"
 
 jobs:
   windows:
@@ -30,8 +32,27 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.98.1
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # The rust-cache key hashes every installed toolchain; the image's own
+      # `stable` is not used and changes with each image rollout (ci.yml).
+      - name: Remove toolchains other than the pinned one
+        shell: bash
+        run: |
+          # Fails if the pin here and rust-toolchain.toml drift apart: the
+          # step would otherwise remove the toolchain the build really uses.
+          tr -d "\r" < rust-toolchain.toml | grep -x "channel = \"${RUST_TOOLCHAIN}\"" >/dev/null \
+            || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
+          rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
+            | xargs -r -n1 rustup toolchain uninstall
+          rustup toolchain list
+      # Its own cache key: the job id `windows` used to give it the same key
+      # as the Windows job of `Checks`, and the release cache and the test
+      # cache overwrote each other. Saved only from `main`, like `Checks`; as
+      # this workflow rarely runs on `main`, a package build usually starts cold.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop-package-windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # What goes into the package is decided by features, and a wrong one
       # is invisible in the exe. `custom-protocol` makes Tauri serve the

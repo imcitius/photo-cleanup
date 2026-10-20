@@ -130,7 +130,7 @@ build`, со встроенными ресурсами — `tauri-cli` для с
 - существующие версии в `Cargo.lock` не изменились, добавлены только новые
   пакеты.
 
-Не проверено: сборка и запуск на Windows (нет машины; CI `windows` job
+Не проверено: сборка и запуск на Windows (нет машины; CI `windows-test` job, раньше `windows`,
 теперь компилирует оболочку в `cargo test --workspace`) — это el-56k.
 
 ### Отвергнутые варианты
@@ -914,7 +914,7 @@ guard при запуске → 3 FAIL.
 --target x86_64-pc-windows-msvc` с заглушками C-компилятора (ничего не
 линковалось) — это статическая проверка, **не запуск**. С el-5j1e2/el-2yxx0
 `cargo test --workspace --locked` выполняется и на `windows-latest` в CI
-(джоб `windows` workflow `Checks`): это нативный прогон автотестов, не
+(джоб `windows-test` workflow `Checks`): это нативный прогон автотестов, не
 проверка окна или оператора.
 
 Где запускалось (исправление el-146id, автор el-28ar; итоговые SHA и
@@ -1322,7 +1322,7 @@ restore/take ownership (Windows, уровень администратора). �
 #### Нативный прогон Windows (el-2yxx0)
 
 Единственная нативная Windows проекта — раннер `windows-latest` GitHub
-Actions (джоб `windows` workflow `Checks`, `cargo test --workspace
+Actions (джоб `windows-test` workflow `Checks`, до el-5u45y — `windows`; `cargo test --workspace
 --locked`). Это автотесты под учётной записью раннера (`runneradmin`,
 повышенный токен администратора), не GUI и не ручная проверка. Первый
 прогон (run 38131711147) уронил 9 тестов `pc-desktop`; найдено и
@@ -1784,6 +1784,19 @@ Linux-бинари, образ GHCR) сохраняются. Всё, что CI �
 запуск скачанного `.app` под Gatekeeper, отсутствие WebView2), проверяется
 вручную на обеих ОС, и **непроверенное явно отмечается в отчёте как
 непроверенное**, а не как пройденное.
+
+Джобы `Checks` (el-5u45y) идут параллельно: `windows-test` (`cargo test
+--workspace --locked`), `windows-lint-release` (clippy `-D warnings`,
+релизный `pc-cli` и его `--version`), `linux-rust` (fmt, clippy, тесты) и
+`linux-web` — матрица `chromium`/`webkit`: сборка веба, сверка `dist`,
+`check:unused`, отладочный `pc-cli`, Playwright одного браузера. У каждого
+джоба свой ключ `Swatinem/rust-cache` (`shared-key`), у `Desktop package`
+тоже; кэш сохраняет только `main`, pull request его лишь восстанавливает.
+Ключ rust-cache хэширует все установленные тулчейны, поэтому перед ним
+каждый джоб удаляет всё, кроме закреплённого `RUST_TOOLCHAIN` (свой
+`stable` образа раннера при раскатке нового образа менял ключ).
+Dev/test-профиль в CI собирается с `CARGO_PROFILE_DEV_DEBUG=line-tables-only`
+(профиль release не меняется).
 
 Windows-пакет для ручной проверки (el-5342s) собирает
 `.github/workflows/desktop-package.yml`: запуск вручную

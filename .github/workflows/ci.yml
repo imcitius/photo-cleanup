@@ -11,28 +11,122 @@ concurrency:
   group: checks-${{ github.ref }}
   cancel-in-progress: true
 
+# Line tables keep file:line in panics and backtraces but drop the rest of
+# the debug info: smaller objects and PDBs, a faster link on Windows, a
+# smaller cache. Dev/test profile only; the release profile is untouched.
+env:
+  RUST_TOOLCHAIN: "1.98.1"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+# The jobs run in parallel and together run every check that the single
+# Linux job and the single Windows job used to run in sequence (el-5u45y).
+#
+# Rust cache: each job has its own `shared-key`, so a test build, a clippy +
+# release build and the Desktop package workflow never overwrite each
+# other's cache. Only `main` saves. A pull request restores the cache of
+# `main` and stores nothing: a ~850 MB copy per pull request used to push the
+# cache of `main` out of the 10 GB limit, and the next run started cold.
+#
+# rust-cache key: it hashes every installed toolchain, the image's own
+# `stable` included, which nothing here builds with. While GitHub rolled out
+# an image with a newer `stable`, the same commit missed the cache on one
+# runner and hit it on the next (Rust 1.99.1, el-5u45y). Each job therefore
+# removes every toolchain but RUST_TOOLCHAIN before the cache step. Change
+# RUST_TOOLCHAIN together with rust-toolchain.toml.
 jobs:
   # Windows has no st_dev, no inode and a different path separator, so it is
   # the platform that catches a Unix assumption creeping back in. It runs the
   # same tests, not a smoke check.
-  windows:
+  windows-test:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.98.1
-          components: clippy
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # See «rust-cache key» at the top.
+      - name: Remove toolchains other than the pinned one
+        shell: bash
+        run: |
+          # Fails if the pin here and rust-toolchain.toml drift apart: the
+          # step would otherwise remove the toolchain the build really uses.
+          tr -d "\r" < rust-toolchain.toml | grep -x "channel = \"${RUST_TOOLCHAIN}\"" >/dev/null \
+            || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
+          rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
+            | xargs -r -n1 rustup toolchain uninstall
+          rustup toolchain list
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: checks-windows-test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --workspace --locked
+
+  windows-lint-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      # See «rust-cache key» at the top.
+      - name: Remove toolchains other than the pinned one
+        shell: bash
+        run: |
+          # Fails if the pin here and rust-toolchain.toml drift apart: the
+          # step would otherwise remove the toolchain the build really uses.
+          tr -d "\r" < rust-toolchain.toml | grep -x "channel = \"${RUST_TOOLCHAIN}\"" >/dev/null \
+            || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
+          rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
+            | xargs -r -n1 rustup toolchain uninstall
+          rustup toolchain list
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: checks-windows-lint-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The Windows branches of `cfg` are compiled only here; without clippy
       # on this runner nobody lints them (el-543ou, el-61ar8 D13).
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
       - run: cargo build --release -p pc-cli --locked
       - run: ./target/release/photo-cleanup.exe --version
 
-  test:
+  linux-rust:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      # See «rust-cache key» at the top.
+      - name: Remove toolchains other than the pinned one
+        shell: bash
+        run: |
+          # Fails if the pin here and rust-toolchain.toml drift apart: the
+          # step would otherwise remove the toolchain the build really uses.
+          tr -d "\r" < rust-toolchain.toml | grep -x "channel = \"${RUST_TOOLCHAIN}\"" >/dev/null \
+            || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
+          rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
+            | xargs -r -n1 rustup toolchain uninstall
+          rustup toolchain list
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: checks-linux-rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --workspace --locked
+
+  # One leg per browser. Each project of playwright.config.ts talks to its
+  # own server on its own temporary database, so the legs share no state; run
+  # one after the other they only added up. (`--project` does not filter
+  # `webServer`: each leg still starts both servers and uses one.)
+  linux-web:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, webkit]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -42,9 +136,23 @@ jobs:
           cache-dependency-path: crates/pc-api/web/package-lock.json
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.98.1
-          components: rustfmt, clippy
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # See «rust-cache key» at the top.
+      - name: Remove toolchains other than the pinned one
+        shell: bash
+        run: |
+          # Fails if the pin here and rust-toolchain.toml drift apart: the
+          # step would otherwise remove the toolchain the build really uses.
+          tr -d "\r" < rust-toolchain.toml | grep -x "channel = \"${RUST_TOOLCHAIN}\"" >/dev/null \
+            || { echo "::error::RUST_TOOLCHAIN differs from rust-toolchain.toml"; exit 1; }
+          rustup toolchain list | awk '{print $1}' | { grep -v "^${RUST_TOOLCHAIN}-" || true; } \
+            | xargs -r -n1 rustup toolchain uninstall
+          rustup toolchain list
+      # Both legs build the same debug pc-cli, so they share one cache.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: checks-linux-web
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
         working-directory: crates/pc-api/web
       - run: npm run build
@@ -56,16 +164,14 @@ jobs:
       # key, never that anyone still asks for it.
       - run: npm run check:unused
         working-directory: crates/pc-api/web
-      - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --workspace --locked
+      # The browser tests start target/debug/photo-cleanup.
       - run: cargo build -p pc-cli --locked
-      - run: npx playwright install --with-deps chromium webkit
+      - run: npx playwright install --with-deps ${{ matrix.browser }}
         working-directory: crates/pc-api/web
-      - run: npm test
+      - run: npm test -- --project=${{ matrix.browser }}
         working-directory: crates/pc-api/web
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: browser-traces
+          name: browser-traces-${{ matrix.browser }}
           path: crates/pc-api/web/test-results
