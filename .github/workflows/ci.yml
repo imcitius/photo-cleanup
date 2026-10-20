@@ -39,7 +39,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: checks-windows-test
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'agent/desktop-worker/el-5u45y-ci-checks-github' || github.ref == 'refs/heads/agent/desktop-worker/el-5u45y-ci-checks-github' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --workspace --locked
 
   windows-lint-release:
@@ -53,7 +53,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: checks-windows-lint-release
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'agent/desktop-worker/el-5u45y-ci-checks-github' || github.ref == 'refs/heads/agent/desktop-worker/el-5u45y-ci-checks-github' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The Windows branches of `cfg` are compiled only here; without clippy
       # on this runner nobody lints them (el-543ou, el-61ar8 D13).
       - run: cargo clippy --all-targets --locked -- -D warnings
@@ -71,7 +71,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: checks-linux-rust
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'agent/desktop-worker/el-5u45y-ci-checks-github' || github.ref == 'refs/heads/agent/desktop-worker/el-5u45y-ci-checks-github' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --workspace --locked
@@ -99,7 +99,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: checks-linux-web
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'agent/desktop-worker/el-5u45y-ci-checks-github' || github.ref == 'refs/heads/agent/desktop-worker/el-5u45y-ci-checks-github' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
         working-directory: crates/pc-api/web
       - run: npm run build
