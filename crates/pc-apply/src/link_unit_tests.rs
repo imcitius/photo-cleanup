@@ -461,7 +461,7 @@ fn an_in_use_refusal_is_written_down_and_claims_nothing() {
     let why = crate::in_use_text(&f.photo);
     let before = snapshot(&f.photo);
 
-    let shown = crate::files::record_in_use(&f.db, f.run, &c, why.clone());
+    let shown = crate::files::record_refusal(&f.db, f.run, &c, why.clone());
 
     assert_eq!(shown, why);
     let entry = f.db.journal_entry(1).unwrap().expect("the refusal's row");
