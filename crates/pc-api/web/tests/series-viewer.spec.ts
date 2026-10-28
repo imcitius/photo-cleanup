@@ -270,6 +270,10 @@ test("in Duplicates and versions, B keeps the version on screen", async ({
   await expect(viewer.locator(".viewer-marks strong")).toHaveText(
     "IMG_5532.JPG:",
   );
+  await expect(viewer.locator("figcaption")).toHaveText([
+    "IMG_5531.JPG · pinned",
+    "IMG_5532.JPG",
+  ]);
   await expect(viewer.locator(".viewer-state")).toHaveText("");
   await page.keyboard.press("b");
   await expect(viewer.locator(".viewer-state")).toHaveText("★ kept");
@@ -289,6 +293,11 @@ test("in Duplicates and versions, B keeps the version on screen", async ({
   await expect(viewer.locator(".viewer-marks strong")).toHaveText(
     "IMG_5531.JPG:",
   );
+  // The pair keeps its order on screen; only the pinned label moves.
+  await expect(viewer.locator("figcaption")).toHaveText([
+    "IMG_5531.JPG",
+    "IMG_5532.JPG · pinned",
+  ]);
   await page.keyboard.press("b");
   await expect(viewer.locator(".viewer-state")).toHaveText("★ kept");
   expect(kept).toEqual([5532, 5531]);

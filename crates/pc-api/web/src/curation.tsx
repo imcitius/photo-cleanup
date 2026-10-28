@@ -99,8 +99,11 @@ export function ImageViewer({
         (e.target instanceof HTMLElement &&
           e.target.closest("input,textarea,select,[contenteditable=true]")) ||
         // Another window over the viewer (the keyboard help) has the keys;
-        // a letter typed there must not mark the frame hidden under it.
-        document.querySelectorAll("dialog[open]").length > 1
+        // a letter typed there must not mark the frame hidden under it. The
+        // viewer may itself sit inside a dialog, so the question is whether
+        // it is the one on top, not whether it is alone.
+        [...document.querySelectorAll("dialog[open]")].at(-1) !==
+          ownRef.current?.closest("dialog")
       )
         return;
       if (e.key === "ArrowRight" || e.key === "ArrowDown") {
@@ -133,19 +136,29 @@ export function ImageViewer({
     return () => document.removeEventListener("keydown", listener);
   }, [at, last]);
   const current = images[at];
-  const shown = pinned === null ? [current] : [images[pinned], current];
+  // A pair keeps its own order on screen — the first of the two on the
+  // left, as every page that opens one lays it out — whichever of them the
+  // keys act on. Pinned with C while flipping, the pinned frame leads.
+  const order =
+    pinned === null
+      ? [at]
+      : paired
+        ? [Math.min(pinned, at), Math.max(pinned, at)]
+        : [pinned, at];
+  const shown = order.map((n) => images[n]);
   const comparing = shown.length === 2;
   const currentMarks = marks?.(current) || null;
   // The key listener lives across renders; it reads the latest marks here
   // rather than the ones from the frame it was attached on.
   const marksRef = useRef(currentMarks),
-    sentRef = useRef(false);
+    sentRef = useRef(false),
+    ownRef = useRef<HTMLDivElement>(null);
   marksRef.current = currentMarks;
   // A new render carries the page's answer — "busy" or the new marks.
   sentRef.current = false;
   return (
     <Modal title={comparing ? ui.compare : current.name} wide onClose={onClose}>
-      <div className="toolbar">
+      <div className="toolbar" ref={ownRef}>
         {images.length > 1 && (
           <div className="inline frame-nav">
             <Button
@@ -305,7 +318,7 @@ export function ImageViewer({
             />
             <figcaption>
               {image.name}
-              {comparing && i === 0 ? ` · ${ui.pinnedFrame}` : ""}
+              {comparing && order[i] === pinned ? ` · ${ui.pinnedFrame}` : ""}
             </figcaption>
           </figure>
         ))}
@@ -318,7 +331,7 @@ export function ImageViewer({
           <details key={`d-${i}-${image.file_id}`} open>
             <summary>
               {image.name}
-              {comparing && i === 0 ? ` · ${ui.pinnedFrame}` : ""}
+              {comparing && order[i] === pinned ? ` · ${ui.pinnedFrame}` : ""}
             </summary>
             <FileDetails fileId={image.file_id} />
           </details>
