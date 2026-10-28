@@ -10,6 +10,7 @@ use axum::{
     Json,
 };
 use pc_db::Db;
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -1586,19 +1587,46 @@ pub async fn best(
         let file = v["file_id"]
             .as_i64()
             .context(pc_core::tr!("Не указан файл", "No file given"))?;
-        let tx = db.conn.unchecked_transaction()?;
-        let n=db.conn.execute("UPDATE series SET best_file=?1 WHERE id=?2 AND EXISTS(SELECT 1 FROM series_members WHERE series_id=?2 AND file_id=?1)",[file,id])?;
-        if n == 0 {
+        let state: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT f.state FROM series_members m JOIN files f ON f.id = m.file_id
+                  WHERE m.series_id = ?1 AND m.file_id = ?2",
+                [id, file],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(state) = state else {
             bail!(
                 "{}",
                 pc_core::tr!("Файл не входит в серию", "The file is not in that burst")
             );
+        };
+        // `"best": false` takes the star back. Only from this file: a stale
+        // screen asking to clear a frame that is no longer the best must not
+        // clear the one that is.
+        if v["best"].as_bool() == Some(false) {
+            let tx = db.conn.unchecked_transaction()?;
+            let n = db.conn.execute(
+                "UPDATE series SET best_file = NULL WHERE id = ?1 AND best_file = ?2",
+                [id, file],
+            )?;
+            db.conn
+                .execute("DELETE FROM manual_best WHERE file_id = ?1", [file])?;
+            tx.commit()?;
+            return Ok(json!({"ok":true,"best":false,"cleared":n}));
         }
+        if state != "present" {
+            bail!("{}", not_in_archive(file));
+        }
+        let tx = db.conn.unchecked_transaction()?;
+        db.conn
+            .execute("UPDATE series SET best_file=?1 WHERE id=?2", [file, id])?;
         db.conn.execute("DELETE FROM manual_best WHERE file_id IN(SELECT file_id FROM series_members WHERE series_id=?1)",[id])?;
         db.conn
             .execute("INSERT OR IGNORE INTO manual_best VALUES(?1)", [file])?;
         tx.commit()?;
-        Ok(json!({"ok":true}))
+        Ok(json!({"ok":true,"best":true}))
     })
 }
 /// Mark one frame as not worth keeping, or take the mark back.
@@ -1612,11 +1640,17 @@ pub async fn reject(
 ) -> Response {
     mutate(&st, |db| {
         let on = v["rejected"].as_bool().unwrap_or(true);
-        let known: i64 =
-            db.conn
-                .query_row("SELECT count(*) FROM files WHERE id=?1", [id], |r| r.get(0))?;
-        if known == 0 {
+        let state: Option<String> = db
+            .conn
+            .query_row("SELECT state FROM files WHERE id=?1", [id], |r| r.get(0))
+            .optional()?;
+        let Some(state) = state else {
             bail!("{}", pc_core::tr!("Файл не найден", "File not found"));
+        };
+        // Taking a mark back is always allowed; setting one on a file that
+        // has already left the archive would put a ghost in the plan.
+        if on && state != "present" {
+            bail!("{}", not_in_archive(id));
         }
         let tx = db.conn.unchecked_transaction()?;
         // A later explicit file choice supersedes its queue decision.
@@ -1636,6 +1670,17 @@ pub async fn reject(
     })
 }
 
+/// Why a mark cannot be set on a file the index no longer has in the archive.
+fn not_in_archive(file: i64) -> String {
+    format!(
+        "{} (#{file})",
+        pc_core::tr!(
+            "Файла уже нет в архиве: он в карантине или удалён. Отметить его нельзя",
+            "The file is no longer in the archive: it is in quarantine or deleted. It cannot be marked"
+        )
+    )
+}
+
 /// Reject every frame of a series except the best one.
 ///
 /// The point of ranking a burst is to keep one frame from it. Doing that
@@ -1648,7 +1693,9 @@ pub async fn reject_rest(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -
             "INSERT OR IGNORE INTO manual_rejects
              SELECT m.file_id, ?2 FROM series_members m
               JOIN series s ON s.id = m.series_id
+              JOIN files f ON f.id = m.file_id
               WHERE m.series_id = ?1
+                AND f.state = 'present'
                 AND s.protected = 0
                 AND (s.best_file IS NULL OR m.file_id <> s.best_file)",
             rusqlite::params![id, pc_core::time::now_unix()],

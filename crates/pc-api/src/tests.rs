@@ -699,6 +699,199 @@ async fn a_series_is_listed_in_shooting_order_not_in_quality_order() {
     assert!(members.iter().all(|m| m["rank"].is_number()));
 }
 
+/// Series are built once, and nothing rebuilds them after a move. A burst of
+/// seven frames with three already in quarantine is a burst of four, and the
+/// three must not come back as frames with buttons and their old paths.
+#[tokio::test]
+async fn frames_already_in_quarantine_leave_their_burst() {
+    let f = Fixture::new();
+    let series = a_burst(&f, 7).await;
+    let (_, list) = f.req("GET", "/api/series", Value::Null).await;
+    let members = list["series"][0]["members"].as_array().unwrap().clone();
+    assert_eq!(members.len(), 7, "{list}");
+    // The best frame among those moved, so the star has to go with it.
+    let best = members
+        .iter()
+        .find(|m| m["is_best"] == true)
+        .unwrap_or(&members[0])["file_id"]
+        .as_i64()
+        .unwrap();
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/series/{series}/best"),
+            json!({"file_id": best}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let mut gone = vec![best];
+    gone.extend(
+        members
+            .iter()
+            .map(|m| m["file_id"].as_i64().unwrap())
+            .filter(|&id| id != best)
+            .take(2),
+    );
+    let quarantine = |ids: &[i64]| {
+        let db = f.state.db.lock().unwrap();
+        for id in ids {
+            db.conn
+                .execute("UPDATE files SET state='quarantined' WHERE id=?1", [id])
+                .unwrap();
+        }
+    };
+    quarantine(&gone);
+
+    let (_, list) = f.req("GET", "/api/series", Value::Null).await;
+    assert_eq!(list["total"], 1, "{list}");
+    let left = list["series"][0]["members"].as_array().unwrap();
+    assert_eq!(left.len(), 4, "{list}");
+    assert!(
+        left.iter()
+            .all(|m| !gone.contains(&m["file_id"].as_i64().unwrap())),
+        "{list}"
+    );
+    // Ranks counted over the four that remain, not over the seven built.
+    let mut ranks: Vec<i64> = left.iter().map(|m| m["rank"].as_i64().unwrap()).collect();
+    ranks.sort();
+    assert_eq!(ranks, vec![0, 1, 2, 3], "{list}");
+    assert!(left.iter().all(|m| m["is_best"] == false), "{list}");
+
+    // Nothing can be marked on a file that has left the archive …
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/series/{series}/best"),
+            json!({"file_id": gone[1]}),
+        )
+        .await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v.to_string().contains("no longer in the archive"), "{v}");
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/files/{}/reject", gone[1]),
+            json!({"rejected": true}),
+        )
+        .await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v.to_string().contains("no longer in the archive"), "{v}");
+    // … but an old mark on it can still be taken back.
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/files/{}/reject", gone[1]),
+            json!({"rejected": false}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+
+    // The bulk action marks only what is still there.
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/series/{series}/reject-rest"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["rejected"], 4, "{v}");
+    let (s, v) = f
+        .req("POST", &format!("/api/series/{series}/keep-all"), json!({}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+
+    // Three of seven left in the archive is still a burst; one is not, and
+    // it leaves both the list and the counter on the overview.
+    let (_, status) = f.req("GET", "/api/status", Value::Null).await;
+    assert_eq!(status["series"], 1, "{status}");
+    let rest: Vec<i64> = left
+        .iter()
+        .map(|m| m["file_id"].as_i64().unwrap())
+        .take(3)
+        .collect();
+    quarantine(&rest);
+    let (_, list) = f.req("GET", "/api/series", Value::Null).await;
+    assert_eq!(list["total"], 0, "{list}");
+    assert!(list["series"].as_array().unwrap().is_empty(), "{list}");
+    let (_, status) = f.req("GET", "/api/status", Value::Null).await;
+    assert_eq!(status["series"], 0, "{status}");
+}
+
+/// `U` in the viewer takes both marks off a frame, so the star has to come
+/// off as well as the quarantine mark — and only from the frame it is on.
+#[tokio::test]
+async fn the_best_mark_can_be_taken_back_from_its_own_frame_only() {
+    let f = Fixture::new();
+    let series = a_burst(&f, 5).await;
+    let (_, list) = f.req("GET", "/api/series", Value::Null).await;
+    let ids: Vec<i64> = list["series"][0]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["file_id"].as_i64().unwrap())
+        .collect();
+    let best_of = |list: &Value| -> Vec<i64> {
+        list["series"][0]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["is_best"] == true)
+            .map(|m| m["file_id"].as_i64().unwrap())
+            .collect()
+    };
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/series/{series}/best"),
+            json!({"file_id": ids[3]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+
+    // A stale screen clearing a frame that is not the best changes nothing.
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/series/{series}/best"),
+            json!({"file_id": ids[1], "best": false}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (_, list) = f.req("GET", "/api/series", Value::Null).await;
+    assert_eq!(best_of(&list), vec![ids[3]], "{list}");
+
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/series/{series}/best"),
+            json!({"file_id": ids[3], "best": false}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (_, list) = f.req("GET", "/api/series", Value::Null).await;
+    assert!(best_of(&list).is_empty(), "{list}");
+    let manual: i64 = f
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .conn
+        .query_row("SELECT count(*) FROM manual_best", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(manual, 0, "the hand-set star would come back on a rebuild");
+
+    // A file from outside the burst is refused either way.
+    let (s, _) = f
+        .req(
+            "POST",
+            &format!("/api/series/{series}/best"),
+            json!({"file_id": 999_999, "best": false}),
+        )
+        .await;
+    assert_eq!(s, 400);
+}
+
 #[tokio::test]
 async fn rejected_frames_reach_the_plan_and_can_be_taken_back() {
     let f = Fixture::new();

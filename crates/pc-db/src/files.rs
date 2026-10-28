@@ -1288,6 +1288,11 @@ impl Db {
     }
 }
 
+/// How many frames of a series are still in the archive.
+const LIVE_MEMBERS: &str = "SELECT COUNT(*) FROM series_members m
+     JOIN files lf ON lf.id = m.file_id
+    WHERE m.series_id = series.id AND lf.state = 'present'";
+
 #[derive(Debug, Clone)]
 pub struct SeriesMemberRow {
     pub file_id: i64,
@@ -1323,18 +1328,25 @@ pub struct SeriesRow {
 }
 
 impl Db {
+    /// Bursts that still hold at least two frames in the archive.
+    ///
+    /// Series are built once and nobody rebuilds them after a move, so a
+    /// burst of twenty-eight frames with fourteen already in quarantine is
+    /// still twenty-eight rows here. What is gone is not a frame of the
+    /// burst any more, and a burst of one frame is no burst at all.
     pub fn series_count(&self) -> Result<i64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM series", [], |r| r.get(0))?)
+        Ok(self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM series WHERE ({LIVE_MEMBERS}) >= 2"),
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn series_list(&self, limit: i64, offset: i64) -> Result<Vec<SeriesRow>> {
-        let mut st = self.conn.prepare(
-            "SELECT id FROM series ORDER BY (
-                 SELECT COUNT(*) FROM series_members m WHERE m.series_id = series.id
-             ) DESC, started_at LIMIT ?1 OFFSET ?2",
-        )?;
+        let mut st = self.conn.prepare(&format!(
+            "SELECT id FROM series WHERE ({LIVE_MEMBERS}) >= 2
+              ORDER BY ({LIVE_MEMBERS}) DESC, started_at LIMIT ?1 OFFSET ?2"
+        ))?;
         let ids = st
             .query_map(params![limit, offset], |r| r.get::<_, i64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1387,6 +1399,11 @@ impl Db {
                LEFT JOIN family_members fm ON fm.file_id = sm.file_id
                LEFT JOIN families fa ON fa.id = fm.family_id
               WHERE sm.series_id = ?1
+                -- Only what is still in the archive. A frame already moved
+                -- to quarantine is not something to choose between, and
+                -- showing it with its old path and buttons invites a mark
+                -- on a file that is not there.
+                AND f.state = 'present'
               -- Shooting order, not quality order. A burst read out of
               -- sequence makes the subject jump back and forth, and the one
               -- frame the user is looking for could be anywhere. The rank
@@ -1416,6 +1433,15 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut members = members;
+        // Ranks were stored against every frame of the burst as it was
+        // built. Counted again over the frames that remain, so the best one
+        // left reads as first rather than as fourth of twenty-eight.
+        let mut by_rank: Vec<usize> = (0..members.len()).collect();
+        by_rank.sort_by_key(|&i| (members[i].rank, members[i].file_id));
+        for (rank, i) in by_rank.into_iter().enumerate() {
+            members[i].rank = rank as i64;
+        }
 
         Ok(Some(SeriesRow {
             id,

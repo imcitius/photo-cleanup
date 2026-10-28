@@ -149,9 +149,7 @@ pub async fn status(State(st): State<Arc<AppState>>) -> Api<Status> {
         skipped: idx.skipped,
         families: db.family_count(false)?,
         families_multi: db.family_count(true)?,
-        series: db
-            .conn
-            .query_row("SELECT count(*) FROM series", [], |r| r.get(0))?,
+        series: db.series_count()?,
         categorised: db
             .conn
             .query_row("SELECT count(*) FROM file_categories", [], |r| r.get(0))?,
