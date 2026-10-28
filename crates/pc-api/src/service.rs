@@ -1454,7 +1454,13 @@ pub async fn keep_only(
         db.set_manual_keeper(id, keep)?;
         db.conn.execute("DELETE FROM review_choices WHERE file_id IN (SELECT file_id FROM family_members WHERE family_id=?1)", [id])?;
         let mut marked = 0u64;
-        for m in members.iter().filter(|m| **m != keep) {
+        // A frame of a pixel-shift set is not set aside: the plan would
+        // refuse it, and the mark would stand there as a refusal for ever.
+        let shield = db.protected_series_files()?;
+        for m in members
+            .iter()
+            .filter(|m| **m != keep && !shield.contains_key(m))
+        {
             db.conn.execute(
                 "INSERT OR IGNORE INTO manual_rejects(file_id, marked_at) VALUES(?1, ?2)",
                 rusqlite::params![m, pc_core::time::now_unix()],
@@ -1507,6 +1513,7 @@ pub async fn keep_folder_only(State(st): State<Arc<AppState>>, Json(v): Json<Val
             }
         }
 
+        let shield = db.protected_series_files()?;
         let tx = db.conn.unchecked_transaction()?;
         let (mut groups, mut marked) = (0u64, 0u64);
         for (family, (file, _)) in &keep {
@@ -1516,7 +1523,7 @@ pub async fn keep_folder_only(State(st): State<Arc<AppState>>, Json(v): Json<Val
             groups += 1;
             db.conn.execute("DELETE FROM review_choices WHERE file_id IN (SELECT file_id FROM family_members WHERE family_id=?1)", [family])?;
             for (fam, other, _, _) in &rows {
-                if fam == family && other != file {
+                if fam == family && other != file && !shield.contains_key(other) {
                     db.conn.execute(
                         "INSERT OR IGNORE INTO manual_rejects(file_id, marked_at) VALUES(?1, ?2)",
                         rusqlite::params![other, pc_core::time::now_unix()],

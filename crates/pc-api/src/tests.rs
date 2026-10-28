@@ -798,6 +798,39 @@ async fn a_pixel_shift_set_cannot_be_thinned_by_a_mark() {
     assert_eq!(s, 200, "{v}");
     assert!(marks().is_empty());
 
+    // "Keep only this one" for a group that holds two frames of the set, by
+    // file and by folder, sets neither frame aside.
+    let group = {
+        let db = f.state.db.lock().unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+        let g = db
+            .insert_family("versions", None, None, Some(members[0].0), run)
+            .unwrap();
+        for (id, role) in [(members[0].0, "original"), (members[2].0, "export")] {
+            db.insert_family_member(g, id, role, None, 1.0, "").unwrap();
+        }
+        g
+    };
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/families/{group}/keep-only"),
+            json!({"file_id": members[0].0}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["marked"], 0, "{v}");
+    let (s, v) = f
+        .req(
+            "POST",
+            "/api/keepers/keep-folder-only",
+            json!({"dir": pc_core::dir_name(&members[0].1)}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["marked"], 0, "{v}");
+    assert!(marks().is_empty());
+
     // The same frames in an ordinary burst are marked and planned as before.
     {
         let db = f.state.db.lock().unwrap();
