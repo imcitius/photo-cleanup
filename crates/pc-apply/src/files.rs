@@ -560,6 +560,15 @@ pub fn quarantine_file(
     let src = Path::new(&c.path);
     let keeper = Path::new(&c.keeper_path);
 
+    // A frame of a pixel-shift set never moves, whichever plan carried it
+    // here — one made before the set was found, or by a caller that did not
+    // ask (DESIGN §11.5). Asked again right before the move.
+    if let Some(kind) = db.protected_series_of(c.file_id)? {
+        return Ok(Filed::refused(pc_family::plan::protected_series_refusal(
+            &kind,
+        )));
+    }
+
     // The photograph is opened before it is checked and stays open until it
     // moves: the check reads this object, and the move is bound to it — not
     // to whatever bears the name by then (el-3wizg).
@@ -955,6 +964,53 @@ mod tests {
             manual: true,
             group_keeper: String::new(),
         }
+    }
+
+    /// A plan made before the set was recognised, or by any caller that
+    /// did not ask, still cannot take a frame out of a pixel-shift set: the
+    /// move itself refuses, and the bytes stay where they were.
+    #[test]
+    fn a_frame_of_a_pixel_shift_set_never_moves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("archive");
+        fs::create_dir_all(&dir).unwrap();
+        let frames: Vec<_> = (1..=4)
+            .map(|i| {
+                let p = dir.join(format!("DSC0{i}.ARW"));
+                fs::write(&p, vec![i as u8; 4096 + i]).unwrap();
+                p
+            })
+            .collect();
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
+        let cands: Vec<_> = frames
+            .iter()
+            .map(|p| one_manual_candidate(&db, run, p))
+            .collect();
+        let set = db
+            .insert_series("pixel-shift", Some(1), None, None, true, run)
+            .unwrap();
+        for (rank, c) in cands.iter().enumerate() {
+            db.insert_series_member(set, c.file_id, rank as i64 + 1, 0.0, "")
+                .unwrap();
+        }
+
+        let filed = quarantine_file(&db, run, &cands[1], None).unwrap();
+        assert_eq!(filed.outcome, FileOutcome::Refused);
+        assert!(filed.why.contains("pixel-shift"), "{}", filed.why);
+        assert_eq!(fs::read(&frames[1]).unwrap(), vec![2u8; 4098]);
+        assert!(!dir.join(pc_core::QUARANTINE_DIR).exists());
+        assert!(db.journal_quarantined(None).unwrap().is_empty());
+
+        // The same file outside a protected set moves as before.
+        db.conn
+            .execute("UPDATE series SET protected = 0 WHERE id = ?1", [set])
+            .unwrap();
+        assert_eq!(
+            quarantine_file(&db, run, &cands[1], None).unwrap().outcome,
+            FileOutcome::Moved
+        );
+        assert!(!frames[1].exists());
     }
 
     #[test]

@@ -31,7 +31,7 @@ const russian = (page: Page, key: string) =>
     key,
   );
 
-async function burst(page: Page) {
+async function burst(page: Page, pixelShift = false) {
   const members = [
     frame(4171, 2, 1_700_000_000),
     frame(4172, 0, 1_700_000_001),
@@ -48,12 +48,14 @@ async function burst(page: Page) {
         series: [
           {
             id: 37,
-            kind: "burst",
-            label: "Burst",
-            because: "frames a second apart",
+            kind: pixelShift ? "pixel-shift" : "burst",
+            label: pixelShift ? "Pixel shift" : "Burst",
+            because: pixelShift
+              ? "four frames 0.2 s apart, nearly identical"
+              : "frames a second apart",
             started_at: 1_700_000_000,
             camera: "Sony ILCE-7M3",
-            protected: false,
+            protected: pixelShift,
             members,
           },
         ],
@@ -301,4 +303,62 @@ test("in Duplicates and versions, B keeps the version on screen", async ({
   await page.keyboard.press("b");
   await expect(viewer.locator(".viewer-state")).toHaveText("★ kept");
   expect(kept).toEqual([5532, 5531]);
+});
+
+test("X is not offered on a pixel-shift set; B and U still work", async ({
+  page,
+}) => {
+  const { members, posts } = await burst(page, true);
+  // A mark left by an older version on the third frame.
+  members[2].is_rejected = true;
+  await page.goto("/#series");
+  await page
+    .getByRole("button", { name: /DSC04171\.ARW/ })
+    .first()
+    .click();
+  const viewer = page.locator("dialog[open]");
+  await expect(viewer.getByText("1 / 3")).toBeVisible();
+  await expect(
+    viewer.getByText(/X is off here: this is a pixel-shift set/),
+  ).toBeVisible();
+  const x = viewer.getByRole("button", { name: /To quarantine/ });
+  await expect(x).toBeDisabled();
+  await expect(x).toHaveAttribute("title", /Not offered for a pixel-shift set/);
+
+  // Neither the key nor the Russian layout's Ч sends anything.
+  await page.keyboard.press("x");
+  await russian(page, "ч");
+  await expect(viewer.locator(".viewer-state")).toHaveText("");
+  expect(posts).toEqual([]);
+
+  // B still chooses the best frame.
+  await page.keyboard.press("b");
+  await expect(viewer.locator(".viewer-state")).toHaveText("★ best");
+  expect(posts).toEqual([{ path: "best", body: { file_id: 4171 } }]);
+
+  // U clears the stale mark on the third frame.
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  await expect(viewer.getByText("3 / 3")).toBeVisible();
+  await expect(viewer.locator(".viewer-state")).toHaveText(
+    "marked for quarantine",
+  );
+  await page.keyboard.press("u");
+  await expect(viewer.locator(".viewer-state")).toHaveText("");
+  expect(posts.at(-1)).toEqual({
+    path: "reject 4173",
+    body: { rejected: false },
+  });
+  await page.keyboard.press("x");
+  expect(posts).toHaveLength(2);
+  await page.keyboard.press("Escape");
+
+  // The strip under it: no frame offers the quarantine button.
+  const strip = page.locator("article.shot");
+  await expect(strip).toHaveCount(3);
+  for (const shot of await strip.all())
+    await expect(
+      shot.getByRole("button", { name: "To quarantine" }),
+    ).toBeDisabled();
+  expect(posts).toHaveLength(2);
 });

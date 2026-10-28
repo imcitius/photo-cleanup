@@ -1334,7 +1334,7 @@ export function SeriesPage({
         ...(m.is_best ? [ui.markedBest] : []),
         ...(m.is_rejected ? [ui.markedForQuarantine] : []),
       ],
-      help: ui.viewerMarksHelp,
+      help: s.protected ? ui.viewerMarksProtectedHelp : ui.viewerMarksHelp,
       error,
       actions: [
         {
@@ -1347,9 +1347,11 @@ export function SeriesPage({
         {
           key: "x",
           label: ui.rejectFrame,
-          title: ui.rejectFrameHelp,
+          // A pixel-shift set is one photograph: the server and the plan
+          // refuse the mark, so it is not offered either.
+          title: s.protected ? ui.rejectProtectedHelp : ui.rejectFrameHelp,
           kind: m.is_rejected ? "danger-outline" : "",
-          disabled: off || m.is_rejected,
+          disabled: off || m.is_rejected || s.protected,
           run: () => act([`/files/${m.file_id}/reject`, { rejected: true }]),
         },
         {
@@ -1529,12 +1531,18 @@ export function SeriesPage({
                             {m.is_best ? `★ ${ui.best}` : ui.setBest}
                           </Button>
                           <Button
-                            disabled={disabled || busy}
+                            disabled={
+                              disabled ||
+                              busy ||
+                              (s.protected && !m.is_rejected)
+                            }
                             kind={m.is_rejected ? "danger-outline" : ""}
                             title={
                               m.is_rejected
                                 ? ui.keepFrameHelp
-                                : ui.rejectFrameHelp
+                                : s.protected
+                                  ? ui.rejectProtectedHelp
+                                  : ui.rejectFrameHelp
                             }
                             onClick={() =>
                               act([

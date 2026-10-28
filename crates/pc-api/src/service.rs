@@ -1652,6 +1652,14 @@ pub async fn reject(
         if on && state != "present" {
             bail!("{}", not_in_archive(id));
         }
+        // A pixel-shift set is one photograph in several files. The plan
+        // would refuse the mark anyway; saying so now, with nothing written,
+        // is the honest answer. Taking an old mark back stays allowed.
+        if on {
+            if let Some(kind) = db.protected_series_of(id)? {
+                bail!("{}", pc_family::plan::protected_series_refusal(&kind));
+            }
+        }
         let tx = db.conn.unchecked_transaction()?;
         // A later explicit file choice supersedes its queue decision.
         db.conn

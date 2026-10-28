@@ -699,6 +699,129 @@ async fn a_series_is_listed_in_shooting_order_not_in_quality_order() {
     assert!(members.iter().all(|m| m["rank"].is_number()));
 }
 
+/// A pixel-shift set is one photograph in four files. The viewer's X cannot
+/// mark one of them, and a mark already in the database from before this
+/// rule — or from any other caller — never reaches the plan: it is refused
+/// with a reason, and can still be taken back.
+#[tokio::test]
+async fn a_pixel_shift_set_cannot_be_thinned_by_a_mark() {
+    let f = Fixture::new();
+    let series = a_burst(&f, 4).await;
+    let members: Vec<(i64, String)> = {
+        let db = f.state.db.lock().unwrap();
+        db.conn
+            .execute(
+                "UPDATE series SET kind='pixel-shift', protected=1 WHERE id=?1",
+                [series],
+            )
+            .unwrap();
+        // A stale mark, the way an older version could leave it.
+        db.conn
+            .execute(
+                "INSERT INTO manual_rejects(file_id, marked_at)
+                 SELECT file_id, 1 FROM series_members
+                  WHERE series_id=?1 ORDER BY file_id DESC LIMIT 1",
+                [series],
+            )
+            .unwrap();
+        let rows = db
+            .conn
+            .prepare(
+                "SELECT f.id, f.path FROM series_members m JOIN files f ON f.id=m.file_id
+                  WHERE m.series_id=?1 ORDER BY f.id",
+            )
+            .unwrap()
+            .query_map([series], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        rows
+    };
+    assert_eq!(members.len(), 4);
+    let marks = || -> Vec<i64> {
+        let db = f.state.db.lock().unwrap();
+        let rows = db
+            .conn
+            .prepare("SELECT file_id FROM manual_rejects ORDER BY file_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        rows
+    };
+    let stale = members[3].0;
+    assert_eq!(marks(), vec![stale]);
+
+    // X on a frame of the set: refused, nothing written.
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/files/{}/reject", members[1].0),
+            json!({"rejected": true}),
+        )
+        .await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v.to_string().contains("pixel-shift"), "{v}");
+    assert_eq!(marks(), vec![stale]);
+
+    // The stale mark does not reach the plan; it is answered instead.
+    let preview = f.preview("plan-apply", json!({"roles":["copy"]})).await;
+    let items = preview["items"].as_array().unwrap();
+    assert!(
+        items.iter().all(|i| members
+            .iter()
+            .all(|(id, _)| i["file_id"].as_i64() != Some(*id))),
+        "{preview}"
+    );
+    assert_eq!(preview["total_files"], 0, "{preview}");
+    let refused: Vec<&Value> = preview["refusals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["path"] == members[3].1.as_str())
+        .collect();
+    assert_eq!(refused.len(), 1, "{preview}");
+    assert!(
+        refused[0]["why"].as_str().unwrap().contains("pixel-shift"),
+        "{preview}"
+    );
+
+    // The old mark can still be taken back.
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/files/{stale}/reject"),
+            json!({"rejected": false}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(marks().is_empty());
+
+    // The same frames in an ordinary burst are marked and planned as before.
+    {
+        let db = f.state.db.lock().unwrap();
+        db.conn
+            .execute(
+                "UPDATE series SET kind='burst', protected=0 WHERE id=?1",
+                [series],
+            )
+            .unwrap();
+    }
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/files/{}/reject", members[1].0),
+            json!({"rejected": true}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let preview = f.preview("plan-apply", json!({"roles":["copy"]})).await;
+    assert_eq!(preview["total_files"], 1, "{preview}");
+    assert_eq!(preview["items"][0]["file_id"], members[1].0, "{preview}");
+    assert_eq!(preview["items"][0]["manual"], true, "{preview}");
+}
+
 /// Series are built once, and nothing rebuilds them after a move. A burst of
 /// seven frames with three already in quarantine is a burst of four, and the
 /// three must not come back as frames with buttons and their old paths.

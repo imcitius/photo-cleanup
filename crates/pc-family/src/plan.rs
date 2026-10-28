@@ -82,6 +82,15 @@ impl Plan {
     }
 }
 
+/// Why a frame of a protected series stays, whatever asked for it to move.
+pub fn protected_series_refusal(kind: &str) -> String {
+    pc_core::tf!(
+        "кадр защищённого набора {0}: набор не прореживается, файл остаётся",
+        "a frame of a protected {0} set: the set is never thinned, the file stays",
+        kind
+    )
+}
+
 fn keeper_of(members: &[PlanRow]) -> Option<&PlanRow> {
     members
         .iter()
@@ -163,6 +172,26 @@ pub(crate) fn compute_before_review(db: &Db, policy: &Policy, scope: &Scope) -> 
         CurationIndex::build(db.lightroom_protected()?)
     } else {
         CurationIndex::default()
+    };
+    // A pixel-shift set is one photograph stored as several files (DESIGN
+    // §11.5). No reason to move one of them is good enough: not a role, not
+    // a mark made by hand, not a mark left in the database by an older
+    // version. Each such frame is refused here, once, with its reason.
+    let mut shield_kinds = db.protected_series_files()?;
+    let mut shielded: Vec<Refusal> = Vec::new();
+    let mut shield = |m: &PlanRow, group_keeper: &str| -> bool {
+        let Some(kind) = shield_kinds.remove(&m.file_id) else {
+            // Absent: not protected, or already answered for this file.
+            return shielded.iter().any(|r| r.file_id == m.file_id);
+        };
+        shielded.push(Refusal {
+            path: m.path.clone(),
+            file_id: m.file_id,
+            family_id: m.family_id,
+            group_keeper: group_keeper.to_string(),
+            why: protected_series_refusal(&kind),
+        });
+        true
     };
 
     let mut by_family: HashMap<i64, Vec<PlanRow>> = HashMap::new();
@@ -252,6 +281,9 @@ pub(crate) fn compute_before_review(db: &Db, policy: &Policy, scope: &Scope) -> 
                     continue;
                 }
             }
+            if shield(m, &keeper.path) {
+                continue;
+            }
             if let Some(c) = protected.lookup(&m.path) {
                 let stars = c
                     .rating
@@ -331,6 +363,9 @@ pub(crate) fn compute_before_review(db: &Db, policy: &Policy, scope: &Scope) -> 
         if already.contains(&m.file_id) {
             continue;
         }
+        if shield(&m, m.group_keeper.as_deref().unwrap_or_default()) {
+            continue;
+        }
         if let Some(c) = protected.lookup(&m.path) {
             let stars = c
                 .rating
@@ -374,6 +409,11 @@ pub(crate) fn compute_before_review(db: &Db, policy: &Policy, scope: &Scope) -> 
     // does not move at once. The decision made by a person is the answer.
     let chosen: BTreeSet<i64> = plan.candidates.iter().map(|c| c.file_id).collect();
     plan.refusals.retain(|r| !chosen.contains(&r.file_id));
+    // The same for a protected frame: whatever else was said about it, the
+    // answer is that the set stays whole.
+    let shielded_ids: BTreeSet<i64> = shielded.iter().map(|r| r.file_id).collect();
+    plan.refusals.retain(|r| !shielded_ids.contains(&r.file_id));
+    plan.refusals.extend(shielded);
 
     // Nothing may empty a group.
     //
@@ -704,5 +744,198 @@ mod emptying_tests {
             "{:?}",
             plan.refusals
         );
+    }
+}
+
+#[cfg(test)]
+mod protected_series_tests {
+    use super::*;
+    use pc_db::files::NewFile;
+
+    fn file(db: &Db, run: i64, path: &str, pixels: u8, size: i64) -> i64 {
+        db.upsert_file(
+            &NewFile {
+                path: path.into(),
+                name: pc_core::base_name(path).into(),
+                disk: "disk1".into(),
+                size,
+                mtime: 1_696_000_000,
+                container: Some("tiff".into()),
+                pixel_hash: Some(vec![pixels; 32]),
+                content_hash: Some(vec![pixels; 32]),
+                phash: Some(1),
+                thumb_key: Some("k".into()),
+                ..Default::default()
+            },
+            run,
+        )
+        .unwrap()
+    }
+
+    fn reject(db: &Db, f: i64) {
+        db.conn
+            .execute(
+                "INSERT OR IGNORE INTO manual_rejects(file_id, marked_at) VALUES(?1, 1)",
+                [f],
+            )
+            .unwrap();
+    }
+
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        db: Db,
+        shift: Vec<i64>,
+        burst: Vec<i64>,
+        outside_keeper: i64,
+        plain_copy: i64,
+    }
+
+    /// Four pixel-shift frames, one of which also has a byte-identical copy
+    /// elsewhere that a family keeps; an ordinary burst; an ordinary copy.
+    fn fixture() -> Fixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("pc.db")).unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+
+        let shift: Vec<i64> = (1..=4u8)
+            .map(|i| {
+                file(
+                    &db,
+                    run,
+                    &format!("/foto/shift/DSC0{i}.ARW"),
+                    10 + i,
+                    61_341_696 + i as i64,
+                )
+            })
+            .collect();
+        let set = db
+            .insert_series(
+                "pixel-shift",
+                Some(1_696_000_000),
+                Some("ILCE-7RM4"),
+                None,
+                true,
+                run,
+            )
+            .unwrap();
+        for (rank, f) in shift.iter().enumerate() {
+            db.insert_series_member(set, *f, rank as i64 + 1, 0.5, "")
+                .unwrap();
+        }
+
+        // The family keeps a backup copy outside the set; the set frame is
+        // the role-derived `copy`.
+        let outside_keeper = file(&db, run, "/backup/DSC03.ARW", 13, 61_341_699);
+        let fam = db
+            .insert_family("exact", None, None, Some(outside_keeper), run)
+            .unwrap();
+        db.insert_family_member(fam, outside_keeper, "original", None, 1.0, "")
+            .unwrap();
+        db.insert_family_member(fam, shift[2], "copy", None, 1.0, "")
+            .unwrap();
+
+        let burst: Vec<i64> = (1..=3u8)
+            .map(|i| {
+                file(
+                    &db,
+                    run,
+                    &format!("/foto/burst/IMG_00{i}.JPG"),
+                    40 + i,
+                    7_340_032 + i as i64,
+                )
+            })
+            .collect();
+        let b = db
+            .insert_series(
+                "burst",
+                Some(1_696_100_000),
+                None,
+                Some(burst[0]),
+                false,
+                run,
+            )
+            .unwrap();
+        for (rank, f) in burst.iter().enumerate() {
+            db.insert_series_member(b, *f, rank as i64 + 1, 0.5, "")
+                .unwrap();
+        }
+
+        let keep = file(&db, run, "/foto/a.jpg", 90, 3_145_728);
+        let plain_copy = file(&db, run, "/foto/a copy.jpg", 90, 3_145_728);
+        let fam = db
+            .insert_family("exact", None, None, Some(keep), run)
+            .unwrap();
+        db.insert_family_member(fam, keep, "original", None, 1.0, "")
+            .unwrap();
+        db.insert_family_member(fam, plain_copy, "copy", None, 1.0, "")
+            .unwrap();
+
+        Fixture {
+            _tmp: tmp,
+            db,
+            shift,
+            burst,
+            outside_keeper,
+            plain_copy,
+        }
+    }
+
+    /// A mark already in the database before this rule existed, a new one,
+    /// and a role-derived copy: none of them thins a pixel-shift set, and
+    /// each is answered with a reason. Everything else is planned as before.
+    #[test]
+    fn a_pixel_shift_set_is_never_thinned_whatever_put_a_frame_in_the_plan() {
+        let f = fixture();
+        // Stale manual rejects on two frames of the protected set, plus one
+        // frame of the ordinary burst.
+        reject(&f.db, f.shift[1]);
+        reject(&f.db, f.shift[3]);
+        reject(&f.db, f.burst[2]);
+
+        let plan = compute(&f.db, &Policy::default()).unwrap();
+        let moving: BTreeSet<i64> = plan.candidates.iter().map(|c| c.file_id).collect();
+        for s in &f.shift {
+            assert!(
+                !moving.contains(s),
+                "кадр набора в плане: {:?}",
+                plan.candidates
+            );
+        }
+        assert_eq!(
+            moving,
+            [f.burst[2], f.plain_copy].into_iter().collect(),
+            "{:?}",
+            plan.candidates
+        );
+        assert_eq!(plan.bytes(), 7_340_035 + 3_145_728);
+
+        for s in [f.shift[1], f.shift[2], f.shift[3]] {
+            let r: Vec<_> = plan.refusals.iter().filter(|r| r.file_id == s).collect();
+            assert_eq!(r.len(), 1, "one answer per file: {r:?}");
+            assert!(
+                r[0].why.contains("pixel-shift"),
+                "unintelligible refusal: {}",
+                r[0].why
+            );
+        }
+        assert!(plan.refusals.iter().all(|r| r.file_id != f.shift[0]));
+        assert!(plan.refusals.iter().all(|r| r.file_id != f.outside_keeper));
+    }
+
+    /// Without any protected frame in play the plan is exactly what it was.
+    #[test]
+    fn content_outside_a_protected_set_is_planned_as_before() {
+        let f = fixture();
+        reject(&f.db, f.burst[1]);
+        let plan = compute(&f.db, &Policy::default()).unwrap();
+        let moving: Vec<(i64, bool)> = plan
+            .candidates
+            .iter()
+            .map(|c| (c.file_id, c.manual))
+            .collect();
+        assert_eq!(moving, vec![(f.burst[1], true), (f.plain_copy, false)]);
+        // The role-derived copy inside the set is the only refusal.
+        assert_eq!(plan.refusals.len(), 1, "{:?}", plan.refusals);
+        assert_eq!(plan.refusals[0].file_id, f.shift[2]);
     }
 }

@@ -1271,6 +1271,36 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Every file that belongs to a protected series (a pixel-shift set),
+    /// with the kind of that series. One photograph stored as several files:
+    /// no plan, mark or move may take one of them away (DESIGN §11.5).
+    pub fn protected_series_files(&self) -> Result<std::collections::HashMap<i64, String>> {
+        let mut st = self.conn.prepare(
+            "SELECT m.file_id, s.kind FROM series_members m
+               JOIN series s ON s.id = m.series_id
+              WHERE s.protected <> 0",
+        )?;
+        let rows = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// The kind of the protected series this file belongs to, if any.
+    pub fn protected_series_of(&self, file_id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT s.kind FROM series_members m
+                   JOIN series s ON s.id = m.series_id
+                  WHERE m.file_id = ?1 AND s.protected <> 0
+                  LIMIT 1",
+                [file_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn insert_series_member(
         &self,
         series_id: i64,

@@ -231,6 +231,8 @@ export const ui = {
   rejectFrameHelp:
     "Mark this frame as unwanted. It joins the move plan; the file stays where it is until you approve that plan.",
   keepFrame: "Keep it",
+  rejectProtectedHelp:
+    "Not offered for a pixel-shift set: its frames are one photograph, and the plan refuses to take any of them. An old mark can still be cleared.",
   clearMarks: "Clear marks",
   clearMarksHelp:
     "Take both the best mark and the quarantine mark off this frame. It stays in the archive.",
@@ -238,6 +240,8 @@ export const ui = {
   markedForQuarantine: "marked for quarantine",
   viewerMarksHelp:
     "B makes it the best, X marks it for quarantine, U clears both marks on this frame. The viewer stays open: go through the burst with the arrows, then close it. Marks only go into the plan — nothing moves until you approve it.",
+  viewerMarksProtectedHelp:
+    "B makes it the best, U clears the marks on this frame. X is off here: this is a pixel-shift set, and none of its frames goes to quarantine. Marks only go into the plan — nothing moves until you approve it.",
   viewerKeeperHelp:
     "B keeps this very file. The choice goes into the plan; nothing moves until you approve it.",
   markedKeeper: "★ kept",

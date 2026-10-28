@@ -242,6 +242,10 @@ meaningful *within* one burst: sharpness depends on resolution, so comparing a
 
 Pixel-shift sets are recognised and protected outright — four frames of one
 scene that the camera merges later look identical and must never be thinned.
+No frame of such a set can be marked for quarantine — not by the button, not
+by `X` in the viewer, and the server refuses the mark. A mark already in the
+database never reaches the plan: the web plan and `photo-cleanup plan` both
+list it as a refusal with its reason, and it can still be cleared.
 
 Marks you make by hand — the best frame, the ones you do not want — go into
 the move plan and survive the next pass. They can be set from the viewer as
