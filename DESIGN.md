@@ -429,6 +429,8 @@ POST /api/series/:id/best           {file_id, best?: false} — false
                                      файл не в архиве -> отказ
 POST /api/files/:id/reject          {rejected}; true для файла не в
                                      архиве -> отказ, снять можно всегда
+POST /api/series/:id/reject-rest    все живые кадры, кроме лучшего;
+                                     нет лучшего в архиве -> отказ
 GET  /api/files/:id/thumb?size=384
 GET  /api/files/:id/full            стрим оригинала для pixel-peep
 GET  /api/policy | PUT /api/policy

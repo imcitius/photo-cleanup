@@ -1688,6 +1688,25 @@ fn not_in_archive(file: i64) -> String {
 /// one action — and it is as reversible as the individual marks it sets.
 pub async fn reject_rest(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
     mutate(&st, |db| {
+        // "All but the best" with no best still in the archive is "all": the
+        // star was taken off, or the starred frame has already moved. That
+        // is not what the button says, so it is refused rather than read
+        // literally.
+        let best: i64 = db.conn.query_row(
+            "SELECT count(*) FROM series s JOIN files f ON f.id = s.best_file
+              WHERE s.id = ?1 AND f.state = 'present'",
+            [id],
+            |r| r.get(0),
+        )?;
+        if best == 0 {
+            bail!(
+                "{}",
+                pc_core::tr!(
+                    "В серии нет лучшего кадра в архиве: сначала выберите, какой оставить",
+                    "This burst has no best frame left in the archive: choose the one to keep first"
+                )
+            );
+        }
         let tx = db.conn.unchecked_transaction()?;
         let n = db.conn.execute(
             "INSERT OR IGNORE INTO manual_rejects
@@ -1697,14 +1716,15 @@ pub async fn reject_rest(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -
               WHERE m.series_id = ?1
                 AND f.state = 'present'
                 AND s.protected = 0
-                AND (s.best_file IS NULL OR m.file_id <> s.best_file)",
+                AND m.file_id <> s.best_file",
             rusqlite::params![id, pc_core::time::now_unix()],
         )?;
         db.conn.execute(
             "DELETE FROM review_choices WHERE file_id IN
              (SELECT m.file_id FROM series_members m JOIN series s ON s.id=m.series_id
-              WHERE m.series_id=?1 AND s.protected=0
-              AND (s.best_file IS NULL OR m.file_id<>s.best_file))",
+              JOIN files f ON f.id = m.file_id
+              WHERE m.series_id=?1 AND s.protected=0 AND f.state = 'present'
+              AND m.file_id<>s.best_file)",
             [id],
         )?;
         tx.commit()?;

@@ -69,8 +69,11 @@ export function ImageViewer({
   // Two frames are always a comparison — whether they arrived from the
   // compare button or are simply all a family has — so a pair opens paired.
   const paired = images.length === 2;
-  const [at, setAt] = useState(paired ? 1 : Math.min(Math.max(start, 0), last)),
-    [pinned, setPinned] = useState<number | null>(paired ? 0 : null),
+  // The frame clicked is the current one, the other pinned beside it: the
+  // keys below act on the current frame, and it has to be the one asked for.
+  const first = Math.min(Math.max(start, 0), last);
+  const [at, setAt] = useState(first),
+    [pinned, setPinned] = useState<number | null>(paired ? 1 - first : null),
     [overlay, setOverlay] = useState(false),
     [one, setOne] = useState(false),
     [opacity, setOpacity] = useState(50),
@@ -94,7 +97,10 @@ export function ImageViewer({
         e.ctrlKey ||
         e.metaKey ||
         (e.target instanceof HTMLElement &&
-          e.target.closest("input,textarea,select,[contenteditable=true]"))
+          e.target.closest("input,textarea,select,[contenteditable=true]")) ||
+        // Another window over the viewer (the keyboard help) has the keys;
+        // a letter typed there must not mark the frame hidden under it.
+        document.querySelectorAll("dialog[open]").length > 1
       )
         return;
       if (e.key === "ArrowRight" || e.key === "ArrowDown") {
@@ -115,8 +121,12 @@ export function ImageViewer({
       );
       if (action) {
         e.preventDefault();
-        // Held down, a key repeats; one press is one decision.
-        if (!e.repeat && !action.disabled) action.run();
+        // Held down, a key repeats; one press is one decision. Two presses
+        // before the page has drawn "busy" are still one at a time.
+        if (!e.repeat && !action.disabled && !sentRef.current) {
+          sentRef.current = true;
+          action.run();
+        }
       }
     };
     document.addEventListener("keydown", listener);
@@ -128,8 +138,11 @@ export function ImageViewer({
   const currentMarks = marks?.(current) || null;
   // The key listener lives across renders; it reads the latest marks here
   // rather than the ones from the frame it was attached on.
-  const marksRef = useRef(currentMarks);
+  const marksRef = useRef(currentMarks),
+    sentRef = useRef(false);
   marksRef.current = currentMarks;
+  // A new render carries the page's answer — "busy" or the new marks.
+  sentRef.current = false;
   return (
     <Modal title={comparing ? ui.compare : current.name} wide onClose={onClose}>
       <div className="toolbar">
@@ -207,6 +220,8 @@ export function ImageViewer({
       </div>
       {currentMarks && (
         <div className="toolbar viewer-marks">
+          {/* Two frames on screen: say which one the keys act on. */}
+          {comparing && <strong>{current.name}:</strong>}
           {currentMarks.actions.map((a) => (
             <Button
               key={a.label}
@@ -1410,7 +1425,9 @@ export function SeriesPage({
                 {!s.protected && (
                   <div className="inline">
                     <Button
-                      disabled={disabled || busy}
+                      disabled={
+                        disabled || busy || !s.members.some((m) => m.is_best)
+                      }
                       title={ui.rejectRestHelp}
                       onClick={() => act([`/series/${s.id}/reject-rest`])}
                     >

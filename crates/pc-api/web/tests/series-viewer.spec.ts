@@ -149,6 +149,44 @@ test("B, X and U mark the frame on screen and the viewer stays on it", async ({
   ).toBeDisabled();
   expect(posts.length).toBe(sent);
   await expect(viewer).toBeVisible();
+
+  // No best left: "all but the best" would be all, so it is not offered.
+  await page.keyboard.press("Escape");
+  await expect(
+    page.getByRole("button", { name: "Mark all but the best" }),
+  ).toBeDisabled();
+});
+
+test("keys under the keyboard help do not mark the hidden frame, and a double press is one request", async ({
+  page,
+}) => {
+  const { members, posts } = await burst(page);
+  await page.goto("/#series");
+  await page
+    .getByRole("button", { name: /DSC04171\.ARW/ })
+    .first()
+    .click();
+  const viewer = page.locator("dialog[open]").first();
+  await page.keyboard.press("?");
+  await expect(page.locator("dialog[open]")).toHaveCount(2);
+  await page.keyboard.press("x");
+  await page.keyboard.press("b");
+  expect(posts).toEqual([]);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("dialog[open]")).toHaveCount(1);
+
+  // Two presses before the page has drawn "busy".
+  await page.evaluate(() => {
+    for (let n = 0; n < 2; n++)
+      document.activeElement?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "x", bubbles: true }),
+      );
+  });
+  await expect(viewer.locator(".viewer-state")).toHaveText(
+    "marked for quarantine",
+  );
+  expect(posts).toEqual([{ path: "reject 4171", body: { rejected: true } }]);
+  expect(members[0].is_rejected).toBe(true);
 });
 
 test("a refused mark is said in the page and the viewer stays open", async ({
@@ -223,11 +261,15 @@ test("in Duplicates and versions, B keeps the version on screen", async ({
     .getByRole("button", { name: "Detailed review", exact: true })
     .click();
   await page
-    .getByRole("button", { name: /IMG_5532\.JPG/ })
+    .getByRole("button", { name: "Open IMG_5532.JPG", exact: true })
     .first()
     .click();
   const viewer = page.locator("dialog[open]");
-  // Two versions open side by side, the second one current.
+  // Two versions open side by side; the one clicked is the one the keys
+  // act on, and the viewer names it.
+  await expect(viewer.locator(".viewer-marks strong")).toHaveText(
+    "IMG_5532.JPG:",
+  );
   await expect(viewer.locator(".viewer-state")).toHaveText("");
   await page.keyboard.press("b");
   await expect(viewer.locator(".viewer-state")).toHaveText("★ kept");
@@ -237,4 +279,17 @@ test("in Duplicates and versions, B keeps the version on screen", async ({
   await expect(viewer.getByRole("button", { name: /Clear marks/ })).toHaveCount(
     0,
   );
+
+  // Clicking the first of the pair makes that one current, not the second.
+  await page.keyboard.press("Escape");
+  await page
+    .getByRole("button", { name: "Open IMG_5531.JPG", exact: true })
+    .first()
+    .click();
+  await expect(viewer.locator(".viewer-marks strong")).toHaveText(
+    "IMG_5531.JPG:",
+  );
+  await page.keyboard.press("b");
+  await expect(viewer.locator(".viewer-state")).toHaveText("★ kept");
+  expect(kept).toEqual([5532, 5531]);
 });

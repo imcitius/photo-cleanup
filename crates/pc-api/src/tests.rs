@@ -786,7 +786,37 @@ async fn frames_already_in_quarantine_leave_their_burst() {
         .await;
     assert_eq!(s, 200, "{v}");
 
-    // The bulk action marks only what is still there.
+    // The starred frame has moved, so "all but the best" would be all of
+    // what is left. Refused, and nothing marked.
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/series/{series}/reject-rest"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v.to_string().contains("no best frame"), "{v}");
+    let (_, list) = f.req("GET", "/api/series", Value::Null).await;
+    assert!(
+        list["series"][0]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["is_rejected"] == false),
+        "{list}"
+    );
+
+    // With a live best, the bulk action marks only what is still there.
+    let live_best = left[0]["file_id"].as_i64().unwrap();
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/series/{series}/best"),
+            json!({"file_id": live_best}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
     let (s, v) = f
         .req(
             "POST",
@@ -795,13 +825,13 @@ async fn frames_already_in_quarantine_leave_their_burst() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["rejected"], 4, "{v}");
+    assert_eq!(v["rejected"], 3, "{v}");
     let (s, v) = f
         .req("POST", &format!("/api/series/{series}/keep-all"), json!({}))
         .await;
     assert_eq!(s, 200, "{v}");
 
-    // Three of seven left in the archive is still a burst; one is not, and
+    // Four of seven left in the archive is still a burst; one is not, and
     // it leaves both the list and the counter on the overview.
     let (_, status) = f.req("GET", "/api/status", Value::Null).await;
     assert_eq!(status["series"], 1, "{status}");
@@ -880,6 +910,16 @@ async fn the_best_mark_can_be_taken_back_from_its_own_frame_only() {
         .query_row("SELECT count(*) FROM manual_best", [], |r| r.get(0))
         .unwrap();
     assert_eq!(manual, 0, "the hand-set star would come back on a rebuild");
+
+    // With the star taken off, "all but the best" would mark every frame.
+    let (s, v) = f
+        .req(
+            "POST",
+            &format!("/api/series/{series}/reject-rest"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(s, 400, "{v}");
 
     // A file from outside the burst is refused either way.
     let (s, _) = f
