@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension, Row};
+use std::collections::HashMap;
 
 use crate::{Db, KeeperSource};
 
@@ -987,6 +988,9 @@ impl Db {
     }
 }
 
+/// File → (group, path of the file the group keeps), in joining order.
+pub type RejectedMemberships = HashMap<i64, Vec<(i64, Option<String>)>>;
+
 impl Db {
     pub fn replace_catalog_files(
         &self,
@@ -1034,12 +1038,16 @@ impl Db {
     ///
     /// A hand-made decision carries no family of its own — it is about the
     /// file, not about what it duplicates — so a plan narrowed to one group
-    /// has to ask for its rejects by that group.
+    /// has to ask for its rejects by that group. Each file is shown in one
+    /// group: the one asked about, or else the first it joined. A file two
+    /// groups hold, shown in the first one, would vanish from a plan
+    /// narrowed to the second — and with it any refusal it carries.
     pub fn rejected_rows_scoped(&self, family: Option<i64>) -> Result<Vec<PlanRow>> {
         let mut st = self.conn.prepare(
             "SELECT f.id, f.path, f.size, f.width, f.height, f.mtime, f.inode, f.dev, f.disk,
                     COALESCE((SELECT fm.family_id FROM family_members fm
-                               WHERE fm.file_id = f.id LIMIT 1), 0),
+                               WHERE fm.file_id = f.id
+                               ORDER BY fm.family_id IS ?1 DESC, fm.rowid LIMIT 1), 0),
                     -- Which file this one's group keeps. Not evidence of
                     -- anything: a hand-made decision needs none. It says
                     -- where the decision belongs, so a plan narrowed to one
@@ -1047,7 +1055,8 @@ impl Db {
                     (SELECT k.path FROM families fam
                        JOIN files k ON k.id = fam.keeper_file
                       WHERE fam.id = (SELECT fm.family_id FROM family_members fm
-                                       WHERE fm.file_id = f.id LIMIT 1))
+                                       WHERE fm.file_id = f.id
+                                       ORDER BY fm.family_id IS ?1 DESC, fm.rowid LIMIT 1))
                FROM manual_rejects r
                JOIN files f ON f.id = r.file_id
               WHERE f.state = 'present'
@@ -1099,6 +1108,39 @@ impl Db {
     ///
     /// The folder is matched by prefix, which is as far as SQL can take it;
     /// the caller still decides what counts as being *in* that folder.
+    /// Every group each present file set aside by hand belongs to, with the
+    /// path of the file that group keeps, in the order the file joined them.
+    ///
+    /// A hand-made decision takes the file out of every group that holds
+    /// it, not only out of the one it is shown in: the plan needs all of
+    /// them to see that no group is emptied, and to show the decision in
+    /// whichever group it was asked about.
+    pub fn rejected_memberships(&self) -> Result<RejectedMemberships> {
+        let mut st = self.conn.prepare(
+            "SELECT fm.file_id, fm.family_id, k.path
+               FROM manual_rejects r
+               JOIN files f ON f.id = r.file_id
+               JOIN family_members fm ON fm.file_id = f.id
+               LEFT JOIN families fam ON fam.id = fm.family_id
+               LEFT JOIN files k ON k.id = fam.keeper_file
+              WHERE f.state = 'present'
+              ORDER BY fm.file_id, fm.rowid",
+        )?;
+        let mut out = RejectedMemberships::new();
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (file, family, keeper) = row?;
+            out.entry(file).or_default().push((family, keeper));
+        }
+        Ok(out)
+    }
+
     pub fn plan_rows_scoped(
         &self,
         family: Option<i64>,

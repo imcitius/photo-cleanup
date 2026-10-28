@@ -637,6 +637,9 @@ pub fn make_preview(st: &AppState, db: &Db, r: &Request) -> Result<(Value, Vec<A
                     .get("keeper_folder")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                // So a file several groups hold is shown in one this answer
+                // keeps, not thrown away by the narrowing below.
+                originals: flag(&r.params, "originals").then(|| marks.clone()),
             };
             let mut plan = if flag(&r.params, "reviewed_only") {
                 pc_family::review::reviewed_plan(db, &policy, &scope)?

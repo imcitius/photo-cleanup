@@ -855,6 +855,101 @@ async fn a_pixel_shift_set_cannot_be_thinned_by_a_mark() {
     assert_eq!(preview["items"][0]["manual"], true, "{preview}");
 }
 
+/// A stale mark on a protected frame that two groups hold is answered in
+/// whichever group, keeper folder or marked tree the preview is narrowed
+/// to: once, and with nothing from outside that scope.
+#[tokio::test]
+async fn a_protected_frame_in_two_groups_is_refused_in_the_group_asked_about() {
+    let f = Fixture::new();
+    let series = a_burst(&f, 4).await;
+    let (frame, groups) = {
+        let db = f.state.db.lock().unwrap();
+        db.conn
+            .execute(
+                "UPDATE series SET kind='pixel-shift', protected=1 WHERE id=?1",
+                [series],
+            )
+            .unwrap();
+        let frame: (i64, String) = db
+            .conn
+            .query_row(
+                "SELECT f.id, f.path FROM series_members m JOIN files f ON f.id=m.file_id
+                  WHERE m.series_id=?1 ORDER BY f.id DESC LIMIT 1",
+                [series],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO manual_rejects(file_id, marked_at) VALUES(?1, 1)",
+                [frame.0],
+            )
+            .unwrap();
+        // Each group keeps its own file in its own folder; the frame is an
+        // export in both, and joined group A first.
+        let run = db.start_run(&[], "test").unwrap();
+        let mut groups = Vec::new();
+        for (dir, size) in [("keep-a", 5_242_881), ("keep-b", 5_242_882)] {
+            let path = f.archive.join(dir).join("DSC07311.JPG");
+            let keeper = db
+                .upsert_file(
+                    &pc_db::NewFile {
+                        path: path.display().to_string(),
+                        name: "DSC07311.JPG".into(),
+                        size,
+                        ..Default::default()
+                    },
+                    run,
+                )
+                .unwrap();
+            let g = db
+                .insert_family("versions", None, None, Some(keeper), run)
+                .unwrap();
+            db.insert_family_member(g, keeper, "original", None, 1.0, "")
+                .unwrap();
+            db.insert_family_member(g, frame.0, "export", None, 0.7, "")
+                .unwrap();
+            groups.push((g, f.archive.join(dir).display().to_string()));
+        }
+        (frame, groups)
+    };
+    let refused_once = |preview: &Value| {
+        assert_eq!(preview["items"], json!([]), "{preview}");
+        let refusals = preview["refusals"].as_array().unwrap();
+        assert_eq!(refusals.len(), 1, "{preview}");
+        assert_eq!(refusals[0]["path"], frame.1.as_str(), "{preview}");
+        assert!(
+            refusals[0]["why"].as_str().unwrap().contains("pixel-shift"),
+            "{preview}"
+        );
+    };
+
+    refused_once(&f.preview("plan-apply", json!({"roles":["copy"]})).await);
+    for (g, dir) in &groups {
+        refused_once(
+            &f.preview("plan-apply", json!({"roles":["copy"],"family_id":g}))
+                .await,
+        );
+        refused_once(
+            &f.preview("plan-apply", json!({"roles":["copy"],"keeper_folder":dir}))
+                .await,
+        );
+    }
+    // The tree marked as originals: only group B's keeper lies under it.
+    let (s, v) = f
+        .req(
+            "POST",
+            "/api/originals",
+            json!({"path": groups[1].1, "scope": "absolute"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    refused_once(
+        &f.preview("plan-apply", json!({"roles":["copy"],"originals":true}))
+            .await,
+    );
+}
+
 /// Series are built once, and nothing rebuilds them after a move. A burst of
 /// seven frames with three already in quarantine is a burst of four, and the
 /// three must not come back as frames with buttons and their old paths.
