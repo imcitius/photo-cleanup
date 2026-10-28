@@ -231,6 +231,16 @@ export const ui = {
   rejectFrameHelp:
     "Mark this frame as unwanted. It joins the move plan; the file stays where it is until you approve that plan.",
   keepFrame: "Keep it",
+  clearMarks: "Clear marks",
+  clearMarksHelp:
+    "Take both the best mark and the quarantine mark off this frame. It stays in the archive.",
+  markedBest: "★ best",
+  markedForQuarantine: "marked for quarantine",
+  viewerMarksHelp:
+    "B makes it the best, X marks it for quarantine, U clears both marks on this frame. The viewer stays open: go through the burst with the arrows, then close it. Marks only go into the plan — nothing moves until you approve it.",
+  viewerKeeperHelp:
+    "B keeps this very file. The choice goes into the plan; nothing moves until you approve it.",
+  markedKeeper: "★ kept",
   keepFrameHelp: "Clear the mark: the frame stays in the archive.",
   keepFolderOnly: "and the same in every group of this folder",
   keepFolderOnlyHelp:

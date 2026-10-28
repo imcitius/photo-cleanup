@@ -244,7 +244,17 @@ Pixel-shift sets are recognised and protected outright — four frames of one
 scene that the camera merges later look identical and must never be thinned.
 
 Marks you make by hand — the best frame, the ones you do not want — go into
-the move plan and survive the next pass.
+the move plan and survive the next pass. They can be set from the viewer as
+you flip through a burst, with Lightroom's keys: `B` makes the frame on screen
+the best, `X` marks it for quarantine, `U` clears both (on a Russian layout
+`И`, `Ч`, `Г`). The viewer stays on that frame; nothing moves until the plan
+is approved. On *Duplicates and versions* the same viewer keeps the version on
+screen with `B`.
+
+A burst lists only frames still in the archive. A frame already moved to
+quarantine leaves it, the ranks are counted again over what is left, and a
+burst down to one frame is no longer shown or counted. The server refuses to
+mark a file that has left the archive.
 
 ## Kinds: what measurement can and cannot say
 

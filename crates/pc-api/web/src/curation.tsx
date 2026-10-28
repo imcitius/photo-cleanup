@@ -22,14 +22,47 @@ export interface ImageRef {
   name: string;
   thumb?: string | null;
 }
+/** A decision the viewer can take on the frame on screen. */
+export interface ViewerAction {
+  /** Lightroom's letters: B best, X reject, U clear. None: a button only. */
+  key?: "b" | "x" | "u";
+  label: string;
+  title?: string;
+  kind?: string;
+  disabled: boolean;
+  run: () => void;
+}
+export interface ViewerMarks {
+  /** What the frame carries now, said where it is being looked at. */
+  state: string[];
+  actions: ViewerAction[];
+  help: string;
+  /** Why the last decision was refused; the page behind is out of sight. */
+  error?: string;
+}
+// The Russian layout puts И, Ч and Г where B, X and U are, the same way С
+// sits on C. Both are read so the keys work without switching layouts.
+const viewerKeys: Record<NonNullable<ViewerAction["key"]>, string[]> = {
+  b: ["b", "и"],
+  x: ["x", "ч"],
+  u: ["u", "г"],
+};
 export function ImageViewer({
   images,
   start = 0,
+  marks,
   onClose,
 }: {
   images: ImageRef[];
   /** Which frame to open on; the rest stay reachable with the arrows. */
   start?: number;
+  /**
+   * Marks and actions for one frame, read from the page's current data on
+   * every render, so a decision taken here shows here at once and the page
+   * underneath follows. No frame leaves the viewer: the list stays as it
+   * was opened, and the user walks it with the arrows.
+   */
+  marks?: (image: ImageRef) => ViewerMarks | null;
   onClose: () => void;
 }) {
   const last = Math.max(0, images.length - 1);
@@ -72,9 +105,18 @@ export function ImageViewer({
         e.preventDefault();
         step(-1);
       }
-      if (e.key.toLowerCase() === "c" || e.key.toLowerCase() === "с") {
+      const key = e.key.toLowerCase();
+      if (key === "c" || key === "с") {
         e.preventDefault();
         setPinned((p) => (p === null ? at : null));
+      }
+      const action = marksRef.current?.actions.find(
+        (a) => a.key && viewerKeys[a.key].includes(key),
+      );
+      if (action) {
+        e.preventDefault();
+        // Held down, a key repeats; one press is one decision.
+        if (!e.repeat && !action.disabled) action.run();
       }
     };
     document.addEventListener("keydown", listener);
@@ -83,6 +125,11 @@ export function ImageViewer({
   const current = images[at];
   const shown = pinned === null ? [current] : [images[pinned], current];
   const comparing = shown.length === 2;
+  const currentMarks = marks?.(current) || null;
+  // The key listener lives across renders; it reads the latest marks here
+  // rather than the ones from the frame it was attached on.
+  const marksRef = useRef(currentMarks);
+  marksRef.current = currentMarks;
   return (
     <Modal title={comparing ? ui.compare : current.name} wide onClose={onClose}>
       <div className="toolbar">
@@ -158,8 +205,32 @@ export function ImageViewer({
           </label>
         )}
       </div>
-      <p className="muted">{ui.viewerHelp}</p>
+      {currentMarks && (
+        <div className="toolbar viewer-marks">
+          {currentMarks.actions.map((a) => (
+            <Button
+              key={a.label}
+              kind={a.kind}
+              disabled={a.disabled}
+              title={a.title}
+              aria-keyshortcuts={a.key?.toUpperCase()}
+              onClick={a.run}
+            >
+              {a.label}
+              {a.key && <kbd>{a.key.toUpperCase()}</kbd>}
+            </Button>
+          ))}
+          <span className="viewer-state" role="status">
+            {currentMarks.state.join(" · ")}
+          </span>
+        </div>
+      )}
+      <p className="muted">
+        {ui.viewerHelp}
+        {currentMarks && ` ${currentMarks.help}`}
+      </p>
       {error && <ErrorBox message={error} />}
+      {currentMarks?.error && <ErrorBox message={currentMarks.error} />}
       <div
         className={`image-viewer ${overlay && comparing ? "overlay" : ""} ${one ? "one-to-one" : ""}`}
         onPointerDown={(e) => {
@@ -649,6 +720,38 @@ export function Families({
     } finally {
       setBusy(false);
     }
+  };
+  // The buttons each version card carries, for the version on screen. B is
+  // the page's own "keep this one"; a version has no quarantine mark of its
+  // own here, so X and U have nothing to do on this page.
+  const familyMarks = (image: ImageRef): ViewerMarks | null => {
+    const m = selected?.members.find((m) => m.file_id === image.file_id);
+    if (!selected || !m) return null;
+    const off = disabled || busy;
+    return {
+      state: [
+        ...(m.is_keeper ? [ui.markedKeeper] : []),
+        ...(m.is_rejected && !m.is_keeper ? [ui.setAside] : []),
+      ],
+      help: ui.viewerKeeperHelp,
+      error,
+      actions: [
+        {
+          key: "b",
+          label: ui.setKeeper,
+          title: ui.setKeeperHelp,
+          kind: m.is_keeper ? "selected" : "",
+          disabled: off || m.is_keeper,
+          run: () => keeper(m.file_id),
+        },
+        {
+          label: ui.keepOnly,
+          title: ui.keepOnlyHelp,
+          disabled: off || selected.members.length < 2,
+          run: () => keepOnly(selected, m),
+        },
+      ],
+    };
   };
   return (
     <>
@@ -1147,6 +1250,7 @@ export function Families({
         <ImageViewer
           images={view.images}
           start={view.start}
+          marks={familyMarks}
           onClose={() => setView(null)}
         />
       )}
@@ -1163,9 +1267,11 @@ export function SeriesPage({
   onChange: () => void;
 }) {
   const [offset, setOffset] = useState(0),
-    [view, setView] = useState<{ images: ImageRef[]; start: number } | null>(
-      null,
-    ),
+    [view, setView] = useState<{
+      images: ImageRef[];
+      start: number;
+      series: number;
+    } | null>(null),
     [error, setError] = useState(""),
     [hideCopies, setHideCopies] = useState(false),
     [busy, setBusy] = useState(false);
@@ -1173,17 +1279,70 @@ export function SeriesPage({
     `/series?offset=${offset}&limit=20`,
     revision,
   );
-  const act = async (path: string, body: unknown = {}) => {
+  const act = async (...calls: [string, unknown?][]) => {
     setBusy(true);
     setError("");
     try {
-      await post(path, body);
-      onChange();
+      for (const [path, body] of calls) await post(path, body ?? {});
     } catch (e) {
       setError((e as Error).message);
     } finally {
+      // Refreshed after a refusal too: the frame may have left the archive
+      // since the page was read, and the burst should say so.
+      onChange();
       setBusy(false);
     }
+  };
+  // The same three decisions as the buttons under each frame, for the frame
+  // the viewer is on. Read from the page's latest data, not from the list
+  // the viewer was opened with, so a mark shows the moment it is set.
+  const viewerMarks = (image: ImageRef): ViewerMarks | null => {
+    const s = r.data?.series.find((s) => s.id === view?.series);
+    const m = s?.members.find((m) => m.file_id === image.file_id);
+    if (!s || !m) return null;
+    const off = disabled || busy;
+    return {
+      state: [
+        ...(m.is_best ? [ui.markedBest] : []),
+        ...(m.is_rejected ? [ui.markedForQuarantine] : []),
+      ],
+      help: ui.viewerMarksHelp,
+      error,
+      actions: [
+        {
+          key: "b",
+          label: ui.setBest,
+          kind: m.is_best ? "selected" : "",
+          disabled: off || m.is_best,
+          run: () => act([`/series/${s.id}/best`, { file_id: m.file_id }]),
+        },
+        {
+          key: "x",
+          label: ui.rejectFrame,
+          title: ui.rejectFrameHelp,
+          kind: m.is_rejected ? "danger-outline" : "",
+          disabled: off || m.is_rejected,
+          run: () => act([`/files/${m.file_id}/reject`, { rejected: true }]),
+        },
+        {
+          key: "u",
+          label: ui.clearMarks,
+          title: ui.clearMarksHelp,
+          disabled: off || (!m.is_best && !m.is_rejected),
+          run: () => {
+            const calls: [string, unknown][] = [];
+            if (m.is_best)
+              calls.push([
+                `/series/${s.id}/best`,
+                { file_id: m.file_id, best: false },
+              ]);
+            if (m.is_rejected)
+              calls.push([`/files/${m.file_id}/reject`, { rejected: false }]);
+            act(...calls);
+          },
+        },
+      ],
+    };
   };
   return (
     <>
@@ -1253,7 +1412,7 @@ export function SeriesPage({
                     <Button
                       disabled={disabled || busy}
                       title={ui.rejectRestHelp}
-                      onClick={() => act(`/series/${s.id}/reject-rest`)}
+                      onClick={() => act([`/series/${s.id}/reject-rest`])}
                     >
                       {ui.rejectRest}
                     </Button>
@@ -1263,7 +1422,7 @@ export function SeriesPage({
                         busy ||
                         !s.members.some((m) => m.is_rejected)
                       }
-                      onClick={() => act(`/series/${s.id}/keep-all`)}
+                      onClick={() => act([`/series/${s.id}/keep-all`])}
                     >
                       {ui.keepAll}
                     </Button>
@@ -1310,6 +1469,7 @@ export function SeriesPage({
                             setView({
                               images: frames,
                               start: frames.indexOf(m),
+                              series: s.id,
                             })
                           }
                         />
@@ -1330,9 +1490,10 @@ export function SeriesPage({
                             disabled={disabled || busy || m.is_best}
                             kind={m.is_best ? "selected" : ""}
                             onClick={() =>
-                              act(`/series/${s.id}/best`, {
-                                file_id: m.file_id,
-                              })
+                              act([
+                                `/series/${s.id}/best`,
+                                { file_id: m.file_id },
+                              ])
                             }
                           >
                             {m.is_best ? `★ ${ui.best}` : ui.setBest}
@@ -1346,9 +1507,10 @@ export function SeriesPage({
                                 : ui.rejectFrameHelp
                             }
                             onClick={() =>
-                              act(`/files/${m.file_id}/reject`, {
-                                rejected: !m.is_rejected,
-                              })
+                              act([
+                                `/files/${m.file_id}/reject`,
+                                { rejected: !m.is_rejected },
+                              ])
                             }
                           >
                             {m.is_rejected ? ui.keepFrame : ui.rejectFrame}
@@ -1387,6 +1549,7 @@ export function SeriesPage({
         <ImageViewer
           images={view.images}
           start={view.start}
+          marks={viewerMarks}
           onClose={() => setView(null)}
         />
       )}

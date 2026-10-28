@@ -422,8 +422,13 @@ GET  /api/families?role=&tier=&sort=&cursor=
 GET  /api/families/:id
 POST /api/families/:id/keeper       {file_id}
 POST /api/families/:id/split        ложное объединение
-GET  /api/series?kind=&cursor=
-POST /api/series/:id/best           {family_id}
+GET  /api/series?limit=&offset=     только кадры state='present';
+                                     серии с <2 живыми кадрами скрыты
+POST /api/series/:id/best           {file_id, best?: false} — false
+                                     снимает звезду только с этого кадра;
+                                     файл не в архиве -> отказ
+POST /api/files/:id/reject          {rejected}; true для файла не в
+                                     архиве -> отказ, снять можно всегда
 GET  /api/files/:id/thumb?size=384
 GET  /api/files/:id/full            стрим оригинала для pixel-peep
 GET  /api/policy | PUT /api/policy
