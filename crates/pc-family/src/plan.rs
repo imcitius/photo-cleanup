@@ -82,6 +82,15 @@ impl Plan {
     }
 }
 
+/// Why a frame of a protected series stays, whatever asked for it to move.
+pub fn protected_series_refusal(kind: &str) -> String {
+    pc_core::tf!(
+        "кадр защищённого набора {0}: набор не прореживается, файл остаётся",
+        "a frame of a protected {0} set: the set is never thinned, the file stays",
+        kind
+    )
+}
+
 fn keeper_of(members: &[PlanRow]) -> Option<&PlanRow> {
     members
         .iter()
@@ -101,6 +110,31 @@ pub struct Scope {
     /// "clear out this folder" but "the originals are here, take away what
     /// duplicates them, wherever it lies".
     pub keeper_folder: Option<String>,
+    /// Groups whose kept file lies under a folder marked on the archive
+    /// tree as holding originals.
+    pub originals: Option<pc_db::Marks>,
+}
+
+impl Scope {
+    /// Does this scope take in a group, known by the file it keeps?
+    ///
+    /// A file set aside by hand can sit in several groups and is shown in
+    /// one. That one has to be a group the plan was asked about, or the
+    /// caller narrowing the answer to its group, keeper folder or marked
+    /// tree throws the file away — and a refusal with it, silently. The
+    /// folder a file lies in is about the file, not its group, so it is not
+    /// asked here.
+    fn takes_group(&self, family: i64, keeper: Option<&str>) -> bool {
+        self.family.is_none_or(|f| f == family)
+            && self
+                .keeper_folder
+                .as_deref()
+                .is_none_or(|dir| keeper.is_some_and(|k| pc_core::dir_name(k) == dir))
+            && self
+                .originals
+                .as_ref()
+                .is_none_or(|marks| keeper.is_some_and(|k| marks.covering(k).is_some()))
+    }
 }
 
 /// What a file has to match to be called a copy of another. One model, the
@@ -163,6 +197,26 @@ pub(crate) fn compute_before_review(db: &Db, policy: &Policy, scope: &Scope) -> 
         CurationIndex::build(db.lightroom_protected()?)
     } else {
         CurationIndex::default()
+    };
+    // A pixel-shift set is one photograph stored as several files (DESIGN
+    // §11.5). No reason to move one of them is good enough: not a role, not
+    // a mark made by hand, not a mark left in the database by an older
+    // version. Each such frame is refused here, once, with its reason.
+    let mut shield_kinds = db.protected_series_files()?;
+    let mut shielded: Vec<Refusal> = Vec::new();
+    let mut shield = |m: &PlanRow, group_keeper: &str| -> bool {
+        let Some(kind) = shield_kinds.remove(&m.file_id) else {
+            // Absent: not protected, or already answered for this file.
+            return shielded.iter().any(|r| r.file_id == m.file_id);
+        };
+        shielded.push(Refusal {
+            path: m.path.clone(),
+            file_id: m.file_id,
+            family_id: m.family_id,
+            group_keeper: group_keeper.to_string(),
+            why: protected_series_refusal(&kind),
+        });
+        true
     };
 
     let mut by_family: HashMap<i64, Vec<PlanRow>> = HashMap::new();
@@ -252,6 +306,9 @@ pub(crate) fn compute_before_review(db: &Db, policy: &Policy, scope: &Scope) -> 
                     continue;
                 }
             }
+            if shield(m, &keeper.path) {
+                continue;
+            }
             if let Some(c) = protected.lookup(&m.path) {
                 let stars = c
                     .rating
@@ -327,8 +384,20 @@ pub(crate) fn compute_before_review(db: &Db, policy: &Policy, scope: &Scope) -> 
     // stronger in the reason column would be inventing a justification the
     // tool does not have.
     let already: BTreeSet<i64> = plan.candidates.iter().map(|c| c.file_id).collect();
-    for m in db.rejected_rows_scoped(scope.family)? {
+    let memberships = db.rejected_memberships()?;
+    for mut m in db.rejected_rows_scoped(scope.family)? {
         if already.contains(&m.file_id) {
+            continue;
+        }
+        // Shown in a group this scope takes in, when the file has one.
+        if let Some((family, keeper)) = memberships.get(&m.file_id).and_then(|all| {
+            all.iter()
+                .find(|(f, k)| scope.takes_group(*f, k.as_deref()))
+        }) {
+            m.family_id = *family;
+            m.group_keeper = keeper.clone();
+        }
+        if shield(&m, m.group_keeper.as_deref().unwrap_or_default()) {
             continue;
         }
         if let Some(c) = protected.lookup(&m.path) {
@@ -374,6 +443,11 @@ pub(crate) fn compute_before_review(db: &Db, policy: &Policy, scope: &Scope) -> 
     // does not move at once. The decision made by a person is the answer.
     let chosen: BTreeSet<i64> = plan.candidates.iter().map(|c| c.file_id).collect();
     plan.refusals.retain(|r| !chosen.contains(&r.file_id));
+    // The same for a protected frame: whatever else was said about it, the
+    // answer is that the set stays whole.
+    let shielded_ids: BTreeSet<i64> = shielded.iter().map(|r| r.file_id).collect();
+    plan.refusals.retain(|r| !shielded_ids.contains(&r.file_id));
+    plan.refusals.extend(shielded);
 
     // Nothing may empty a group.
     //
@@ -387,10 +461,18 @@ pub(crate) fn compute_before_review(db: &Db, policy: &Policy, scope: &Scope) -> 
     // So the last word belongs to the group. Of the files it would lose, one
     // stays — the one the group keeps, or failing that the largest — and the
     // refusal says why.
+    //
+    // A file set aside by hand leaves every group that holds it, not only
+    // the one it is shown in; each of them is counted.
     let mut leaving: HashMap<i64, Vec<usize>> = HashMap::new();
     for (i, c) in plan.candidates.iter().enumerate() {
-        if c.family_id != 0 {
-            leaving.entry(c.family_id).or_default().push(i);
+        let shown = [c.family_id];
+        let groups = match memberships.get(&c.file_id) {
+            Some(all) if c.manual => all.iter().map(|(f, _)| *f).collect::<Vec<_>>(),
+            _ => shown.to_vec(),
+        };
+        for family in groups.into_iter().filter(|f| *f != 0) {
+            leaving.entry(family).or_default().push(i);
         }
     }
     let mut rescued: Vec<usize> = Vec::new();
@@ -417,7 +499,9 @@ pub(crate) fn compute_before_review(db: &Db, policy: &Policy, scope: &Scope) -> 
             rescued.push(keep);
         }
     }
+    // One file can be what two groups keep back.
     rescued.sort_unstable();
+    rescued.dedup();
     for i in rescued.into_iter().rev() {
         let c = plan.candidates.remove(i);
         plan.refusals.push(Refusal {
@@ -704,5 +788,348 @@ mod emptying_tests {
             "{:?}",
             plan.refusals
         );
+    }
+}
+
+#[cfg(test)]
+mod protected_series_tests {
+    use super::*;
+    use pc_db::files::NewFile;
+
+    fn file(db: &Db, run: i64, path: &str, pixels: u8, size: i64) -> i64 {
+        db.upsert_file(
+            &NewFile {
+                path: path.into(),
+                name: pc_core::base_name(path).into(),
+                disk: "disk1".into(),
+                size,
+                mtime: 1_696_000_000,
+                container: Some("tiff".into()),
+                pixel_hash: Some(vec![pixels; 32]),
+                content_hash: Some(vec![pixels; 32]),
+                phash: Some(1),
+                thumb_key: Some("k".into()),
+                ..Default::default()
+            },
+            run,
+        )
+        .unwrap()
+    }
+
+    fn reject(db: &Db, f: i64) {
+        db.conn
+            .execute(
+                "INSERT OR IGNORE INTO manual_rejects(file_id, marked_at) VALUES(?1, 1)",
+                [f],
+            )
+            .unwrap();
+    }
+
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        db: Db,
+        shift: Vec<i64>,
+        burst: Vec<i64>,
+        outside_keeper: i64,
+        plain_copy: i64,
+    }
+
+    /// Four pixel-shift frames, one of which also has a byte-identical copy
+    /// elsewhere that a family keeps; an ordinary burst; an ordinary copy.
+    fn fixture() -> Fixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("pc.db")).unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+
+        let shift: Vec<i64> = (1..=4u8)
+            .map(|i| {
+                file(
+                    &db,
+                    run,
+                    &format!("/foto/shift/DSC0{i}.ARW"),
+                    10 + i,
+                    61_341_696 + i as i64,
+                )
+            })
+            .collect();
+        let set = db
+            .insert_series(
+                "pixel-shift",
+                Some(1_696_000_000),
+                Some("ILCE-7RM4"),
+                None,
+                true,
+                run,
+            )
+            .unwrap();
+        for (rank, f) in shift.iter().enumerate() {
+            db.insert_series_member(set, *f, rank as i64 + 1, 0.5, "")
+                .unwrap();
+        }
+
+        // The family keeps a backup copy outside the set; the set frame is
+        // the role-derived `copy`.
+        let outside_keeper = file(&db, run, "/backup/DSC03.ARW", 13, 61_341_699);
+        let fam = db
+            .insert_family("exact", None, None, Some(outside_keeper), run)
+            .unwrap();
+        db.insert_family_member(fam, outside_keeper, "original", None, 1.0, "")
+            .unwrap();
+        db.insert_family_member(fam, shift[2], "copy", None, 1.0, "")
+            .unwrap();
+
+        let burst: Vec<i64> = (1..=3u8)
+            .map(|i| {
+                file(
+                    &db,
+                    run,
+                    &format!("/foto/burst/IMG_00{i}.JPG"),
+                    40 + i,
+                    7_340_032 + i as i64,
+                )
+            })
+            .collect();
+        let b = db
+            .insert_series(
+                "burst",
+                Some(1_696_100_000),
+                None,
+                Some(burst[0]),
+                false,
+                run,
+            )
+            .unwrap();
+        for (rank, f) in burst.iter().enumerate() {
+            db.insert_series_member(b, *f, rank as i64 + 1, 0.5, "")
+                .unwrap();
+        }
+
+        let keep = file(&db, run, "/foto/a.jpg", 90, 3_145_728);
+        let plain_copy = file(&db, run, "/foto/a copy.jpg", 90, 3_145_728);
+        let fam = db
+            .insert_family("exact", None, None, Some(keep), run)
+            .unwrap();
+        db.insert_family_member(fam, keep, "original", None, 1.0, "")
+            .unwrap();
+        db.insert_family_member(fam, plain_copy, "copy", None, 1.0, "")
+            .unwrap();
+
+        Fixture {
+            _tmp: tmp,
+            db,
+            shift,
+            burst,
+            outside_keeper,
+            plain_copy,
+        }
+    }
+
+    /// A mark already in the database before this rule existed, a new one,
+    /// and a role-derived copy: none of them thins a pixel-shift set, and
+    /// each is answered with a reason. Everything else is planned as before.
+    #[test]
+    fn a_pixel_shift_set_is_never_thinned_whatever_put_a_frame_in_the_plan() {
+        let f = fixture();
+        // Stale manual rejects on two frames of the protected set, plus one
+        // frame of the ordinary burst.
+        reject(&f.db, f.shift[1]);
+        reject(&f.db, f.shift[3]);
+        reject(&f.db, f.burst[2]);
+
+        let plan = compute(&f.db, &Policy::default()).unwrap();
+        let moving: BTreeSet<i64> = plan.candidates.iter().map(|c| c.file_id).collect();
+        for s in &f.shift {
+            assert!(
+                !moving.contains(s),
+                "кадр набора в плане: {:?}",
+                plan.candidates
+            );
+        }
+        assert_eq!(
+            moving,
+            [f.burst[2], f.plain_copy].into_iter().collect(),
+            "{:?}",
+            plan.candidates
+        );
+        assert_eq!(plan.bytes(), 7_340_035 + 3_145_728);
+
+        for s in [f.shift[1], f.shift[2], f.shift[3]] {
+            let r: Vec<_> = plan.refusals.iter().filter(|r| r.file_id == s).collect();
+            assert_eq!(r.len(), 1, "one answer per file: {r:?}");
+            assert!(
+                r[0].why.contains("pixel-shift"),
+                "unintelligible refusal: {}",
+                r[0].why
+            );
+        }
+        assert!(plan.refusals.iter().all(|r| r.file_id != f.shift[0]));
+        assert!(plan.refusals.iter().all(|r| r.file_id != f.outside_keeper));
+    }
+
+    /// Without any protected frame in play the plan is exactly what it was.
+    #[test]
+    fn content_outside_a_protected_set_is_planned_as_before() {
+        let f = fixture();
+        reject(&f.db, f.burst[1]);
+        let plan = compute(&f.db, &Policy::default()).unwrap();
+        let moving: Vec<(i64, bool)> = plan
+            .candidates
+            .iter()
+            .map(|c| (c.file_id, c.manual))
+            .collect();
+        assert_eq!(moving, vec![(f.burst[1], true), (f.plain_copy, false)]);
+        // The role-derived copy inside the set is the only refusal.
+        assert_eq!(plan.refusals.len(), 1, "{:?}", plan.refusals);
+        assert_eq!(plan.refusals[0].file_id, f.shift[2]);
+    }
+
+    /// A frame that two groups hold: the first group made and a second one.
+    /// Each group keeps its own file in its own folder.
+    fn two_groups_hold(f: &Fixture, frame: i64) -> (i64, i64, i64, i64) {
+        let run = f.db.start_run(&[], "second").unwrap();
+        let mut made = Vec::new();
+        for (dir, pixels) in [("/keep-a", 61u8), ("/keep-b", 62u8)] {
+            let keeper = file(
+                &f.db,
+                run,
+                &format!("{dir}/DSC0{pixels}.ARW"),
+                pixels,
+                61_400_000 + pixels as i64,
+            );
+            let fam =
+                f.db.insert_family("exact", None, None, Some(keeper), run)
+                    .unwrap();
+            f.db.insert_family_member(fam, keeper, "original", None, 1.0, "")
+                .unwrap();
+            f.db.insert_family_member(fam, frame, "export", None, 0.7, "")
+                .unwrap();
+            made.push((fam, keeper));
+        }
+        (made[0].0, made[0].1, made[1].0, made[1].1)
+    }
+
+    fn only_refusal_of(plan: &Plan, file: i64) -> &Refusal {
+        let r: Vec<_> = plan.refusals.iter().filter(|r| r.file_id == file).collect();
+        assert_eq!(r.len(), 1, "one answer per file: {:?}", plan.refusals);
+        assert!(r[0].why.contains("pixel-shift"), "{}", r[0].why);
+        r[0]
+    }
+
+    /// A stale mark on a protected frame that two groups hold is answered
+    /// in whichever group, keeper folder or marked tree the plan is asked
+    /// about — not only in the first group the frame happened to join.
+    #[test]
+    fn a_protected_frame_in_two_groups_is_answered_in_the_group_asked_about() {
+        let f = fixture();
+        let frame = f.shift[1];
+        let (a, keeper_a, b, keeper_b) = two_groups_hold(&f, frame);
+        reject(&f.db, frame);
+        let path = |id| f.db.file(id).unwrap().unwrap().path;
+
+        let whole = compute(&f.db, &Policy::default()).unwrap();
+        assert_eq!(only_refusal_of(&whole, frame).family_id, a);
+
+        for (fam, keeper) in [(a, keeper_a), (b, keeper_b)] {
+            let scope = Scope {
+                family: Some(fam),
+                ..Default::default()
+            };
+            let plan = compute_scoped(&f.db, &Policy::default(), &scope).unwrap();
+            let r = only_refusal_of(&plan, frame);
+            assert_eq!((r.family_id, r.group_keeper.clone()), (fam, path(keeper)));
+            assert!(plan.candidates.iter().all(|c| c.file_id != frame));
+            // Nothing from outside the group is brought in.
+            assert!(
+                plan.refusals.iter().all(|r| r.family_id == fam),
+                "{:?}",
+                plan.refusals
+            );
+        }
+
+        let scope = Scope {
+            keeper_folder: Some("/keep-b".into()),
+            ..Default::default()
+        };
+        let plan = compute_scoped(&f.db, &Policy::default(), &scope).unwrap();
+        let r = only_refusal_of(&plan, frame);
+        assert_eq!((r.family_id, r.group_keeper.clone()), (b, path(keeper_b)));
+
+        let scope = Scope {
+            originals: Some(pc_db::Marks {
+                marks: vec![pc_db::Mark {
+                    path: "/keep-b".into(),
+                    scope: pc_db::MarkScope::Absolute,
+                }],
+                roots: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let plan = compute_scoped(&f.db, &Policy::default(), &scope).unwrap();
+        let r = only_refusal_of(&plan, frame);
+        assert_eq!((r.family_id, r.group_keeper.clone()), (b, path(keeper_b)));
+    }
+
+    /// Two hand-made marks that between them would empty a group: the
+    /// group is counted whichever group the plan is asked about, and
+    /// whichever group each file is shown in.
+    #[test]
+    fn marks_shown_in_another_group_still_cannot_empty_this_one() {
+        let f = fixture();
+        let run = f.db.start_run(&[], "second").unwrap();
+        let x = file(&f.db, run, "/foto/two/IMG_7311.JPG", 73, 4_718_593);
+        let y = file(&f.db, run, "/foto/two/IMG_7312.JPG", 74, 4_718_594);
+        let k = file(&f.db, run, "/foto/three/IMG_7313.JPG", 75, 5_242_881);
+        let k2 = file(&f.db, run, "/foto/four/IMG_7314.JPG", 76, 5_242_882);
+        // Group A holds only x and y. y joined group C before A, so its
+        // first group is not A; group B holds both and keeps k.
+        let c =
+            f.db.insert_family("exact", None, None, Some(k2), run)
+                .unwrap();
+        f.db.insert_family_member(c, k2, "original", None, 1.0, "")
+            .unwrap();
+        f.db.insert_family_member(c, y, "export", None, 0.6, "")
+            .unwrap();
+        let a =
+            f.db.insert_family("exact", None, None, Some(x), run)
+                .unwrap();
+        f.db.insert_family_member(a, x, "original", None, 1.0, "")
+            .unwrap();
+        f.db.insert_family_member(a, y, "export", None, 0.6, "")
+            .unwrap();
+        let b =
+            f.db.insert_family("exact", None, None, Some(k), run)
+                .unwrap();
+        f.db.insert_family_member(b, k, "original", None, 1.0, "")
+            .unwrap();
+        f.db.insert_family_member(b, x, "export", None, 0.6, "")
+            .unwrap();
+        f.db.insert_family_member(b, y, "export", None, 0.6, "")
+            .unwrap();
+        reject(&f.db, x);
+        reject(&f.db, y);
+
+        for scope in [
+            Scope::default(),
+            Scope {
+                family: Some(b),
+                ..Default::default()
+            },
+        ] {
+            let plan = compute_scoped(&f.db, &Policy::default(), &scope).unwrap();
+            let moving: BTreeSet<i64> = plan
+                .candidates
+                .iter()
+                .map(|c| c.file_id)
+                .filter(|id| [x, y].contains(id))
+                .collect();
+            assert_eq!(moving.len(), 1, "{scope:?}: {:?}", plan.candidates);
+            assert!(
+                plan.refusals
+                    .iter()
+                    .any(|r| [x, y].contains(&r.file_id) && r.why.contains("nothing")),
+                "{scope:?}: {:?}",
+                plan.refusals
+            );
+        }
     }
 }

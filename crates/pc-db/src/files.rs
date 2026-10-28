@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension, Row};
+use std::collections::HashMap;
 
 use crate::{Db, KeeperSource};
 
@@ -987,6 +988,9 @@ impl Db {
     }
 }
 
+/// File → (group, path of the file the group keeps), in joining order.
+pub type RejectedMemberships = HashMap<i64, Vec<(i64, Option<String>)>>;
+
 impl Db {
     pub fn replace_catalog_files(
         &self,
@@ -1034,12 +1038,16 @@ impl Db {
     ///
     /// A hand-made decision carries no family of its own — it is about the
     /// file, not about what it duplicates — so a plan narrowed to one group
-    /// has to ask for its rejects by that group.
+    /// has to ask for its rejects by that group. Each file is shown in one
+    /// group: the one asked about, or else the first it joined. A file two
+    /// groups hold, shown in the first one, would vanish from a plan
+    /// narrowed to the second — and with it any refusal it carries.
     pub fn rejected_rows_scoped(&self, family: Option<i64>) -> Result<Vec<PlanRow>> {
         let mut st = self.conn.prepare(
             "SELECT f.id, f.path, f.size, f.width, f.height, f.mtime, f.inode, f.dev, f.disk,
                     COALESCE((SELECT fm.family_id FROM family_members fm
-                               WHERE fm.file_id = f.id LIMIT 1), 0),
+                               WHERE fm.file_id = f.id
+                               ORDER BY fm.family_id IS ?1 DESC, fm.rowid LIMIT 1), 0),
                     -- Which file this one's group keeps. Not evidence of
                     -- anything: a hand-made decision needs none. It says
                     -- where the decision belongs, so a plan narrowed to one
@@ -1047,7 +1055,8 @@ impl Db {
                     (SELECT k.path FROM families fam
                        JOIN files k ON k.id = fam.keeper_file
                       WHERE fam.id = (SELECT fm.family_id FROM family_members fm
-                                       WHERE fm.file_id = f.id LIMIT 1))
+                                       WHERE fm.file_id = f.id
+                                       ORDER BY fm.family_id IS ?1 DESC, fm.rowid LIMIT 1))
                FROM manual_rejects r
                JOIN files f ON f.id = r.file_id
               WHERE f.state = 'present'
@@ -1099,6 +1108,39 @@ impl Db {
     ///
     /// The folder is matched by prefix, which is as far as SQL can take it;
     /// the caller still decides what counts as being *in* that folder.
+    /// Every group each present file set aside by hand belongs to, with the
+    /// path of the file that group keeps, in the order the file joined them.
+    ///
+    /// A hand-made decision takes the file out of every group that holds
+    /// it, not only out of the one it is shown in: the plan needs all of
+    /// them to see that no group is emptied, and to show the decision in
+    /// whichever group it was asked about.
+    pub fn rejected_memberships(&self) -> Result<RejectedMemberships> {
+        let mut st = self.conn.prepare(
+            "SELECT fm.file_id, fm.family_id, k.path
+               FROM manual_rejects r
+               JOIN files f ON f.id = r.file_id
+               JOIN family_members fm ON fm.file_id = f.id
+               LEFT JOIN families fam ON fam.id = fm.family_id
+               LEFT JOIN files k ON k.id = fam.keeper_file
+              WHERE f.state = 'present'
+              ORDER BY fm.file_id, fm.rowid",
+        )?;
+        let mut out = RejectedMemberships::new();
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (file, family, keeper) = row?;
+            out.entry(file).or_default().push((family, keeper));
+        }
+        Ok(out)
+    }
+
     pub fn plan_rows_scoped(
         &self,
         family: Option<i64>,
@@ -1271,6 +1313,36 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Every file that belongs to a protected series (a pixel-shift set),
+    /// with the kind of that series. One photograph stored as several files:
+    /// no plan, mark or move may take one of them away (DESIGN §11.5).
+    pub fn protected_series_files(&self) -> Result<std::collections::HashMap<i64, String>> {
+        let mut st = self.conn.prepare(
+            "SELECT m.file_id, s.kind FROM series_members m
+               JOIN series s ON s.id = m.series_id
+              WHERE s.protected <> 0",
+        )?;
+        let rows = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// The kind of the protected series this file belongs to, if any.
+    pub fn protected_series_of(&self, file_id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT s.kind FROM series_members m
+                   JOIN series s ON s.id = m.series_id
+                  WHERE m.file_id = ?1 AND s.protected <> 0
+                  LIMIT 1",
+                [file_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn insert_series_member(
         &self,
         series_id: i64,
@@ -1287,6 +1359,11 @@ impl Db {
         Ok(())
     }
 }
+
+/// How many frames of a series are still in the archive.
+const LIVE_MEMBERS: &str = "SELECT COUNT(*) FROM series_members m
+     JOIN files lf ON lf.id = m.file_id
+    WHERE m.series_id = series.id AND lf.state = 'present'";
 
 #[derive(Debug, Clone)]
 pub struct SeriesMemberRow {
@@ -1323,18 +1400,25 @@ pub struct SeriesRow {
 }
 
 impl Db {
+    /// Bursts that still hold at least two frames in the archive.
+    ///
+    /// Series are built once and nobody rebuilds them after a move, so a
+    /// burst of twenty-eight frames with fourteen already in quarantine is
+    /// still twenty-eight rows here. What is gone is not a frame of the
+    /// burst any more, and a burst of one frame is no burst at all.
     pub fn series_count(&self) -> Result<i64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM series", [], |r| r.get(0))?)
+        Ok(self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM series WHERE ({LIVE_MEMBERS}) >= 2"),
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn series_list(&self, limit: i64, offset: i64) -> Result<Vec<SeriesRow>> {
-        let mut st = self.conn.prepare(
-            "SELECT id FROM series ORDER BY (
-                 SELECT COUNT(*) FROM series_members m WHERE m.series_id = series.id
-             ) DESC, started_at LIMIT ?1 OFFSET ?2",
-        )?;
+        let mut st = self.conn.prepare(&format!(
+            "SELECT id FROM series WHERE ({LIVE_MEMBERS}) >= 2
+              ORDER BY ({LIVE_MEMBERS}) DESC, started_at LIMIT ?1 OFFSET ?2"
+        ))?;
         let ids = st
             .query_map(params![limit, offset], |r| r.get::<_, i64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1387,6 +1471,11 @@ impl Db {
                LEFT JOIN family_members fm ON fm.file_id = sm.file_id
                LEFT JOIN families fa ON fa.id = fm.family_id
               WHERE sm.series_id = ?1
+                -- Only what is still in the archive. A frame already moved
+                -- to quarantine is not something to choose between, and
+                -- showing it with its old path and buttons invites a mark
+                -- on a file that is not there.
+                AND f.state = 'present'
               -- Shooting order, not quality order. A burst read out of
               -- sequence makes the subject jump back and forth, and the one
               -- frame the user is looking for could be anywhere. The rank
@@ -1416,6 +1505,15 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut members = members;
+        // Ranks were stored against every frame of the burst as it was
+        // built. Counted again over the frames that remain, so the best one
+        // left reads as first rather than as fourth of twenty-eight.
+        let mut by_rank: Vec<usize> = (0..members.len()).collect();
+        by_rank.sort_by_key(|&i| (members[i].rank, members[i].file_id));
+        for (rank, i) in by_rank.into_iter().enumerate() {
+            members[i].rank = rank as i64;
+        }
 
         Ok(Some(SeriesRow {
             id,

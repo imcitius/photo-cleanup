@@ -168,6 +168,80 @@ fn a_copy_goes_to_quarantine_comes_back_and_only_then_can_be_deleted() {
     assert!(cli.archive.join("frame.xmp").exists());
 }
 
+/// The command line answers about a pixel-shift set the way the web plan
+/// does: a mark left on one of its frames — by any caller, from any
+/// version — is refused with its reason, and nothing of the set moves.
+#[test]
+fn plan_and_apply_never_thin_a_pixel_shift_set() {
+    let cli = Cli::new();
+    cli.photo("frame.jpg", 90);
+    let copy = cli.photo("frame copy.jpg", 90);
+    let shift: Vec<PathBuf> = (0..4u8)
+        .map(|i| cli.photo(&format!("DSC0{i}.ARW.jpg"), 10 + i * 30))
+        .collect();
+    let bytes: Vec<Vec<u8>> = shift.iter().map(|p| std::fs::read(p).unwrap()).collect();
+    cli.run(&[
+        "index",
+        "--root",
+        cli.archive.to_str().unwrap(),
+        "--min-size",
+        "0",
+    ]);
+    cli.run(&["families", "build"]);
+    {
+        let db = pc_db::Db::open(&cli.db).unwrap();
+        let run = db.start_run(&[], "test").unwrap();
+        let set = db
+            .insert_series("pixel-shift", Some(1), None, None, true, run)
+            .unwrap();
+        for (rank, p) in shift.iter().enumerate() {
+            let id: i64 = db
+                .conn
+                .query_row(
+                    "SELECT id FROM files WHERE path=?1",
+                    [p.display().to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            db.insert_series_member(set, id, rank as i64 + 1, 0.0, "")
+                .unwrap();
+            if rank == 2 {
+                // A stale mark, straight into the table.
+                db.conn
+                    .execute("INSERT INTO manual_rejects VALUES(?1, 1)", [id])
+                    .unwrap();
+            }
+        }
+    }
+
+    let plan = cli.said(&["plan", "--show-refusals"]);
+    let (moving, refused) = plan.split_once("Protected from moving").expect(&plan);
+    assert!(moving.contains("To move: 1 file"), "{plan}");
+    assert!(moving.contains("frame copy.jpg"), "{plan}");
+    assert!(!moving.contains("DSC02"), "{plan}");
+    let line = refused
+        .lines()
+        .find(|l| l.contains("DSC02.ARW.jpg"))
+        .unwrap_or_else(|| panic!("{plan}"));
+    assert!(line.contains("pixel-shift"), "{plan}");
+
+    // Windows refuses every move from the command line (el-usdqi D4).
+    #[cfg(unix)]
+    {
+        cli.run(&["apply", "--yes"]);
+        assert!(!copy.exists(), "копия не уехала");
+        assert_eq!(
+            quarantined(&cli.archive),
+            vec!["frame copy.jpg".to_string()]
+        );
+        for (p, b) in shift.iter().zip(&bytes) {
+            assert_eq!(&std::fs::read(p).unwrap(), b, "{}", p.display());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (copy, bytes);
+}
+
 // Needs a move to succeed; Windows refuses every move (el-usdqi D4).
 #[cfg(unix)]
 #[test]

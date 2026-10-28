@@ -510,12 +510,14 @@ pub(crate) fn moved_bytes(moved: &[pc_db::Moved]) -> u64 {
         .sum()
 }
 
-/// The journal's row for a photograph refused as in use: begun and closed
-/// as failed at once, with no manifest, no destination, no size — it claims
-/// nothing was moved and nothing is owned, so neither undo, reconciliation
-/// nor purge ever acts on it. The words returned are the refusal; a journal
-/// that does not take the row is said too, never passed over in silence.
-pub(crate) fn record_in_use(db: &Db, run_id: i64, c: &Candidate, why: String) -> String {
+/// The journal's row for a photograph refused before anything was opened
+/// for its move — held by another program, or a frame of a protected
+/// pixel-shift set: begun and closed as failed at once, with no manifest,
+/// no destination, no size — it claims nothing was moved and nothing is
+/// owned, so neither undo, reconciliation nor purge ever acts on it. The
+/// words returned are the refusal; a journal that does not take the row is
+/// said too, never passed over in silence, and the refusal stands either way.
+pub(crate) fn record_refusal(db: &Db, run_id: i64, c: &Candidate, why: String) -> String {
     let refused = [(c.path.clone(), why.clone())];
     let recorded = db
         .journal_begin(&pc_db::NewJournalEntry {
@@ -560,6 +562,17 @@ pub fn quarantine_file(
     let src = Path::new(&c.path);
     let keeper = Path::new(&c.keeper_path);
 
+    // A frame of a pixel-shift set never moves, whichever plan carried it
+    // here — one made before the set was found, or by a caller that did not
+    // ask (DESIGN §11.5). Asked again right before the move; a question
+    // that cannot be answered stops the move. The refusal is written down
+    // like every other one (AGENTS.md: each refusal recorded with its
+    // reason).
+    if let Some(kind) = db.protected_series_of(c.file_id)? {
+        let why = pc_family::plan::protected_series_refusal(&kind);
+        return Ok(Filed::refused(record_refusal(db, run_id, c, why)));
+    }
+
     // The photograph is opened before it is checked and stays open until it
     // moves: the check reads this object, and the move is bound to it — not
     // to whatever bears the name by then (el-3wizg).
@@ -577,7 +590,7 @@ pub fn quarantine_file(
             // it is written down (el-61ar8 §3.2 P3a): a row that failed,
             // with the reason, naming no destination and moving nothing.
             if e.downcast_ref::<crate::InUse>().is_some() {
-                return Ok(Filed::refused(record_in_use(db, run_id, c, why)));
+                return Ok(Filed::refused(record_refusal(db, run_id, c, why)));
             }
             return Ok(Filed::refused(why));
         }
@@ -955,6 +968,120 @@ mod tests {
             manual: true,
             group_keeper: String::new(),
         }
+    }
+
+    /// A plan made before the set was recognised, or by any caller that
+    /// did not ask, still cannot take a frame out of a pixel-shift set: the
+    /// move itself refuses, and the bytes stay where they were.
+    #[test]
+    fn a_frame_of_a_pixel_shift_set_never_moves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("archive");
+        fs::create_dir_all(&dir).unwrap();
+        let frames: Vec<_> = (1..=4)
+            .map(|i| {
+                let p = dir.join(format!("DSC0{i}.ARW"));
+                fs::write(&p, vec![i as u8; 4096 + i]).unwrap();
+                p
+            })
+            .collect();
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
+        let cands: Vec<_> = frames
+            .iter()
+            .map(|p| one_manual_candidate(&db, run, p))
+            .collect();
+        let set = db
+            .insert_series("pixel-shift", Some(1), None, None, true, run)
+            .unwrap();
+        for (rank, c) in cands.iter().enumerate() {
+            db.insert_series_member(set, c.file_id, rank as i64 + 1, 0.0, "")
+                .unwrap();
+        }
+
+        let filed = quarantine_file(&db, run, &cands[1], None).unwrap();
+        assert_eq!(filed.outcome, FileOutcome::Refused);
+        assert!(filed.why.contains("pixel-shift"), "{}", filed.why);
+        assert_eq!(fs::read(&frames[1]).unwrap(), vec![2u8; 4098]);
+        assert!(!dir.join(pc_core::QUARANTINE_DIR).exists());
+        assert!(db.journal_quarantined(None).unwrap().is_empty());
+        // The refusal is written down with its reason, and the row claims
+        // nothing: no destination, no list, no size, nothing to undo.
+        let entry = db.journal_entry(1).unwrap().expect("the refusal's row");
+        assert_eq!(entry.status, JournalStatus::Failed);
+        assert_eq!(entry.target_id, Some(cands[1].file_id));
+        assert_eq!(entry.src, cands[1].path);
+        assert_eq!(entry.dst, None);
+        assert!(entry.manifest.is_empty());
+        assert_eq!((entry.size, entry.file_count), (0, 0));
+        let events = db.journal_events(1).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.text == filed.why && e.text.contains("pixel-shift")),
+            "{events:?}"
+        );
+        assert!(crate::undo(&db, 1).is_err());
+
+        // The batch path writes the same row for each refusal it meets.
+        let report = apply(&db, run, &cands[2..3], None).unwrap();
+        assert_eq!(report.refused.len(), 1, "{report:?}");
+        assert!(report.refused[0].1.contains("pixel-shift"));
+        let entry = db
+            .journal_entry(2)
+            .unwrap()
+            .expect("the batch refusal's row");
+        assert_eq!(entry.status, JournalStatus::Failed);
+        assert_eq!(entry.target_id, Some(cands[2].file_id));
+        assert_eq!(fs::read(&frames[2]).unwrap(), vec![3u8; 4099]);
+
+        // The same file outside a protected set moves as before.
+        db.conn
+            .execute("UPDATE series SET protected = 0 WHERE id = ?1", [set])
+            .unwrap();
+        assert_eq!(
+            quarantine_file(&db, run, &cands[1], None).unwrap().outcome,
+            FileOutcome::Moved
+        );
+        assert!(!frames[1].exists());
+    }
+
+    /// A journal that cannot take the row does not turn the refusal into a
+    /// move or an error that hides it: the frame stays, and the words say
+    /// both the refusal and that it went unrecorded.
+    #[test]
+    fn a_pixel_shift_refusal_stands_when_the_journal_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("archive");
+        fs::create_dir_all(&dir).unwrap();
+        let frame = dir.join("DSC07311.ARW");
+        fs::write(&frame, vec![7u8; 6151]).unwrap();
+        let side = dir.join("DSC07311.xmp");
+        fs::write(&side, b"synthetic edits 7311").unwrap();
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        let run = db.start_run(&[dir.display().to_string()], "test").unwrap();
+        let c = one_manual_candidate(&db, run, &frame);
+        let set = db
+            .insert_series("pixel-shift", Some(1), None, None, true, run)
+            .unwrap();
+        db.insert_series_member(set, c.file_id, 2, 0.0, "").unwrap();
+        db.conn
+            .execute_batch("ALTER TABLE journal RENAME TO journal_held")
+            .unwrap();
+
+        let filed = quarantine_file(&db, run, &c, None).unwrap();
+
+        assert_eq!(filed.outcome, FileOutcome::Refused);
+        assert!(filed.why.contains("pixel-shift"), "{}", filed.why);
+        assert!(
+            filed.why.contains("journal did not take the record")
+                || filed.why.contains("журнал не принял запись"),
+            "{}",
+            filed.why
+        );
+        assert_eq!(fs::read(&frame).unwrap(), vec![7u8; 6151]);
+        assert_eq!(fs::read(&side).unwrap(), b"synthetic edits 7311");
+        assert!(!dir.join(pc_core::QUARANTINE_DIR).exists());
     }
 
     #[test]
